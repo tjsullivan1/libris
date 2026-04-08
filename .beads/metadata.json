@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "libris",
+  "project_id": "b98edb25-755c-4d9b-99f8-3816494ba084"
+}
