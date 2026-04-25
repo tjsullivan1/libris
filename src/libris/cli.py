@@ -4,7 +4,7 @@ import re
 import time
 from pathlib import Path
 from .api import GoogleBooksClient, Book
-from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book
+from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates
 from .config import get_vault_path, set_config
 
 app = typer.Typer()
@@ -236,3 +236,31 @@ def enrich(filename: str = typer.Argument(None, help="Name of the markdown file 
 
 if __name__ == "__main__":
     app()
+
+
+@app.command()
+def duplicates():
+    """Find and report duplicate books in the vault."""
+    vault_path = get_vault_path()
+    groups = find_duplicates(vault_path)
+
+    if not groups:
+        typer.echo("No duplicates found.")
+        return
+
+    typer.echo(f"Found {len(groups)} group(s) of duplicates:\n")
+    for i, group in enumerate(groups, 1):
+        typer.echo(f"Group {i}:")
+        for path in group:
+            fm = read_frontmatter(path)
+            title = fm.get("title", "Unknown") if fm else "Unknown"
+            isbn = fm.get("isbn") if fm else None
+            gid = fm.get("google_books_id") if fm else None
+            details = []
+            if isbn:
+                details.append(f"ISBN: {isbn}")
+            if gid:
+                details.append(f"Google ID: {gid}")
+            detail_str = f" ({', '.join(details)})" if details else ""
+            typer.echo(f"  - {path.name}{detail_str}")
+        typer.echo()

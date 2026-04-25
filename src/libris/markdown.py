@@ -160,6 +160,69 @@ _BOOK_TO_FRONTMATTER = {
 }
 
 
+def find_duplicates(vault_path: Path) -> list[list[Path]]:
+    """Find groups of duplicate book notes by title, ISBN, or Google Books ID.
+
+    Returns a list of groups where each group contains two or more paths
+    that share at least one matching identifier.
+    """
+    books = list_books(vault_path)
+    file_data: list[tuple[Path, Dict[str, Any]]] = []
+    for p in books:
+        fm = read_frontmatter(p)
+        if fm is not None:
+            file_data.append((p, fm))
+
+    # Build groups keyed by each identifier type.
+    # key -> set of indices into file_data
+    groups_by_key: Dict[str, set[int]] = {}
+    for idx, (path, fm) in enumerate(file_data):
+        title = fm.get("title")
+        if title and isinstance(title, str):
+            key = f"title:{title.strip().lower()}"
+            groups_by_key.setdefault(key, set()).add(idx)
+
+        isbn = fm.get("isbn")
+        if isbn:
+            key = f"isbn:{str(isbn).strip()}"
+            groups_by_key.setdefault(key, set()).add(idx)
+
+        gid = fm.get("google_books_id")
+        if gid:
+            key = f"gid:{str(gid).strip()}"
+            groups_by_key.setdefault(key, set()).add(idx)
+
+    # Union-find to merge overlapping groups
+    parent = list(range(len(file_data)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for members in groups_by_key.values():
+        if len(members) < 2:
+            continue
+        it = iter(members)
+        first = next(it)
+        for other in it:
+            union(first, other)
+
+    # Collect final groups with 2+ members
+    clusters: Dict[int, list[Path]] = {}
+    for idx, (path, _) in enumerate(file_data):
+        root = find(idx)
+        clusters.setdefault(root, []).append(path)
+
+    return [sorted(group) for group in clusters.values() if len(group) >= 2]
+
+
 def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
     """Read and return the frontmatter dict from a markdown file, or None."""
     content = file_path.read_text(encoding="utf-8")
