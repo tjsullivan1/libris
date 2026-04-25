@@ -23,24 +23,40 @@ Set the directory where your book notes will be stored.
 libris config --vault ~/Documents/ObsidianVault/Books
 ```
 
-### 2. Search and Add a Book
+### 2. Search for Books
+Search the Google Books catalog without adding anything to your vault. You can search by a general query, or narrow results by author, title, or ISBN:
+```bash
+# General search
+libris search "The Great Gatsby"
+
+# Search by author
+libris search --author "Frank Herbert"
+
+# Search by title
+libris search --title "Dune"
+
+# Search by ISBN
+libris search --isbn 9780441013593
+```
+
+### 3. Add a Book
 ```bash
 libris add "The Great Gatsby"
 ```
 Follow the interactive prompt to select the correct book.
 
-### 3. Update Reading Status
+### 4. Update Reading Status
 ```bash
 libris status
 ```
 Select a book from your vault and update its status.
 
-### 4. List Books
+### 5. List Books
 ```bash
 libris list
 ```
 
-### 5. Find Duplicate Books
+### 6. Find Duplicate Books
 Scan your vault for duplicate book notes matched by title, ISBN, or Google Books ID.
 ```bash
 libris duplicates
