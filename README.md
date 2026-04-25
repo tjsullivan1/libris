@@ -46,6 +46,25 @@ Scan your vault for duplicate book notes matched by title, ISBN, or Google Books
 libris duplicates
 ```
 
+### 6. Audible Integration
+Connect your Audible account to sync your audiobook library.
+
+```bash
+# Authenticate with Audible (opens your browser)
+libris audible login
+
+# Check authentication status
+libris audible status
+
+# Log out and deregister the device
+libris audible logout
+```
+
+You can specify a marketplace locale during login:
+```bash
+libris audible login --locale uk
+```
+
 ## Schema
 Books are saved as Markdown files with the following frontmatter:
 - `title`

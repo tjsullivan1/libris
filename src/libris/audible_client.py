@@ -59,6 +59,8 @@ class AudibleClient:
                 response_groups=LIBRARY_RESPONSE_GROUPS,
                 sort_by="-PurchaseDate",
             )
+        # Persist any refreshed tokens so the auth file stays current
+        self.auth.to_file(filename=str(get_auth_file()))
         return [self._parse_book(item) for item in library.get("items", [])]
 
     def _parse_book(self, item: dict) -> AudibleBook:

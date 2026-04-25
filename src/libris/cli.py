@@ -1,13 +1,19 @@
+import webbrowser
+
 import typer
 import questionary
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from .api import GoogleBooksClient, Book
 from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates
 from .config import get_vault_path, set_config
+from .audible_client import get_auth_file, is_authenticated, get_locale
 
 app = typer.Typer()
+audible_app = typer.Typer(help="Audible integration commands.")
+app.add_typer(audible_app, name="audible")
 
 @app.command()
 def status():
@@ -233,6 +239,107 @@ def enrich(filename: str = typer.Argument(None, help="Name of the markdown file 
         typer.echo(f"Enriched: {filename}")
     else:
         typer.echo(f"{filename} already has all available data.")
+
+
+@audible_app.command()
+def login(
+    locale: str = typer.Option(None, "--locale", help="Audible marketplace country code (e.g. us, uk, de)"),
+):
+    """Authenticate with Audible via your web browser."""
+    import audible
+
+    auth_file = get_auth_file()
+    if auth_file.exists():
+        typer.echo("Already authenticated. Run 'libris audible logout' first to re-authenticate.")
+        return
+
+    effective_locale = locale or get_locale()
+
+    def login_url_callback(url: str) -> str:
+        typer.echo("\nOpening your browser for Audible login...")
+        typer.echo(f"If the browser doesn't open, visit this URL:\n{url}\n")
+        webbrowser.open(url)
+        typer.echo(
+            "After logging in, your browser will show an error page (this is expected).\n"
+            "Copy the full URL from your browser's address bar and paste it below."
+        )
+        return input("Paste the URL here: ").strip()
+
+    try:
+        auth = audible.Authenticator.from_login_external(
+            locale=effective_locale,
+            login_url_callback=login_url_callback,
+        )
+    except Exception as e:
+        typer.echo(f"Authentication failed: {e}")
+        raise typer.Exit(code=1)
+
+    auth_file.parent.mkdir(parents=True, exist_ok=True)
+    auth.to_file(filename=str(auth_file))
+
+    if locale:
+        set_config("audible_locale", locale)
+
+    device_name = auth.device_info.get("device_name", "Unknown device") if auth.device_info else "Unknown device"
+    typer.echo(f"Successfully authenticated with Audible! Device: {device_name}")
+
+
+@audible_app.command()
+def logout():
+    """Deregister Audible device and remove authentication."""
+    import audible
+
+    auth_file = get_auth_file()
+    if not auth_file.exists():
+        typer.echo("Not currently authenticated.")
+        return
+
+    try:
+        auth = audible.Authenticator.from_file(str(auth_file))
+        auth.refresh_access_token()
+        auth.deregister_device()
+        device_name = auth.device_info.get("device_name", "device") if auth.device_info else "device"
+        typer.echo(f"Deregistered {device_name}.")
+    except Exception as e:
+        typer.echo(f"Warning: Could not deregister device: {e}")
+        typer.echo("Removing local auth file anyway.")
+
+    auth_file.unlink(missing_ok=True)
+    typer.echo("Logged out of Audible.")
+
+
+@audible_app.command(name="status")
+def audible_status():
+    """Show current Audible authentication status."""
+    import audible
+
+    auth_file = get_auth_file()
+    if not auth_file.exists():
+        typer.echo("Not authenticated. Run 'libris audible login' to connect your account.")
+        return
+
+    try:
+        auth = audible.Authenticator.from_file(str(auth_file))
+    except Exception as e:
+        typer.echo(f"Error reading auth file: {e}")
+        return
+
+    typer.echo("Audible: Authenticated")
+    typer.echo(f"  Locale: {auth.locale.country_code if auth.locale else get_locale()}")
+
+    if auth.device_info:
+        typer.echo(f"  Device: {auth.device_info.get('device_name', 'Unknown')}")
+
+    if auth.expires:
+        expires_dt = datetime.fromtimestamp(auth.expires, tz=timezone.utc)
+        now = datetime.now(tz=timezone.utc)
+        if expires_dt > now:
+            remaining = expires_dt - now
+            minutes = int(remaining.total_seconds() // 60)
+            typer.echo(f"  Token expires in: {minutes} min")
+        else:
+            typer.echo("  Token: Expired (will auto-refresh on next use)")
+
 
 if __name__ == "__main__":
     app()
