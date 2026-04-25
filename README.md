@@ -1,6 +1,6 @@
 # Libris
 
-A simple CLI tool to track your reading list in Obsidian.
+A simple CLI tool to track your reading list in Obsidian. The name comes from the Latin expression "Ex Libris" (from the books of). 
 
 ## Features
 - Search books using the Google Books API.
