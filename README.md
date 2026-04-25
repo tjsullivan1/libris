@@ -40,6 +40,12 @@ Select a book from your vault and update its status.
 libris list
 ```
 
+### 5. Find Duplicate Books
+Scan your vault for duplicate book notes matched by title, ISBN, or Google Books ID.
+```bash
+libris duplicates
+```
+
 ## Schema
 Books are saved as Markdown files with the following frontmatter:
 - `title`
