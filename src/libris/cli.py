@@ -70,6 +70,43 @@ def list_cmd(
         typer.echo(f"Scan time: {elapsed * 1000:.2f} ms")
 
 @app.command()
+def search(
+    query: str = typer.Argument(..., help="Search term"),
+    author: bool = typer.Option(False, "--author", "-a", help="Search by author"),
+    title: bool = typer.Option(False, "--title", "-t", help="Search by title"),
+    isbn: bool = typer.Option(False, "--isbn", "-i", help="Search by ISBN"),
+):
+    """Search for books by author, title, or ISBN and display results."""
+    if author:
+        search_query = f"inauthor:{query}"
+    elif title:
+        search_query = f"intitle:{query}"
+    elif isbn:
+        search_query = f"isbn:{query}"
+    else:
+        search_query = query
+
+    client = GoogleBooksClient()
+    books = client.search(search_query)
+
+    if not books:
+        typer.echo("No books found.")
+        return
+
+    typer.echo(f"Found {len(books)} result(s):\n")
+    for book in books:
+        authors_str = ", ".join(book.authors) if book.authors else "Unknown"
+        typer.echo(f"  Title:     {book.title}")
+        typer.echo(f"  Author(s): {authors_str}")
+        if book.isbn:
+            typer.echo(f"  ISBN:      {book.isbn}")
+        if book.published_date:
+            typer.echo(f"  Published: {book.published_date}")
+        if book.page_count:
+            typer.echo(f"  Pages:     {book.page_count}")
+        typer.echo()
+
+@app.command()
 def add(query: str = typer.Argument(..., help="Title, author, or ISBN to search for")):
     """Search for a book and add it to your Obsidian vault."""
     client = GoogleBooksClient()
