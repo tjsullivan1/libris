@@ -31,6 +31,33 @@ def test_config_vault_path(tmp_path):
     assert result.exit_code == 0
     assert "API key: *********-key" in result.output
 
+def test_config_vault_path_writes_legacy_and_new_keys(tmp_path):
+    from libris.config import get_config_file
+
+    vault_path = tmp_path / "my_vault"
+    result = runner.invoke(app, ["config", "--vault", str(vault_path)])
+
+    assert result.exit_code == 0
+    config_data = yaml.safe_load(get_config_file().read_text(encoding="utf-8"))
+    assert config_data["book_vault"] == str(vault_path.resolve())
+    assert config_data["vault_path"] == str(vault_path.resolve())
+
+
+def test_config_command_reads_legacy_vault_key(tmp_path):
+    from libris.config import get_config_file
+
+    legacy_vault = tmp_path / "legacy_vault"
+    legacy_vault.mkdir()
+    get_config_file().write_text(
+        yaml.safe_dump({"vault_path": str(legacy_vault.resolve())}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert f"Current vault path: {legacy_vault.resolve()}" in result.output
+
 def test_cleanup_command(tmp_path):
     # Mock vault path
     vault_path = tmp_path / "my_vault"

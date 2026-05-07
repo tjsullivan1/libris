@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 from typing import Optional
 
+LEGACY_VAULT_KEY = "vault_path"
+BOOK_VAULT_KEY = "book_vault"
+
 def get_config_dir() -> Path:
     env_config_dir = os.environ.get("LIBRIS_CONFIG_DIR")
     if env_config_dir:
@@ -27,9 +30,15 @@ def set_config(key: str, value: str):
     with open(get_config_file(), "w") as f:
         yaml.dump(config, f)
 
+def set_book_vault_path(path: Path):
+    resolved = str(path.expanduser().resolve())
+    set_config(BOOK_VAULT_KEY, resolved)
+    # Keep legacy key for backward compatibility with existing configs.
+    set_config(LEGACY_VAULT_KEY, resolved)
+
 def get_vault_path() -> Path:
     config = get_config()
-    path_str = config.get("vault_path")
+    path_str = config.get(BOOK_VAULT_KEY) or config.get(LEGACY_VAULT_KEY)
     if not path_str:
         return Path(".").resolve()
     return Path(path_str).expanduser().resolve()
@@ -37,3 +46,11 @@ def get_vault_path() -> Path:
 def get_api_key() -> Optional[str]:
     config = get_config()
     return config.get("google_books_api_key")
+
+def get_obsidian_vault_root() -> Optional[Path]:
+    """Get the Obsidian vault root path, or None if not configured."""
+    config = get_config()
+    path_str = config.get("obsidian_vault_root")
+    if not path_str:
+        return None
+    return Path(path_str).expanduser().resolve()

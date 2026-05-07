@@ -7,8 +7,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from .api import GoogleBooksClient, Book
-from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates
-from .config import get_vault_path, set_config
+from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates, rename_book_file
+from .config import get_vault_path, set_config, get_obsidian_vault_root, set_book_vault_path
 from .audible_client import get_auth_file, is_authenticated, get_locale
 
 app = typer.Typer()
@@ -146,6 +146,7 @@ def add(query: str = typer.Argument(..., help="Title, author, or ISBN to search 
 @app.command()
 def config(
     vault_path: str = typer.Option(None, "--vault", help="Set the vault path"),
+    obsidian_vault: str = typer.Option(None, "--obsidian-vault", help="Set the Obsidian vault root path (for wikilink updates)"),
     api_key: str = typer.Option(None, "--api-key", help="Set the Google Books API key")
 ):
     """Configure libris settings."""
@@ -154,16 +155,30 @@ def config(
         if not p.exists():
             typer.echo(f"Warning: Path {p} does not exist. Creating it...")
             p.mkdir(parents=True, exist_ok=True)
-        set_config("vault_path", str(p))
+        set_book_vault_path(p)
         typer.echo(f"Vault path set to: {p}")
-    
+
+    if obsidian_vault:
+        p = Path(obsidian_vault).expanduser().resolve()
+        if not p.exists():
+            typer.echo(f"Warning: Path {p} does not exist.")
+            raise typer.Exit(code=1)
+        if not p.is_dir():
+            typer.echo(f"Error: Obsidian vault root must be a directory: {p}")
+            raise typer.Exit(code=1)
+        set_config("obsidian_vault_root", str(p))
+        typer.echo(f"Obsidian vault root set to: {p}")
+
     if api_key:
         set_config("google_books_api_key", api_key)
         typer.echo("API key set successfully.")
 
-    if not vault_path and not api_key:
+    if not vault_path and not api_key and not obsidian_vault:
         from .config import get_api_key
         typer.echo(f"Current vault path: {get_vault_path()}")
+        obsidian_root = get_obsidian_vault_root()
+        if obsidian_root:
+            typer.echo(f"Obsidian vault root: {obsidian_root}")
         key = get_api_key()
         if key:
             typer.echo(f"API key: {'*' * (len(key) - 4)}{key[-4:]}")
@@ -171,7 +186,9 @@ def config(
             typer.echo("API key: Not set")
 
 @app.command()
-def clean():
+def clean(
+    rename: bool = typer.Option(False, "--rename", help="Rename file to canonical Title - Author.md format"),
+):
     """Select a specific book to clean its frontmatter."""
     vault_path = get_vault_path()
     books = list_books(vault_path)
@@ -196,8 +213,16 @@ def clean():
     else:
         typer.echo(f"{selected_file_name} is already up to date or invalid.")
 
+    if rename:
+        vault_root = get_obsidian_vault_root() or vault_path
+        new_path = rename_book_file(selected_file, vault_root)
+        if new_path:
+            typer.echo(f"Renamed: {selected_file_name} → {new_path.name}")
+
 @app.command()
-def cleanup():
+def cleanup(
+    rename: bool = typer.Option(False, "--rename", help="Rename files to canonical Title - Author.md format"),
+):
     """Ensure all books in the vault have the correct frontmatter fields."""
     vault_path = get_vault_path()
     books = list_books(vault_path)
@@ -216,6 +241,19 @@ def cleanup():
         typer.echo("All books are already up to date.")
     else:
         typer.echo(f"Finished. Updated {updated_count} books.")
+
+    if rename:
+        vault_root = get_obsidian_vault_root() or vault_path
+        renamed_count = 0
+        for book_file in list_books(vault_path):
+            new_path = rename_book_file(book_file, vault_root)
+            if new_path:
+                renamed_count += 1
+                typer.echo(f"Renamed: {book_file.name} → {new_path.name}")
+        if renamed_count:
+            typer.echo(f"Renamed {renamed_count} file(s).")
+        else:
+            typer.echo("No files needed renaming.")
 
 @app.command()
 def enrich(filename: str = typer.Argument(None, help="Name of the markdown file to enrich (e.g. 'My Book.md')")):

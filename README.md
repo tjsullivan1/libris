@@ -56,13 +56,33 @@ Select a book from your vault and update its status.
 libris list
 ```
 
-### 6. Find Duplicate Books
+### 6. Clean Up Book Notes
+Standardize frontmatter and optionally rename files to the canonical `Title - Author.md` format:
+```bash
+# Clean all book frontmatter (title casing, missing fields, etc.)
+libris cleanup
+
+# Also rename files to match Title - Author.md pattern (updates wikilinks)
+libris cleanup --rename
+
+# Clean a single book interactively
+libris clean
+libris clean --rename
+```
+
+### 7. Configure Obsidian Vault Root
+If your book folder is a subdirectory of a larger Obsidian vault, configure the vault root so wikilink updates search the entire vault:
+```bash
+libris config --obsidian-vault ~/Documents/ObsidianVault
+```
+
+### 8. Find Duplicate Books
 Scan your vault for duplicate book notes matched by title, ISBN, or Google Books ID.
 ```bash
 libris duplicates
 ```
 
-### 6. Audible Integration
+### 9. Audible Integration
 Connect your Audible account to sync your audiobook library.
 
 ```bash
