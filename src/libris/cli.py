@@ -7,13 +7,30 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from .api import GoogleBooksClient, Book
-from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates, rename_book_file
+from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates, rename_book_file, RenameResult
 from .config import get_vault_path, set_config, get_obsidian_vault_root, set_book_vault_path
 from .audible_client import get_auth_file, is_authenticated, get_locale
 
 app = typer.Typer()
 audible_app = typer.Typer(help="Audible integration commands.")
 app.add_typer(audible_app, name="audible")
+
+_RENAME_SKIP_MESSAGES = {
+    "missing_title": "missing title in frontmatter",
+    "missing_author": "missing author in frontmatter",
+    "invalid_frontmatter": "invalid or missing frontmatter",
+    "already_canonical": None,  # not an error
+}
+
+
+def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
+    """Return a user-facing message for a skipped rename, or None if already canonical."""
+    if result.status == "collision":
+        return f"Skipped rename for {filename}: target already exists: {result.detail}"
+    msg = _RENAME_SKIP_MESSAGES.get(result.status)
+    if msg is None:
+        return None
+    return f"Skipped rename for {filename}: {msg}"
 
 @app.command()
 def status():
@@ -215,9 +232,13 @@ def clean(
 
     if rename:
         vault_root = get_obsidian_vault_root() or vault_path
-        new_path = rename_book_file(selected_file, vault_root)
-        if new_path:
-            typer.echo(f"Renamed: {selected_file_name} → {new_path.name}")
+        result = rename_book_file(selected_file, vault_root)
+        if result.status == "renamed":
+            typer.echo(f"Renamed: {selected_file_name} → {result.new_path.name}")
+        else:
+            msg = _format_rename_skip(selected_file_name, result)
+            if msg:
+                typer.echo(msg)
 
 @app.command()
 def cleanup(
@@ -245,15 +266,23 @@ def cleanup(
     if rename:
         vault_root = get_obsidian_vault_root() or vault_path
         renamed_count = 0
+        skipped_count = 0
         for book_file in list_books(vault_path):
-            new_path = rename_book_file(book_file, vault_root)
-            if new_path:
+            result = rename_book_file(book_file, vault_root)
+            if result.status == "renamed":
                 renamed_count += 1
-                typer.echo(f"Renamed: {book_file.name} → {new_path.name}")
+                typer.echo(f"Renamed: {book_file.name} → {result.new_path.name}")
+            else:
+                msg = _format_rename_skip(book_file.name, result)
+                if msg:
+                    skipped_count += 1
+                    typer.echo(msg)
         if renamed_count:
             typer.echo(f"Renamed {renamed_count} file(s).")
+        elif skipped_count:
+            typer.echo(f"No files renamed. {skipped_count} file(s) could not be renamed.")
         else:
-            typer.echo("No files needed renaming.")
+            typer.echo("All files already have canonical names.")
 
 @app.command()
 def enrich(filename: str = typer.Argument(None, help="Name of the markdown file to enrich (e.g. 'My Book.md')")):

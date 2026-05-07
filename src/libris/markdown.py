@@ -1,9 +1,10 @@
 import yaml
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import date
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Literal, Optional
 from titlecase import titlecase
 from .api import Book
 
@@ -361,15 +362,49 @@ def update_wikilinks_in_vault(vault_root: Path, old_stem: str, new_stem: str, ex
     return updated_count
 
 
-def rename_book_file(file_path: Path, vault_root: Optional[Path] = None) -> Optional[Path]:
-    """Rename a book file to canonical format and update wikilinks. Returns new path or None."""
-    canonical_name = compute_canonical_filename(file_path)
-    if not canonical_name or canonical_name == file_path.name:
-        return None
+RenameStatus = Literal["renamed", "already_canonical", "missing_title", "missing_author", "invalid_frontmatter", "collision"]
+
+
+@dataclass(frozen=True)
+class RenameResult:
+    """Result of a rename attempt with diagnostic information."""
+    status: RenameStatus
+    new_path: Optional[Path] = None
+    detail: Optional[str] = None
+
+
+def rename_book_file(file_path: Path, vault_root: Optional[Path] = None) -> RenameResult:
+    """Rename a book file to canonical format and update wikilinks."""
+    fm = read_frontmatter(file_path)
+    if not fm:
+        return RenameResult(status="invalid_frontmatter")
+
+    title = fm.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return RenameResult(status="missing_title")
+
+    author = fm.get("author")
+    if isinstance(author, list):
+        author_candidates = author
+    elif isinstance(author, str):
+        author_candidates = [author]
+    else:
+        return RenameResult(status="missing_author")
+
+    first_author = next(
+        (c.strip() for c in author_candidates if isinstance(c, str) and c.strip()),
+        None,
+    )
+    if first_author is None:
+        return RenameResult(status="missing_author")
+
+    canonical_name = sanitize_filename(f"{title.strip()} - {first_author}.md")
+    if canonical_name == file_path.name:
+        return RenameResult(status="already_canonical")
 
     new_path = file_path.parent / canonical_name
     if new_path.exists():
-        return None  # collision — don't overwrite
+        return RenameResult(status="collision", detail=canonical_name)
 
     search_root = vault_root or file_path.parent
     old_stem = file_path.stem
@@ -380,4 +415,4 @@ def rename_book_file(file_path: Path, vault_root: Optional[Path] = None) -> Opti
 
     # Update wikilinks across the vault
     update_wikilinks_in_vault(search_root, old_stem, new_stem, exclude=new_path)
-    return new_path
+    return RenameResult(status="renamed", new_path=new_path)
