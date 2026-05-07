@@ -10,6 +10,7 @@ dependencies = [
     "pytest>=9.0.2",
     "pyyaml>=6.0.3",
     "questionary>=2.1.1",
+    "titlecase>=2.4",
     "typer>=0.24.1",
 ]
 [dependency-groups]
