@@ -339,24 +339,25 @@ def compute_canonical_filename(file_path: Path) -> Optional[str]:
 def update_wikilinks_in_vault(vault_root: Path, old_stem: str, new_stem: str, exclude: Optional[Path] = None) -> int:
     """Update all wikilinks from old_stem to new_stem across the vault. Returns count of files updated."""
     updated_count = 0
-    for md_file in vault_root.rglob("*.md"):
-        if exclude and md_file.resolve() == exclude.resolve():
-            continue
-        # Skip hidden directories (.obsidian, .git, etc.)
-        try:
-            rel = md_file.relative_to(vault_root)
-            if any(part.startswith(".") for part in rel.parts):
+    exclude_resolved = exclude.resolve() if exclude else None
+    for root, dirnames, filenames in os.walk(vault_root):
+        # Skip hidden directories (.obsidian, .git, etc.) before descending into them.
+        dirnames[:] = [dirname for dirname in dirnames if not dirname.startswith(".")]
+        root_path = Path(root)
+        for filename in filenames:
+            if not filename.endswith(".md") or filename.startswith("."):
                 continue
-        except ValueError:
-            continue
-        content = md_file.read_text(encoding="utf-8")
-        new_content = content.replace(f"[[{old_stem}]]", f"[[{new_stem}]]")
-        new_content = new_content.replace(f"[[{old_stem}|", f"[[{new_stem}|")
-        new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
-        new_content = new_content.replace(f"[[{old_stem}^", f"[[{new_stem}^")
-        if new_content != content:
-            md_file.write_text(new_content, encoding="utf-8")
-            updated_count += 1
+            md_file = root_path / filename
+            if exclude_resolved and md_file.resolve() == exclude_resolved:
+                continue
+            content = md_file.read_text(encoding="utf-8")
+            new_content = content.replace(f"[[{old_stem}]]", f"[[{new_stem}]]")
+            new_content = new_content.replace(f"[[{old_stem}|", f"[[{new_stem}|")
+            new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
+            new_content = new_content.replace(f"[[{old_stem}^", f"[[{new_stem}^")
+            if new_content != content:
+                md_file.write_text(new_content, encoding="utf-8")
+                updated_count += 1
     return updated_count
 
 
