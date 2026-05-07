@@ -163,6 +163,9 @@ def config(
         if not p.exists():
             typer.echo(f"Warning: Path {p} does not exist.")
             raise typer.Exit(code=1)
+        if not p.is_dir():
+            typer.echo(f"Error: Obsidian vault root must be a directory: {p}")
+            raise typer.Exit(code=1)
         set_config("obsidian_vault_root", str(p))
         typer.echo(f"Obsidian vault root set to: {p}")
 
