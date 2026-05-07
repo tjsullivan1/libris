@@ -318,9 +318,21 @@ def compute_canonical_filename(file_path: Path) -> Optional[str]:
     author = fm.get("author")
     if not title or not isinstance(title, str):
         return None
-    if not author:
+
+    if isinstance(author, list):
+        author_candidates = author
+    elif isinstance(author, str):
+        author_candidates = [author]
+    else:
         return None
-    first_author = author[0] if isinstance(author, list) else author
+
+    first_author = next(
+        (candidate.strip() for candidate in author_candidates if isinstance(candidate, str) and candidate.strip()),
+        None,
+    )
+    if first_author is None:
+        return None
+
     return sanitize_filename(f"{title} - {first_author}.md")
 
 
