@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .api import GoogleBooksClient, Book
 from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates, rename_book_file
-from .config import get_vault_path, set_config, get_obsidian_vault_root
+from .config import get_vault_path, set_config, get_obsidian_vault_root, set_book_vault_path
 from .audible_client import get_auth_file, is_authenticated, get_locale
 
 app = typer.Typer()
@@ -155,7 +155,7 @@ def config(
         if not p.exists():
             typer.echo(f"Warning: Path {p} does not exist. Creating it...")
             p.mkdir(parents=True, exist_ok=True)
-        set_config("vault_path", str(p))
+        set_book_vault_path(p)
         typer.echo(f"Vault path set to: {p}")
 
     if obsidian_vault:
