@@ -269,6 +269,19 @@ def cleanup(
 
         if rename:
             result = rename_book_file(book_file, vault_root, frontmatter=fm)
+
+            # Offer to enrich when title or author is missing
+            if result.status in ("missing_title", "missing_author"):
+                typer.echo(f"{book_file.name}: {result.status.replace('_', ' ')}")
+                if questionary.confirm(
+                    f"Enrich {book_file.name} from Google Books?",
+                    default=True,
+                ).ask():
+                    if _enrich_interactive(book_file):
+                        # Re-read updated frontmatter and retry rename
+                        _, fm = ensure_frontmatter_fields(book_file)
+                        result = rename_book_file(book_file, vault_root, frontmatter=fm)
+
             if result.status == "renamed":
                 renamed_count += 1
                 typer.echo(f"Renamed: {book_file.name} → {result.new_path.name}")
@@ -290,6 +303,43 @@ def cleanup(
             typer.echo(f"No files renamed. {skipped_count} file(s) could not be renamed.")
         else:
             typer.echo("All files already have canonical names.")
+
+def _enrich_interactive(file_path: Path) -> bool:
+    """Run the interactive enrich flow for a single file. Returns True if enriched."""
+    default_query = file_path.stem
+    query = questionary.text(
+        f"Search query for Google Books ({file_path.name}):",
+        default=default_query,
+    ).ask()
+
+    if not query:
+        return False
+
+    client = GoogleBooksClient()
+    results = client.search(query)
+
+    if not results:
+        typer.echo("No results found on Google Books.")
+        return False
+
+    result_choices = [f"{b.title} by {', '.join(b.authors)}" for b in results]
+    selected_result = questionary.select(
+        "Select the correct match:",
+        choices=result_choices,
+    ).ask()
+
+    if not selected_result:
+        return False
+
+    book = results[result_choices.index(selected_result)]
+
+    if update_frontmatter_from_book(file_path, book):
+        typer.echo(f"Enriched: {file_path.name}")
+        return True
+    else:
+        typer.echo(f"{file_path.name} already has all available data.")
+        return False
+
 
 @app.command()
 def enrich(filename: str = typer.Argument(None, help="Name of the markdown file to enrich (e.g. 'My Book.md')")):
@@ -318,38 +368,7 @@ def enrich(filename: str = typer.Argument(None, help="Name of the markdown file 
         typer.echo(f"File not found: {selected_file}")
         raise typer.Exit(code=1)
 
-    # Default search query: use the filename (minus .md extension)
-    default_query = selected_file.stem
-    query = questionary.text(
-        "Search query for Google Books:",
-        default=default_query,
-    ).ask()
-
-    if not query:
-        return
-
-    client = GoogleBooksClient()
-    results = client.search(query)
-
-    if not results:
-        typer.echo("No results found on Google Books.")
-        return
-
-    result_choices = [f"{b.title} by {', '.join(b.authors)}" for b in results]
-    selected_result = questionary.select(
-        "Select the correct match:",
-        choices=result_choices,
-    ).ask()
-
-    if not selected_result:
-        return
-
-    book = results[result_choices.index(selected_result)]
-
-    if update_frontmatter_from_book(selected_file, book):
-        typer.echo(f"Enriched: {filename}")
-    else:
-        typer.echo(f"{filename} already has all available data.")
+    _enrich_interactive(selected_file)
 
 
 @audible_app.command()
