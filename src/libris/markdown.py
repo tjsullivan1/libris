@@ -110,8 +110,13 @@ def list_books(vault_path: Path):
         if entry.is_file() and entry.name.endswith(".md")
     ]
 
-def ensure_frontmatter_fields(file_path: Path) -> bool:
-    """Ensures that all current fields exist in the note's frontmatter."""
+def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str, Any]]]:
+    """Ensures that all current fields exist in the note's frontmatter.
+
+    Returns a tuple of (updated, frontmatter_dict). The dict is the cleaned
+    frontmatter data (whether or not it was written back), or None if the
+    frontmatter could not be parsed.
+    """
     content = file_path.read_text(encoding="utf-8")
     
     # Use a more robust regex to find the frontmatter block
@@ -121,7 +126,7 @@ def ensure_frontmatter_fields(file_path: Path) -> bool:
         # Fallback for files that might not have a newline after the closing ---
         match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
         if not match:
-            return False
+            return False, None
         
     frontmatter_yaml = match.group(1)
     rest_of_content = match.group(2)
@@ -129,9 +134,9 @@ def ensure_frontmatter_fields(file_path: Path) -> bool:
     try:
         data = yaml.safe_load(frontmatter_yaml)
         if not isinstance(data, dict):
-            return False
+            return False, None
     except Exception:
-        return False
+        return False, None
         
     updated = False
 
@@ -172,9 +177,8 @@ def ensure_frontmatter_fields(file_path: Path) -> bool:
         # Ensure there is exactly one newline before and after the rest of the content
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content.lstrip()}"
         file_path.write_text(new_content, encoding="utf-8")
-        return True
     
-    return False
+    return updated, data
 
 # Maps Book dataclass fields to frontmatter field names.
 _BOOK_TO_FRONTMATTER = {
@@ -373,9 +377,13 @@ class RenameResult:
     detail: Optional[str] = None
 
 
-def rename_book_file(file_path: Path, vault_root: Optional[Path] = None) -> RenameResult:
-    """Rename a book file to canonical format and update wikilinks."""
-    fm = read_frontmatter(file_path)
+def rename_book_file(file_path: Path, vault_root: Optional[Path] = None, frontmatter: Optional[Dict[str, Any]] = None) -> RenameResult:
+    """Rename a book file to canonical format and update wikilinks.
+
+    If frontmatter is provided, it is used directly instead of re-reading
+    the file. This avoids redundant I/O when called after ensure_frontmatter_fields.
+    """
+    fm = frontmatter if frontmatter is not None else read_frontmatter(file_path)
     if not fm:
         return RenameResult(status="invalid_frontmatter")
 

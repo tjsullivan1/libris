@@ -57,7 +57,7 @@ Some existing notes here.
     from libris.markdown import ensure_frontmatter_fields
     
     # Run cleanup
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
     
     content = file_path.read_text()
@@ -68,7 +68,7 @@ Some existing notes here.
     assert "Some existing notes here." in content
     
     # Run again, should not update
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is False
 
 
@@ -80,7 +80,7 @@ def test_ensure_frontmatter_sets_status_read_when_date_finished(tmp_path):
     )
 
     from libris.markdown import ensure_frontmatter_fields
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
     content = file_path.read_text()
@@ -94,7 +94,7 @@ def test_ensure_frontmatter_converts_author_string_to_list(tmp_path):
     )
 
     from libris.markdown import ensure_frontmatter_fields
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
     content = file_path.read_text()
@@ -107,7 +107,7 @@ def test_ensure_frontmatter_fields_tricky_spacing(tmp_path):
     file_path.write_text("--- \ntitle: Tricky\ngoogle_books_id: 456\n--- \nSome content")
     
     from libris.markdown import ensure_frontmatter_fields
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
     
     content = file_path.read_text()
@@ -132,7 +132,7 @@ Rating out of 5: 4
 """)
 
     from libris.markdown import ensure_frontmatter_fields
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
     content = file_path.read_text()
@@ -159,7 +159,7 @@ rating: 5
 """)
 
     from libris.markdown import ensure_frontmatter_fields
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
     content = file_path.read_text()
@@ -365,7 +365,7 @@ def test_ensure_frontmatter_standardizes_title(tmp_path):
     file_path = tmp_path / "caps_book.md"
     file_path.write_text("---\ntitle: THE GREAT GATSBY\ngoogle_books_id: abc\n---\n")
 
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
     content = file_path.read_text()
@@ -384,7 +384,7 @@ def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
         "date_added: null\ndate_started: null\ndate_finished: null\n---\n"
     )
 
-    updated = ensure_frontmatter_fields(file_path)
+    updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is False
 
 

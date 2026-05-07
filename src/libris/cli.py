@@ -225,14 +225,15 @@ def clean(
         return
         
     selected_file = vault_path / selected_file_name
-    if ensure_frontmatter_fields(selected_file):
+    updated, fm = ensure_frontmatter_fields(selected_file)
+    if updated:
         typer.echo(f"Cleaned: {selected_file_name}")
     else:
         typer.echo(f"{selected_file_name} is already up to date or invalid.")
 
     if rename:
         vault_root = get_obsidian_vault_root() or vault_path
-        result = rename_book_file(selected_file, vault_root)
+        result = rename_book_file(selected_file, vault_root, frontmatter=fm)
         if result.status == "renamed":
             typer.echo(f"Renamed: {selected_file_name} → {result.new_path.name}")
         else:
@@ -251,24 +252,23 @@ def cleanup(
     if not books:
         typer.echo("No books found in vault.")
         return
-        
+
+    vault_root = get_obsidian_vault_root() or vault_path if rename else None
+
     updated_count = 0
-    for book_file in books:
-        if ensure_frontmatter_fields(book_file):
+    renamed_count = 0
+    skipped_count = 0
+    for i, book_file in enumerate(books, 1):
+        if i % 100 == 0:
+            typer.echo(f"Processing {i}/{len(books)}...")
+
+        updated, fm = ensure_frontmatter_fields(book_file)
+        if updated:
             updated_count += 1
             typer.echo(f"Updated: {book_file.name}")
-            
-    if updated_count == 0:
-        typer.echo("All books are already up to date.")
-    else:
-        typer.echo(f"Finished. Updated {updated_count} books.")
 
-    if rename:
-        vault_root = get_obsidian_vault_root() or vault_path
-        renamed_count = 0
-        skipped_count = 0
-        for book_file in list_books(vault_path):
-            result = rename_book_file(book_file, vault_root)
+        if rename:
+            result = rename_book_file(book_file, vault_root, frontmatter=fm)
             if result.status == "renamed":
                 renamed_count += 1
                 typer.echo(f"Renamed: {book_file.name} → {result.new_path.name}")
@@ -277,6 +277,13 @@ def cleanup(
                 if msg:
                     skipped_count += 1
                     typer.echo(msg)
+
+    if updated_count == 0:
+        typer.echo("All books are already up to date.")
+    else:
+        typer.echo(f"Finished. Updated {updated_count} books.")
+
+    if rename:
         if renamed_count:
             typer.echo(f"Renamed {renamed_count} file(s).")
         elif skipped_count:
