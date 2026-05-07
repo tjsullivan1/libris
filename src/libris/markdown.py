@@ -49,7 +49,7 @@ _BRACKET_ANNOTATION_PAT = re.compile(r'\s*[\[\{][^\[\]\{\}]*[\]\}]')
 _WHITESPACE_PAT = re.compile(r'\s+')
 
 
-def standardize_title(raw: str) -> str:
+def standardize_title(raw: Optional[str]) -> Optional[str]:
     """Standardize a book title: strip annotations, normalize whitespace, apply title case."""
     if not raw or not isinstance(raw, str):
         return raw
