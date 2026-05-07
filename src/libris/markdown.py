@@ -307,3 +307,63 @@ def update_frontmatter_from_book(file_path: Path, book: Book) -> bool:
         return True
 
     return False
+
+
+def compute_canonical_filename(file_path: Path) -> Optional[str]:
+    """Compute the canonical 'Title - Author.md' filename from frontmatter."""
+    fm = read_frontmatter(file_path)
+    if not fm:
+        return None
+    title = fm.get("title")
+    author = fm.get("author")
+    if not title or not isinstance(title, str):
+        return None
+    if not author:
+        return None
+    first_author = author[0] if isinstance(author, list) else author
+    return sanitize_filename(f"{title} - {first_author}.md")
+
+
+def update_wikilinks_in_vault(vault_root: Path, old_stem: str, new_stem: str, exclude: Optional[Path] = None) -> int:
+    """Update all wikilinks from old_stem to new_stem across the vault. Returns count of files updated."""
+    updated_count = 0
+    for md_file in vault_root.rglob("*.md"):
+        if exclude and md_file.resolve() == exclude.resolve():
+            continue
+        # Skip hidden directories (.obsidian, .git, etc.)
+        try:
+            rel = md_file.relative_to(vault_root)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+        except ValueError:
+            continue
+        content = md_file.read_text(encoding="utf-8")
+        new_content = content.replace(f"[[{old_stem}]]", f"[[{new_stem}]]")
+        new_content = new_content.replace(f"[[{old_stem}|", f"[[{new_stem}|")
+        new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
+        new_content = new_content.replace(f"[[{old_stem}^", f"[[{new_stem}^")
+        if new_content != content:
+            md_file.write_text(new_content, encoding="utf-8")
+            updated_count += 1
+    return updated_count
+
+
+def rename_book_file(file_path: Path, vault_root: Optional[Path] = None) -> Optional[Path]:
+    """Rename a book file to canonical format and update wikilinks. Returns new path or None."""
+    canonical_name = compute_canonical_filename(file_path)
+    if not canonical_name or canonical_name == file_path.name:
+        return None
+
+    new_path = file_path.parent / canonical_name
+    if new_path.exists():
+        return None  # collision — don't overwrite
+
+    # Update wikilinks across the vault
+    search_root = vault_root or file_path.parent
+    old_stem = file_path.stem
+    new_stem = new_path.stem
+    update_wikilinks_in_vault(search_root, old_stem, new_stem, exclude=file_path)
+
+    # Perform the rename
+    file_path.rename(new_path)
+    return new_path

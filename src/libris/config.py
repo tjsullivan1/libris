@@ -37,3 +37,11 @@ def get_vault_path() -> Path:
 def get_api_key() -> Optional[str]:
     config = get_config()
     return config.get("google_books_api_key")
+
+def get_obsidian_vault_root() -> Optional[Path]:
+    """Get the Obsidian vault root path, or None if not configured."""
+    config = get_config()
+    path_str = config.get("obsidian_vault_root")
+    if not path_str:
+        return None
+    return Path(path_str).expanduser().resolve()

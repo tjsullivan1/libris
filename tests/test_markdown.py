@@ -2,7 +2,7 @@ from pathlib import Path
 import time
 from statistics import median
 from libris.api import Book
-from libris.markdown import create_book_note, sanitize_filename, standardize_title, list_books, read_frontmatter, update_frontmatter_from_book
+from libris.markdown import create_book_note, sanitize_filename, standardize_title, list_books, read_frontmatter, update_frontmatter_from_book, compute_canonical_filename, update_wikilinks_in_vault, rename_book_file
 
 def test_sanitize_filename():
     assert sanitize_filename("Title: With Colon") == "Title With Colon"
@@ -386,3 +386,126 @@ def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
 
     updated = ensure_frontmatter_fields(file_path)
     assert updated is False
+
+
+# --- File Rename Tests ---
+
+def test_compute_canonical_filename(tmp_path):
+    f = tmp_path / "old name.md"
+    f.write_text("---\ntitle: The Great Gatsby\nauthor:\n- F. Scott Fitzgerald\n---\n")
+    result = compute_canonical_filename(f)
+    assert result == "The Great Gatsby - F. Scott Fitzgerald.md"
+
+
+def test_compute_canonical_filename_missing_author(tmp_path):
+    f = tmp_path / "no_author.md"
+    f.write_text("---\ntitle: Solo Title\nauthor: null\n---\n")
+    assert compute_canonical_filename(f) is None
+
+
+def test_compute_canonical_filename_missing_title(tmp_path):
+    f = tmp_path / "no_title.md"
+    f.write_text("---\ntitle: null\nauthor:\n- Someone\n---\n")
+    assert compute_canonical_filename(f) is None
+
+
+def test_compute_canonical_filename_sanitizes(tmp_path):
+    f = tmp_path / "bad.md"
+    f.write_text("---\ntitle: 'Title: With Colon'\nauthor:\n- Author\n---\n")
+    result = compute_canonical_filename(f)
+    assert ":" not in result
+    assert result == "Title With Colon - Author.md"
+
+
+def test_update_wikilinks_basic(tmp_path):
+    note = tmp_path / "daily.md"
+    note.write_text("I read [[Old Name]] today and loved it.\n")
+    count = update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
+    assert count == 1
+    assert "[[New Name]]" in note.read_text()
+    assert "[[Old Name]]" not in note.read_text()
+
+
+def test_update_wikilinks_with_alias(tmp_path):
+    note = tmp_path / "note.md"
+    note.write_text("See [[Old Name|that book]] for details.\n")
+    update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
+    assert "[[New Name|that book]]" in note.read_text()
+
+
+def test_update_wikilinks_with_heading(tmp_path):
+    note = tmp_path / "note.md"
+    note.write_text("Check [[Old Name#Chapter 1]] for the quote.\n")
+    update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
+    assert "[[New Name#Chapter 1]]" in note.read_text()
+
+
+def test_update_wikilinks_with_block_ref(tmp_path):
+    note = tmp_path / "note.md"
+    note.write_text("Reference [[Old Name^abc123]] here.\n")
+    update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
+    assert "[[New Name^abc123]]" in note.read_text()
+
+
+def test_update_wikilinks_with_embed(tmp_path):
+    note = tmp_path / "note.md"
+    note.write_text("Embedding: ![[Old Name]]\n")
+    update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
+    assert "![[New Name]]" in note.read_text()
+
+
+def test_update_wikilinks_skips_hidden_dirs(tmp_path):
+    hidden = tmp_path / ".obsidian"
+    hidden.mkdir()
+    note = hidden / "config.md"
+    note.write_text("[[Old Name]] in hidden dir.\n")
+    count = update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
+    assert count == 0
+    assert "[[Old Name]]" in note.read_text()
+
+
+def test_update_wikilinks_excludes_target_file(tmp_path):
+    target = tmp_path / "Old Name.md"
+    target.write_text("Self reference [[Old Name]] should not change.\n")
+    count = update_wikilinks_in_vault(tmp_path, "Old Name", "New Name", exclude=target)
+    assert count == 0
+    assert "[[Old Name]]" in target.read_text()
+
+
+def test_rename_book_file(tmp_path):
+    f = tmp_path / "wrong name.md"
+    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    new_path = rename_book_file(f, tmp_path)
+    assert new_path is not None
+    assert new_path.name == "Dune - Frank Herbert.md"
+    assert new_path.exists()
+    assert not f.exists()
+
+
+def test_rename_book_file_updates_links(tmp_path):
+    book = tmp_path / "wrong name.md"
+    book.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    note = tmp_path / "reading log.md"
+    note.write_text("Currently reading [[wrong name]].\n")
+
+    new_path = rename_book_file(book, tmp_path)
+    assert new_path.name == "Dune - Frank Herbert.md"
+    assert "[[Dune - Frank Herbert]]" in note.read_text()
+
+
+def test_rename_book_file_collision_skips(tmp_path):
+    f = tmp_path / "wrong name.md"
+    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    collision = tmp_path / "Dune - Frank Herbert.md"
+    collision.write_text("---\ntitle: Dune\n---\n")
+
+    result = rename_book_file(f, tmp_path)
+    assert result is None
+    assert f.exists()
+
+
+def test_rename_book_file_already_canonical(tmp_path):
+    f = tmp_path / "Dune - Frank Herbert.md"
+    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    result = rename_book_file(f, tmp_path)
+    assert result is None
