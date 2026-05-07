@@ -390,13 +390,17 @@ def _append_auto_enrich_note(file_path: Path, matched_title: str, original_query
         if isinstance(data, dict):
             tags = data.get("tags")
             if isinstance(tags, str):
-                if "review" not in tags.lower().split():
-                    data["tags"] = f"{tags}, review"
+                # Convert string tag to list (lowercase) and add review
+                tag_list = [t.strip().lower() for t in tags.split(",") if t.strip()]
+                if "review" not in tag_list:
+                    tag_list.append("review")
+                data["tags"] = tag_list
             elif isinstance(tags, list):
-                if "review" not in [t.lower() for t in tags if isinstance(t, str)]:
+                existing = [t.lower() for t in tags if isinstance(t, str)]
+                if "review" not in existing:
                     tags.append("review")
             else:
-                data["tags"] = "review"
+                data["tags"] = ["review"]
             new_fm = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
             rest = match.group(2)
             content = f"---\n{new_fm}\n---\n{rest.lstrip()}"
