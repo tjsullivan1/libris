@@ -370,12 +370,13 @@ def rename_book_file(file_path: Path, vault_root: Optional[Path] = None) -> Opti
     if new_path.exists():
         return None  # collision — don't overwrite
 
-    # Update wikilinks across the vault
     search_root = vault_root or file_path.parent
     old_stem = file_path.stem
     new_stem = new_path.stem
-    update_wikilinks_in_vault(search_root, old_stem, new_stem, exclude=file_path)
 
-    # Perform the rename
+    # Perform the rename first so wikilinks are only updated if it succeeds.
     file_path.rename(new_path)
+
+    # Update wikilinks across the vault
+    update_wikilinks_in_vault(search_root, old_stem, new_stem, exclude=new_path)
     return new_path
