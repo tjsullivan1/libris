@@ -244,6 +244,7 @@ def clean(
 @app.command()
 def cleanup(
     rename: bool = typer.Option(False, "--rename", help="Rename files to canonical Title - Author.md format"),
+    auto_enrich: bool = typer.Option(False, "--auto-enrich", help="Automatically enrich from Google Books when title/author is missing (uses first matching result)"),
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
     vault_path = get_vault_path()
@@ -258,6 +259,7 @@ def cleanup(
     updated_count = 0
     renamed_count = 0
     skipped_count = 0
+    unmatched_files: list[str] = []
     for i, book_file in enumerate(books, 1):
         if i % 100 == 0:
             typer.echo(f"Processing {i}/{len(books)}...")
@@ -272,15 +274,21 @@ def cleanup(
 
             # Offer to enrich when title or author is missing
             if result.status in ("missing_title", "missing_author"):
-                typer.echo(f"{book_file.name}: {result.status.replace('_', ' ')}")
-                if questionary.confirm(
-                    f"Enrich {book_file.name} from Google Books?",
-                    default=True,
-                ).ask():
-                    if _enrich_interactive(book_file):
-                        # Re-read updated frontmatter and retry rename
-                        _, fm = ensure_frontmatter_fields(book_file)
-                        result = rename_book_file(book_file, vault_root, frontmatter=fm)
+                enriched = False
+                if auto_enrich:
+                    enriched = _enrich_auto(book_file, unmatched_files)
+                else:
+                    typer.echo(f"{book_file.name}: {result.status.replace('_', ' ')}")
+                    if questionary.confirm(
+                        f"Enrich {book_file.name} from Google Books?",
+                        default=True,
+                    ).ask():
+                        enriched = _enrich_interactive(book_file)
+
+                if enriched:
+                    # Re-read updated frontmatter and retry rename
+                    _, fm = ensure_frontmatter_fields(book_file)
+                    result = rename_book_file(book_file, vault_root, frontmatter=fm)
 
             if result.status == "renamed":
                 renamed_count += 1
@@ -303,6 +311,100 @@ def cleanup(
             typer.echo(f"No files renamed. {skipped_count} file(s) could not be renamed.")
         else:
             typer.echo("All files already have canonical names.")
+
+    if unmatched_files:
+        typer.echo(f"\n--- {len(unmatched_files)} file(s) could not be auto-enriched (no matching result) ---")
+        for name in unmatched_files:
+            typer.echo(f"  • {name}")
+
+def _normalize_for_match(text: str) -> str:
+    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace."""
+    text = re.sub(r'[^\w\s]', ' ', text.lower())
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _titles_match(filename_stem: str, book_title: str) -> bool:
+    """Check if a Google Books title fuzzy-matches the filename stem.
+
+    Returns True if the normalized filename stem is contained within the
+    normalized book title, or vice versa.
+    """
+    norm_file = _normalize_for_match(filename_stem)
+    norm_title = _normalize_for_match(book_title)
+    if not norm_file or not norm_title:
+        return False
+    return norm_file in norm_title or norm_title in norm_file
+
+
+def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
+    """Auto-enrich a file using the first matching Google Books result.
+
+    Searches using the filename stem, checks if the first result's title
+    is a fuzzy match. If it matches, applies the enrichment. If not, appends
+    the filename to unmatched_log for later reporting.
+    """
+    query = _normalize_for_match(file_path.stem)
+    if not query:
+        unmatched_log.append(file_path.name)
+        return False
+
+    client = GoogleBooksClient()
+    results = client.search(file_path.stem)
+
+    if not results:
+        unmatched_log.append(file_path.name)
+        return False
+
+    first = results[0]
+    if _titles_match(file_path.stem, first.title):
+        if update_frontmatter_from_book(file_path, first):
+            # Append a note to the body indicating this was an automatic match
+            _append_auto_enrich_note(file_path, first.title, file_path.stem)
+            typer.echo(f"Auto-enriched: {file_path.name} → \"{first.title}\" by {', '.join(first.authors)}")
+            return True
+        return False
+    else:
+        unmatched_log.append(file_path.name)
+        return False
+
+
+def _append_auto_enrich_note(file_path: Path, matched_title: str, original_query: str) -> None:
+    """Append a note to the document body and add 'review' tag indicating auto-enrichment."""
+    from datetime import date
+    import yaml
+
+    content = file_path.read_text(encoding="utf-8")
+
+    # Add 'review' to the tags in frontmatter
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
+    if not match:
+        match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
+
+    if match:
+        data = yaml.safe_load(match.group(1))
+        if isinstance(data, dict):
+            tags = data.get("tags")
+            if isinstance(tags, str):
+                if "review" not in tags.lower().split():
+                    data["tags"] = f"{tags}, review"
+            elif isinstance(tags, list):
+                if "review" not in [t.lower() for t in tags if isinstance(t, str)]:
+                    tags.append("review")
+            else:
+                data["tags"] = "review"
+            new_fm = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+            rest = match.group(2)
+            content = f"---\n{new_fm}\n---\n{rest.lstrip()}"
+
+    # Append the callout note to the body
+    note = (
+        f"\n\n> [!warning] Auto-enriched ({date.today().isoformat()})\n"
+        f"> Title matched automatically from Google Books.\n"
+        f"> Query: \"{original_query}\" → Matched: \"{matched_title}\"\n"
+        f"> Please verify this is the correct book.\n"
+    )
+    file_path.write_text(content.rstrip() + note + "\n", encoding="utf-8")
+
 
 def _enrich_interactive(file_path: Path) -> bool:
     """Run the interactive enrich flow for a single file. Returns True if enriched."""
