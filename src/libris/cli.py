@@ -245,6 +245,7 @@ def clean(
 def cleanup(
     rename: bool = typer.Option(False, "--rename", help="Rename files to canonical Title - Author.md format"),
     auto_enrich: bool = typer.Option(False, "--auto-enrich", help="Automatically enrich from Google Books when title/author is missing (uses first matching result)"),
+    limit: int = typer.Option(0, "--limit", "-n", help="Process only the first N books (0 = all)"),
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
     vault_path = get_vault_path()
@@ -253,6 +254,10 @@ def cleanup(
     if not books:
         typer.echo("No books found in vault.")
         return
+
+    if limit > 0:
+        books = books[:limit]
+        typer.echo(f"Processing first {len(books)} book(s) (of {len(list_books(vault_path))} total).")
 
     vault_root = get_obsidian_vault_root() or vault_path if rename else None
 
