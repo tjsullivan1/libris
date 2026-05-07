@@ -2,11 +2,11 @@ from pathlib import Path
 import time
 from statistics import median
 from libris.api import Book
-from libris.markdown import create_book_note, sanitize_filename, list_books, read_frontmatter, update_frontmatter_from_book
+from libris.markdown import create_book_note, sanitize_filename, standardize_title, list_books, read_frontmatter, update_frontmatter_from_book
 
 def test_sanitize_filename():
     assert sanitize_filename("Title: With Colon") == "Title With Colon"
-    assert sanitize_filename("Title / With / Slash") == "Title  With  Slash"
+    assert sanitize_filename("Title / With / Slash") == "Title With Slash"
 
 def test_create_book_note(tmp_path):
     book = Book(
@@ -323,3 +323,66 @@ def test_list_books_benchmark_against_legacy_read_pattern(tmp_path):
     # Runtime can vary by filesystem and cache behavior.
     # Guard against major regressions while still tracking benchmark timings.
     assert median(new_times) <= median(old_times) * 2.0
+
+
+# --- Title Standardizer Tests ---
+
+def test_standardize_title_basic():
+    assert standardize_title("the great gatsby") == "The Great Gatsby"
+    assert standardize_title("THE GREAT GATSBY") == "The Great Gatsby"
+    assert standardize_title("a tale of two cities") == "A Tale of Two Cities"
+
+
+def test_standardize_title_preserves_subtitle():
+    assert standardize_title("dune: the machine crusade") == "Dune: The Machine Crusade"
+    assert standardize_title("clean code: a handbook of agile software craftsmanship") == "Clean Code: A Handbook of Agile Software Craftsmanship"
+
+
+def test_standardize_title_strips_brackets():
+    assert standardize_title("Dune [Illustrated]") == "Dune"
+    assert standardize_title("Python {Kindle Edition}") == "Python"
+    assert standardize_title("The Art of War [Annotated] [Illustrated]") == "The Art of War"
+
+
+def test_standardize_title_collapses_whitespace():
+    assert standardize_title("Title  With  Spaces") == "Title With Spaces"
+    assert standardize_title("  Extra   Leading  ") == "Extra Leading"
+
+
+def test_standardize_title_handles_none_and_empty():
+    assert standardize_title(None) is None
+    assert standardize_title("") == ""
+
+
+def test_standardize_title_preserves_mixed_case():
+    # titlecase preserves words with internal caps
+    result = standardize_title("the iPhone revolution")
+    assert "iPhone" in result
+
+
+def test_ensure_frontmatter_standardizes_title(tmp_path):
+    from libris.markdown import ensure_frontmatter_fields
+    file_path = tmp_path / "caps_book.md"
+    file_path.write_text("---\ntitle: THE GREAT GATSBY\ngoogle_books_id: abc\n---\n")
+
+    updated = ensure_frontmatter_fields(file_path)
+    assert updated is True
+
+    content = file_path.read_text()
+    assert "title: The Great Gatsby" in content
+
+
+def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
+    from libris.markdown import ensure_frontmatter_fields
+    file_path = tmp_path / "good_book.md"
+    # Write a file with all fields present and title already standardized
+    file_path.write_text(
+        "---\ntitle: The Great Gatsby\nauthor:\n- F. Scott Fitzgerald\nisbn: '123'\n"
+        "page_count: 200\npublished_date: '1925'\ngoogle_books_id: abc\n"
+        "thumbnail: null\ngenres: null\ntags: Book\nformat: null\n"
+        "status: To Read\nrating: null\nreferred_by: null\n"
+        "date_added: null\ndate_started: null\ndate_finished: null\n---\n"
+    )
+
+    updated = ensure_frontmatter_fields(file_path)
+    assert updated is False

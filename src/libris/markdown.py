@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from datetime import date
 from typing import Dict, Any, Optional
+from titlecase import titlecase
 from .api import Book
 
 DEFAULT_FRONTMATTER = {
@@ -37,9 +38,29 @@ FIELD_MIGRATIONS = {
 }
 
 def sanitize_filename(name: str) -> str:
-    """Removes invalid characters for a filename."""
+    """Removes invalid characters for a filename and collapses whitespace."""
     name = re.sub(r'[\\/*?:"<>|]', "", name)
+    name = re.sub(r'\s+', ' ', name)
     return name.strip()
+
+
+# Patterns for publisher/format annotations (not genuine title content)
+_BRACKET_ANNOTATION_PAT = re.compile(r'\s*[\[\{][^\[\]\{\}]*[\]\}]')
+_WHITESPACE_PAT = re.compile(r'\s+')
+
+
+def standardize_title(raw: str) -> str:
+    """Standardize a book title: strip annotations, normalize whitespace, apply title case."""
+    if not raw or not isinstance(raw, str):
+        return raw
+    title = raw.strip()
+    # Remove bracket annotations like [Illustrated], {Kindle Edition}
+    title = _BRACKET_ANNOTATION_PAT.sub('', title)
+    # Collapse multiple whitespace to single space
+    title = _WHITESPACE_PAT.sub(' ', title).strip()
+    # Apply title case (NYT Manual of Style rules)
+    title = titlecase(title)
+    return title
 
 def create_book_note(book: Book, vault_path: Path, status: str = "To Read") -> Path:
     """Creates a Markdown note for a book in the specified vault path."""
@@ -135,6 +156,14 @@ def ensure_frontmatter_fields(file_path: Path) -> bool:
     if isinstance(data.get("author"), str):
         data["author"] = [data["author"]]
         updated = True
+
+    # Standardize title casing and strip annotations
+    title_val = data.get("title")
+    if title_val and isinstance(title_val, str):
+        standardized = standardize_title(title_val)
+        if standardized != title_val:
+            data["title"] = standardized
+            updated = True
             
     if updated:
         # Use dump but ensure we don't add unnecessary trailing newlines or spaces

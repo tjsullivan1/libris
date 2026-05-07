@@ -305,6 +305,7 @@ dependencies = [
     { name = "pytest" },
     { name = "pyyaml" },
     { name = "questionary" },
+    { name = "titlecase" },
     { name = "typer" },
 ]
 
@@ -330,6 +331,7 @@ requires-dist = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "questionary", specifier = ">=2.1.1" },
+    { name = "titlecase", specifier = ">=2.4" },
     { name = "typer", specifier = ">=0.24.1" },
 ]
 
@@ -716,6 +718,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/28/e3/55dcc2cfbc3ca9c29
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/7b/ce1eafaf1a76852e2ec9b22edecf1daa58175c090266e9f6c64afcd81d91/stack_data-0.6.3-py3-none-any.whl", hash = "sha256:d5558e0c25a4cb0853cddad3d77da9891a08cb85dd9f9f91b9f8cd66e511e695", size = 24521, upload-time = "2023-09-30T13:58:03.53Z" },
 ]
+
+[[package]]
+name = "titlecase"
+version = "2.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/17/04d2d3e30e2bc5a3eefa1060b08e3fb628510440f938eaecabbe08976a26/titlecase-2.4.1.tar.gz", hash = "sha256:7d83a277ccbbda11a2944e78a63e5ccaf3d32f828c594312e4862f9a07f635f5", size = 14434, upload-time = "2023-09-23T05:03:46.389Z" }
 
 [[package]]
 name = "traitlets"
