@@ -10,7 +10,6 @@ from libris.merge import (
     get_primary_book,
     write_merged_book,
     delete_secondary_file,
-    MergeConflict,
 )
 
 
@@ -39,24 +38,26 @@ class TestMergeTwoBooks:
     def test_identical_books_no_conflicts(self, tmp_path):
         """Two identical books should merge cleanly with no conflicts."""
         path1 = _write_book(
-            tmp_path, "A.md",
+            tmp_path,
+            "A.md",
             title="Test Book",
             author=["Alice"],
             isbn="123-456",
             google_books_id="gb1",
-            status="To Read"
+            status="To Read",
         )
         path2 = _write_book(
-            tmp_path, "B.md",
+            tmp_path,
+            "B.md",
             title="Test Book",
             author=["Alice"],
             isbn="123-456",
             google_books_id="gb1",
-            status="To Read"
+            status="To Read",
         )
 
         merged_fm, merged_body, conflicts = merge_two_books(path1, path2)
-        
+
         assert len(conflicts) == 0
         assert merged_fm["title"] == "Test Book"
         assert merged_fm["isbn"] == "123-456"
@@ -64,78 +65,98 @@ class TestMergeTwoBooks:
     def test_status_priority_read_beats_to_read(self, tmp_path):
         """Status 'Read' should beat 'To Read' in merge."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            status="To Read"
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            status="To Read",
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            status="Read"
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            status="Read",
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
-        
+
         assert len(conflicts) == 0
         assert merged_fm["status"] == "Read"
 
     def test_status_priority_both_read(self, tmp_path):
         """Both 'Read' should stay 'Read'."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            status="Read"
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            status="Read",
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            status="Read"
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            status="Read",
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
-        
+
         assert len(conflicts) == 0
         assert merged_fm["status"] == "Read"
 
     def test_null_field_filled_from_secondary(self, tmp_path):
         """Null fields in primary should be filled from secondary."""
         path1 = _write_book(
-            tmp_path, "A.md",
+            tmp_path,
+            "A.md",
             title="Book",
             isbn="123",
             google_books_id="gb1",
             page_count=None,
-            description=None
+            description=None,
         )
         path2 = _write_book(
-            tmp_path, "B.md",
+            tmp_path,
+            "B.md",
             title="Book",
             isbn="123",
             google_books_id="gb1",
             page_count=300,
-            description=None
+            description=None,
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
-        
+
         assert len(conflicts) == 0
         assert merged_fm["page_count"] == 300
 
     def test_metadata_conflict_different_authors(self, tmp_path):
         """Different non-null author lists should trigger conflict."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            author=["Alice"]
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            author=["Alice"],
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            author=["Bob"]
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            author=["Bob"],
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
-        
+
         # Should have conflict in author field
         conflict_fields = [c.field for c in conflicts]
         assert "author" not in conflict_fields  # Authors should be merged as lists
@@ -144,18 +165,24 @@ class TestMergeTwoBooks:
     def test_metadata_conflict_different_page_count(self, tmp_path):
         """Different page counts should trigger conflict."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=300
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=250
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=250,
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
-        
+
         # page_count conflict should be detected
         conflict_fields = [c.field for c in conflicts]
         assert "page_count" in conflict_fields
@@ -163,36 +190,52 @@ class TestMergeTwoBooks:
     def test_conflicts_prevent_merge_when_not_allowed(self, tmp_path):
         """With allow_conflicts=False, conflicts should be returned."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=300
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=250
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=250,
         )
 
-        merged_fm, merged_body, conflicts = merge_two_books(path1, path2, allow_conflicts=False)
-        
+        merged_fm, merged_body, conflicts = merge_two_books(
+            path1, path2, allow_conflicts=False
+        )
+
         assert len(conflicts) > 0
         assert merged_body == ""  # Body empty when merge blocked
 
     def test_merge_with_allow_conflicts(self, tmp_path):
         """With allow_conflicts=True, conflicts should be resolved and body merged."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=300
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=250
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=250,
         )
 
-        merged_fm, merged_body, conflicts = merge_two_books(path1, path2, allow_conflicts=True)
-        
+        merged_fm, merged_body, conflicts = merge_two_books(
+            path1, path2, allow_conflicts=True
+        )
+
         # Merge should proceed
         assert merged_fm["page_count"] == 300  # Primary wins
         assert len(conflicts) > 0  # But conflicts are still recorded
@@ -200,18 +243,24 @@ class TestMergeTwoBooks:
     def test_merge_author_lists(self, tmp_path):
         """Author lists from both books should be merged and deduplicated."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            author=["Alice", "Charlie"]
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            author=["Alice", "Charlie"],
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            author=["Bob", "Alice"]  # Alice appears in both
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            author=["Bob", "Alice"],  # Alice appears in both
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
-        
+
         assert len(conflicts) == 0
         assert len(merged_fm["author"]) == 3
         assert "Alice" in merged_fm["author"]
@@ -222,7 +271,7 @@ class TestMergeTwoBooks:
         """Body content from both files should be merged."""
         vault = tmp_path / "vault"
         vault.mkdir()
-        
+
         # Create book with custom body content
         path1 = vault / "A.md"
         path1.write_text(
@@ -231,7 +280,7 @@ class TestMergeTwoBooks:
             "---\n"
             "## Notes\n\nMy notes for book A\n"
         )
-        
+
         path2 = vault / "B.md"
         path2.write_text(
             "---\n"
@@ -241,7 +290,7 @@ class TestMergeTwoBooks:
         )
 
         merged_fm, merged_body, conflicts = merge_two_books(path1, path2)
-        
+
         assert "My notes for book A" in merged_body
         assert "My notes for book B" in merged_body
 
@@ -249,7 +298,7 @@ class TestMergeTwoBooks:
         """Generic Description sections (from API) should be skipped during merge."""
         vault = tmp_path / "vault"
         vault.mkdir()
-        
+
         path1 = vault / "A.md"
         path1.write_text(
             "---\n"
@@ -257,7 +306,7 @@ class TestMergeTwoBooks:
             "---\n"
             "## Notes\n\nMy personal notes\n\n### Description\nAPI-provided description\n"
         )
-        
+
         path2 = vault / "B.md"
         path2.write_text(
             "---\n"
@@ -267,7 +316,7 @@ class TestMergeTwoBooks:
         )
 
         merged_fm, merged_body, conflicts = merge_two_books(path1, path2)
-        
+
         # Personal notes should be there
         assert "My personal notes" in merged_body
         # API descriptions should not appear
@@ -281,14 +330,20 @@ class TestCheckAutoMerge:
     def test_auto_merge_both_ids_match(self, tmp_path):
         """Should auto-merge when both ISBN and Google ID match."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book A", isbn="123", google_books_id="gb1",
-            page_count=300
+            tmp_path,
+            "A.md",
+            title="Book A",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book B", isbn="123", google_books_id="gb1",
-            page_count=300
+            tmp_path,
+            "B.md",
+            title="Book B",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
         )
 
         can_merge, reason, merge_result = check_auto_merge(path1, path2)
@@ -301,12 +356,10 @@ class TestCheckAutoMerge:
     def test_no_auto_merge_isbn_mismatch(self, tmp_path):
         """Should not auto-merge if ISBN differs."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1"
+            tmp_path, "A.md", title="Book", isbn="123", google_books_id="gb1"
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="999", google_books_id="gb1"
+            tmp_path, "B.md", title="Book", isbn="999", google_books_id="gb1"
         )
 
         can_merge, reason, merge_result = check_auto_merge(path1, path2)
@@ -317,12 +370,10 @@ class TestCheckAutoMerge:
     def test_no_auto_merge_google_id_mismatch(self, tmp_path):
         """Should not auto-merge if Google Books ID differs."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1"
+            tmp_path, "A.md", title="Book", isbn="123", google_books_id="gb1"
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb2"
+            tmp_path, "B.md", title="Book", isbn="123", google_books_id="gb2"
         )
 
         can_merge, reason, merge_result = check_auto_merge(path1, path2)
@@ -333,14 +384,20 @@ class TestCheckAutoMerge:
     def test_no_auto_merge_with_conflicts(self, tmp_path):
         """Should not auto-merge if there are metadata conflicts."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=300
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=250
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=250,
         )
 
         can_merge, reason, merge_result = check_auto_merge(path1, path2)
@@ -350,13 +407,9 @@ class TestCheckAutoMerge:
 
     def test_no_auto_merge_missing_isbn(self, tmp_path):
         """Should not auto-merge if ISBN is missing from either book."""
-        path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", google_books_id="gb1"
-        )
+        path1 = _write_book(tmp_path, "A.md", title="Book", google_books_id="gb1")
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1"
+            tmp_path, "B.md", title="Book", isbn="123", google_books_id="gb1"
         )
 
         can_merge, reason, _ = check_auto_merge(path1, path2)
@@ -369,13 +422,17 @@ class TestGetPrimaryBook:
     def test_primary_is_more_complete(self, tmp_path):
         """Book with more non-null fields should be primary."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=300, genres=["Fiction"], rating=5
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
+            genres=["Fiction"],
+            rating=5,
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1"
+            tmp_path, "B.md", title="Book", isbn="123", google_books_id="gb1"
         )
 
         primary = get_primary_book(path1, path2)
@@ -384,12 +441,10 @@ class TestGetPrimaryBook:
     def test_primary_fallback_to_first_when_equal_completeness(self, tmp_path):
         """When completeness is equal, should fallback to first path."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1"
+            tmp_path, "A.md", title="Book", isbn="123", google_books_id="gb1"
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1"
+            tmp_path, "B.md", title="Book", isbn="123", google_books_id="gb1"
         )
 
         primary = get_primary_book(path1, path2)
@@ -398,14 +453,20 @@ class TestGetPrimaryBook:
     def test_primary_by_earlier_date_added(self, tmp_path):
         """When completeness is equal, earlier date_added wins."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            date_added="2024-01-01"
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            date_added="2024-01-01",
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            date_added="2024-06-01"
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            date_added="2024-06-01",
         )
 
         primary = get_primary_book(path1, path2)
@@ -418,12 +479,12 @@ class TestWriteMergedBook:
     def test_write_merged_frontmatter_and_body(self, tmp_path):
         """Should write merged frontmatter and body to file."""
         path = tmp_path / "book.md"
-        
+
         merged_fm = {
             "title": "Book",
             "isbn": "123",
             "google_books_id": "gb1",
-            "status": "Read"
+            "status": "Read",
         }
         merged_body = "## Notes\n\nMy notes here"
 
@@ -455,19 +516,30 @@ class TestMergeEdgeCases:
     def test_merge_three_book_group(self, tmp_path):
         """Merging a group of 3 books should work progressively."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            status="To Read", page_count=300
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            status="To Read",
+            page_count=300,
         )
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            status="Read", rating=5
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            status="Read",
+            rating=5,
         )
         path3 = _write_book(
-            tmp_path, "C.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            genres=["Fiction"]
+            tmp_path,
+            "C.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            genres=["Fiction"],
         )
 
         # Merge B into A
@@ -519,8 +591,7 @@ class TestMergeEdgeCases:
     def test_merge_unreadable_frontmatter_raises(self, tmp_path):
         """Merge with unreadable frontmatter should raise ValueError."""
         path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123", google_books_id="gb1"
+            tmp_path, "A.md", title="Book", isbn="123", google_books_id="gb1"
         )
         path2 = tmp_path / "B.md"
         path2.write_text("No frontmatter here", encoding="utf-8")
@@ -530,14 +601,16 @@ class TestMergeEdgeCases:
 
     def test_get_primary_book_selects_secondary_when_more_complete(self, tmp_path):
         """get_primary_book should pick secondary when it has more fields."""
-        path1 = _write_book(
-            tmp_path, "A.md",
-            title="Book", isbn="123"
-        )
+        path1 = _write_book(tmp_path, "A.md", title="Book", isbn="123")
         path2 = _write_book(
-            tmp_path, "B.md",
-            title="Book", isbn="123", google_books_id="gb1",
-            page_count=300, rating=4, genres=["Fiction"]
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
+            rating=4,
+            genres=["Fiction"],
         )
 
         primary = get_primary_book(path1, path2)
@@ -569,10 +642,23 @@ class TestMergeCLI:
 
         vault = tmp_path / "vault"
         vault.mkdir()
-        _write_book(vault, "A.md", title="Book A", isbn="123", google_books_id="gb1",
-                     status="To Read", page_count=300)
-        _write_book(vault, "B.md", title="Book B", isbn="123", google_books_id="gb1",
-                     status="Read")
+        _write_book(
+            vault,
+            "A.md",
+            title="Book A",
+            isbn="123",
+            google_books_id="gb1",
+            status="To Read",
+            page_count=300,
+        )
+        _write_book(
+            vault,
+            "B.md",
+            title="Book B",
+            isbn="123",
+            google_books_id="gb1",
+            status="Read",
+        )
         set_config("vault_path", str(vault))
 
         result = CliRunner().invoke(app, ["merge", "--auto"])
@@ -591,10 +677,22 @@ class TestMergeCLI:
 
         vault = tmp_path / "vault"
         vault.mkdir()
-        _write_book(vault, "A.md", title="Book", isbn="123", google_books_id="gb1",
-                     page_count=300)
-        _write_book(vault, "B.md", title="Book", isbn="123", google_books_id="gb1",
-                     page_count=250)
+        _write_book(
+            vault,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=300,
+        )
+        _write_book(
+            vault,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            page_count=250,
+        )
         set_config("vault_path", str(vault))
 
         result = CliRunner().invoke(app, ["merge", "--auto"])
