@@ -189,8 +189,6 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
         content = path.read_text(encoding="utf-8")
         # Parse frontmatter using YAML to properly handle missing fields
         match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
-        if not match:
-            match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
         
         if match:
             frontmatter_yaml = match.group(1)
@@ -203,8 +201,8 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
                     data["format"] = book.format
                     # Write back the updated frontmatter
                     new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-                    # Preserve content structure: remove only leading newline if present
-                    content_part = rest_of_content.lstrip('\n') if rest_of_content.startswith('\n') else rest_of_content
+                    # Preserve content structure: remove only leading newlines
+                    content_part = rest_of_content.lstrip('\n')
                     new_content = f"---\n{new_frontmatter}\n---\n{content_part}"
                     path.write_text(new_content, encoding="utf-8")
             except yaml.YAMLError:
