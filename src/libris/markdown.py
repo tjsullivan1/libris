@@ -207,13 +207,13 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
         if fm is not None:
             file_data.append((p, fm))
 
-    def _author_key(fm: Dict[str, Any]) -> str:
+    def _author_key(fm: Dict[str, Any]) -> tuple[str, ...]:
         author = fm.get("author")
         if isinstance(author, list):
-            return ",".join(sorted(a.strip().lower() for a in author if isinstance(a, str)))
+            return tuple(sorted(a.strip().lower() for a in author if isinstance(a, str)))
         elif isinstance(author, str):
-            return author.strip().lower()
-        return ""
+            return (author.strip().lower(),)
+        return ()
 
     # Build groups keyed by each identifier type.
     # key -> set of indices into file_data
