@@ -203,9 +203,11 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
                     data["format"] = book.format
                     # Write back the updated frontmatter
                     new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-                    new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content.lstrip()}"
+                    # Preserve content structure: remove only leading newline if present
+                    content_part = rest_of_content.lstrip('\n') if rest_of_content.startswith('\n') else rest_of_content
+                    new_content = f"---\n{new_frontmatter}\n---\n{content_part}"
                     path.write_text(new_content, encoding="utf-8")
-            except Exception:
+            except yaml.YAMLError:
                 # Fallback to regex replacement if YAML parsing fails
                 pattern = r"(format:\s*)(.*)"
                 new_content = re.sub(pattern, f"\\1{book.format}", content)
