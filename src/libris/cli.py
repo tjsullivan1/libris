@@ -599,10 +599,6 @@ def audible_status():
             typer.echo("  Token: Expired (will auto-refresh on next use)")
 
 
-if __name__ == "__main__":
-    app()
-
-
 @app.command()
 def duplicates():
     """Find and report duplicate books in the vault."""
@@ -682,3 +678,7 @@ def import_cmd(
 
     if not apply and (result.new_books or result.updated_books):
         typer.echo("\nRun with --apply to execute these changes.")
+
+
+if __name__ == "__main__":
+    app()

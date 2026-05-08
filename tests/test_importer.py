@@ -7,8 +7,6 @@ from typer.testing import CliRunner
 from libris.cli import app
 from libris.config import set_config
 from libris.importer import (
-    ImportBook,
-    ImportResult,
     normalize_for_match,
     parse_audible_json,
     run_import,
