@@ -400,7 +400,7 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
     if _titles_match(file_path.stem, first.title):
         if update_frontmatter_from_book(file_path, first):
             # Append a note to the body indicating this was an automatic match
-            _append_auto_enrich_note(file_path, first.title, file_path.stem)
+            _append_auto_enrich_note(file_path, first.title, query)
             typer.echo(f"Auto-enriched: {file_path.name} → \"{first.title}\" by {', '.join(first.authors)}")
             return True
         return False
