@@ -618,10 +618,6 @@ def audible_status():
             typer.echo("  Token: Expired (will auto-refresh on next use)")
 
 
-if __name__ == "__main__":
-    app()
-
-
 @app.command()
 def duplicates():
     """Find and report duplicate books in the vault."""
@@ -653,7 +649,7 @@ def duplicates():
 @app.command(name="import")
 def import_cmd(
     file: str = typer.Argument(..., help="Path to the import file (JSON or CSV)"),
-    format: str = typer.Option(None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"),
+    fmt: str | None = typer.Option(None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"),
     apply: bool = typer.Option(False, "--apply", help="Actually create/update notes (default is dry-run)"),
     limit: int = typer.Option(0, "--limit", "-n", help="Process only the first N entries (0 = all)"),
 ):
@@ -673,7 +669,7 @@ def import_cmd(
         raise typer.Exit(code=1)
 
     try:
-        result = run_import(file_path, vault_path, apply=apply, format_name=format, limit=limit)
+        result = run_import(file_path, vault_path, apply=apply, format_name=fmt, limit=limit)
     except (ValueError, FileNotFoundError) as e:
         typer.echo(f"Error: {e}")
         raise typer.Exit(code=1)
@@ -701,3 +697,7 @@ def import_cmd(
 
     if not apply and (result.new_books or result.updated_books):
         typer.echo("\nRun with --apply to execute these changes.")
+
+
+if __name__ == "__main__":
+    app()
