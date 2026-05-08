@@ -6,10 +6,33 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from .api import GoogleBooksClient, Book
-from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates, rename_book_file, RenameResult
-from .config import get_vault_path, set_config, get_obsidian_vault_root, set_book_vault_path
-from .audible_client import get_auth_file, is_authenticated, get_locale
+from .api import GoogleBooksClient
+from .markdown import (
+    create_book_note,
+    update_book_status,
+    list_books,
+    ensure_frontmatter_fields,
+    read_frontmatter,
+    update_frontmatter_from_book,
+    find_duplicates,
+    rename_book_file,
+    RenameResult,
+)
+from .config import (
+    get_vault_path,
+    set_config,
+    get_obsidian_vault_root,
+    set_book_vault_path,
+)
+from .audible_client import get_auth_file, get_locale
+from .importer import normalize_for_match, run_import, SUPPORTED_FORMATS
+from .merge import (
+    merge_two_books,
+    check_auto_merge,
+    get_primary_book,
+    write_merged_book,
+    delete_secondary_file,
+)
 
 app = typer.Typer()
 audible_app = typer.Typer(help="Audible integration commands.")
@@ -32,52 +55,54 @@ def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
         return None
     return f"Skipped rename for {filename}: {msg}"
 
+
 @app.command()
 def status():
     """Update the status of a book in your vault."""
     vault_path = get_vault_path()
     books = list_books(vault_path)
-    
+
     if not books:
         typer.echo("No books found in vault.")
         return
-        
+
     choices = [p.name for p in books]
     selected_file_name = questionary.select(
-        "Select a book to update:",
-        choices=choices
+        "Select a book to update:", choices=choices
     ).ask()
-    
+
     if not selected_file_name:
         return
-        
+
     selected_file = vault_path / selected_file_name
-    
+
     new_status = questionary.select(
-        "New status:",
-        choices=["To Read", "Reading", "Finished"]
+        "New status:", choices=["To Read", "Reading", "Finished"]
     ).ask()
-    
+
     if not new_status:
         return
-        
+
     update_book_status(selected_file, new_status)
     typer.echo(f"Updated: {selected_file_name} -> {new_status}")
 
+
 @app.command(name="list")
 def list_cmd(
-    timing: bool = typer.Option(False, "--timing", help="Print scan timing for list operation")
+    timing: bool = typer.Option(
+        False, "--timing", help="Print scan timing for list operation"
+    ),
 ):
     """List all books in your vault."""
     vault_path = get_vault_path()
     start = time.perf_counter() if timing else None
     books = list_books(vault_path)
     elapsed = (time.perf_counter() - start) if timing and start is not None else None
-    
+
     if not books:
         typer.echo("No books found in vault.")
         return
-        
+
     for p in books:
         # Only read the first 1KB - enough for status extraction from frontmatter
         try:
@@ -91,6 +116,7 @@ def list_cmd(
 
     if elapsed is not None:
         typer.echo(f"Scan time: {elapsed * 1000:.2f} ms")
+
 
 @app.command()
 def search(
@@ -129,42 +155,45 @@ def search(
             typer.echo(f"  Pages:     {book.page_count}")
         typer.echo()
 
+
 @app.command()
 def add(query: str = typer.Argument(..., help="Title, author, or ISBN to search for")):
     """Search for a book and add it to your Obsidian vault."""
     client = GoogleBooksClient()
     books = client.search(query)
-    
+
     if not books:
         typer.echo("No books found.")
         return
 
     choices = [f"{book.title} by {', '.join(book.authors)}" for book in books]
-    selected_choice = questionary.select(
-        "Select a book to add:",
-        choices=choices
-    ).ask()
-    
+    selected_choice = questionary.select("Select a book to add:", choices=choices).ask()
+
     if not selected_choice:
         return
-        
+
     book_index = choices.index(selected_choice)
     selected_book = books[book_index]
-    
+
     vault_path = get_vault_path()
     if not vault_path.exists():
         typer.echo(f"Vault path does not exist: {vault_path}")
         return
-    
+
     # Create the book note
     file_path = create_book_note(selected_book, vault_path)
     typer.echo(f"Added: {file_path}")
 
+
 @app.command()
 def config(
     vault_path: str = typer.Option(None, "--vault", help="Set the vault path"),
-    obsidian_vault: str = typer.Option(None, "--obsidian-vault", help="Set the Obsidian vault root path (for wikilink updates)"),
-    api_key: str = typer.Option(None, "--api-key", help="Set the Google Books API key")
+    obsidian_vault: str = typer.Option(
+        None,
+        "--obsidian-vault",
+        help="Set the Obsidian vault root path (for wikilink updates)",
+    ),
+    api_key: str = typer.Option(None, "--api-key", help="Set the Google Books API key"),
 ):
     """Configure libris settings."""
     if vault_path:
@@ -192,6 +221,7 @@ def config(
 
     if not vault_path and not api_key and not obsidian_vault:
         from .config import get_api_key
+
         typer.echo(f"Current vault path: {get_vault_path()}")
         obsidian_root = get_obsidian_vault_root()
         if obsidian_root:
@@ -202,28 +232,31 @@ def config(
         else:
             typer.echo("API key: Not set")
 
+
 @app.command()
 def clean(
-    rename: bool = typer.Option(False, "--rename", help="Rename file to canonical Title - Author.md format"),
+    rename: bool = typer.Option(
+        False, "--rename", help="Rename file to canonical Title - Author.md format"
+    ),
 ):
     """Select a specific book to clean its frontmatter."""
     vault_path = get_vault_path()
     books = list_books(vault_path)
-    
+
     if not books:
         typer.echo("No books found in vault.")
         return
-        
+
     choices = [p.name for p in books]
     selected_file_name = questionary.autocomplete(
         "Select a book to clean:",
         choices=choices,
         match_middle=True,
     ).ask()
-    
+
     if not selected_file_name:
         return
-        
+
     selected_file = vault_path / selected_file_name
     updated, fm = ensure_frontmatter_fields(selected_file)
     if updated:
@@ -241,16 +274,25 @@ def clean(
             if msg:
                 typer.echo(msg)
 
+
 @app.command()
 def cleanup(
-    rename: bool = typer.Option(False, "--rename", help="Rename files to canonical Title - Author.md format"),
-    auto_enrich: bool = typer.Option(False, "--auto-enrich", help="Automatically enrich from Google Books when title/author is missing (uses first matching result)"),
-    limit: int = typer.Option(0, "--limit", "-n", help="Stop after N files that needed action (0 = unlimited)"),
+    rename: bool = typer.Option(
+        False, "--rename", help="Rename files to canonical Title - Author.md format"
+    ),
+    auto_enrich: bool = typer.Option(
+        False,
+        "--auto-enrich",
+        help="Automatically enrich from Google Books when title/author is missing (uses first matching result)",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n", help="Stop after N files that needed action (0 = unlimited)"
+    ),
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
     vault_path = get_vault_path()
     books = list_books(vault_path)
-    
+
     if not books:
         typer.echo("No books found in vault.")
         return
@@ -288,7 +330,9 @@ def cleanup(
                     typer.echo("")  # newline before enrich output
                     enriched = _enrich_auto(book_file, unmatched_files)
                 else:
-                    typer.echo(f"\n  {book_file.name}: {result.status.replace('_', ' ')}")
+                    typer.echo(
+                        f"\n  {book_file.name}: {result.status.replace('_', ' ')}"
+                    )
                     if questionary.confirm(
                         f"Enrich {book_file.name} from Google Books?",
                         default=True,
@@ -305,7 +349,9 @@ def cleanup(
             if result.status == "renamed":
                 renamed_count += 1
                 file_had_action = True
-                typer.echo(f"\n  Renamed: {book_file.name} → {result.new_path.name}", nl=False)
+                typer.echo(
+                    f"\n  Renamed: {book_file.name} → {result.new_path.name}", nl=False
+                )
             elif result.status not in ("already_canonical",):
                 msg = _format_rename_skip(book_file.name, result)
                 if msg:
@@ -327,19 +373,45 @@ def cleanup(
         if renamed_count:
             typer.echo(f"Renamed {renamed_count} file(s).")
         elif skipped_count:
-            typer.echo(f"No files renamed. {skipped_count} file(s) could not be renamed.")
+            typer.echo(
+                f"No files renamed. {skipped_count} file(s) could not be renamed."
+            )
         else:
             typer.echo("All files already have canonical names.")
 
     if unmatched_files:
-        typer.echo(f"\n--- {len(unmatched_files)} file(s) could not be auto-enriched (no matching result) ---")
+        typer.echo(
+            f"\n--- {len(unmatched_files)} file(s) could not be auto-enriched (no matching result) ---"
+        )
         for name in unmatched_files:
             typer.echo(f"  • {name}")
 
+
 def _normalize_for_match(text: str) -> str:
-    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace."""
-    text = re.sub(r'[^\w\s]', ' ', text.lower())
-    return re.sub(r'\s+', ' ', text).strip()
+    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace.
+
+    Delegates to the shared implementation in importer module.
+    """
+    return normalize_for_match(text)
+
+
+def _build_search_query(filename_stem: str) -> str:
+    """Build an effective Google Books search query from a filename stem.
+
+    Handles common filename patterns like:
+      - "Title - Author"
+      - "Title Subtitle - Author"
+
+    Splits on " - " to separate title from author, then uses Google Books
+    query operators (intitle:/inauthor:) for more precise results.
+    If no separator is found, returns the stem as-is.
+    """
+    parts = filename_stem.split(" - ", maxsplit=1)
+    if len(parts) == 2:
+        title_part = parts[0].strip()
+        author_part = parts[1].strip()
+        return f"intitle:{title_part} inauthor:{author_part}"
+    return filename_stem
 
 
 def _titles_match(filename_stem: str, book_title: str) -> bool:
@@ -362,13 +434,13 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
     is a fuzzy match. If it matches, applies the enrichment. If not, appends
     the filename to unmatched_log for later reporting.
     """
-    query = _normalize_for_match(file_path.stem)
-    if not query:
+    query = _build_search_query(file_path.stem)
+    if not _normalize_for_match(query):
         unmatched_log.append(file_path.name)
         return False
 
     client = GoogleBooksClient()
-    results = client.search(file_path.stem)
+    results = client.search(query)
 
     if not results:
         unmatched_log.append(file_path.name)
@@ -378,7 +450,7 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
     if _titles_match(file_path.stem, first.title):
         if update_frontmatter_from_book(file_path, first):
             # Append a note to the body indicating this was an automatic match
-            _append_auto_enrich_note(file_path, first.title, file_path.stem)
+            _append_auto_enrich_note(file_path, first.title, query)
             typer.echo(f"Auto-enriched: {file_path.name} → \"{first.title}\" by {', '.join(first.authors)}")
             return True
         return False
@@ -387,7 +459,9 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
         return False
 
 
-def _append_auto_enrich_note(file_path: Path, matched_title: str, original_query: str) -> None:
+def _append_auto_enrich_note(
+    file_path: Path, matched_title: str, original_query: str
+) -> None:
     """Append a note to the document body and add 'review' tag indicating auto-enrichment."""
     from datetime import date
     import yaml
@@ -423,7 +497,7 @@ def _append_auto_enrich_note(file_path: Path, matched_title: str, original_query
     note = (
         f"\n\n> [!warning] Auto-enriched ({date.today().isoformat()})\n"
         f"> Title matched automatically from Google Books.\n"
-        f"> Query: \"{original_query}\" → Matched: \"{matched_title}\"\n"
+        f'> Query: "{original_query}" → Matched: "{matched_title}"\n'
         f"> Please verify this is the correct book.\n"
     )
     file_path.write_text(content.rstrip() + note + "\n", encoding="utf-8")
@@ -431,7 +505,7 @@ def _append_auto_enrich_note(file_path: Path, matched_title: str, original_query
 
 def _enrich_interactive(file_path: Path) -> bool:
     """Run the interactive enrich flow for a single file. Returns True if enriched."""
-    default_query = file_path.stem
+    default_query = _build_search_query(file_path.stem)
     query = questionary.text(
         f"Search query for Google Books ({file_path.name}):",
         default=default_query,
@@ -467,7 +541,11 @@ def _enrich_interactive(file_path: Path) -> bool:
 
 
 @app.command()
-def enrich(filename: str = typer.Argument(None, help="Name of the markdown file to enrich (e.g. 'My Book.md')")):
+def enrich(
+    filename: str = typer.Argument(
+        None, help="Name of the markdown file to enrich (e.g. 'My Book.md')"
+    ),
+):
     """Search Google Books to fill in missing data for a book."""
     vault_path = get_vault_path()
 
@@ -498,14 +576,18 @@ def enrich(filename: str = typer.Argument(None, help="Name of the markdown file 
 
 @audible_app.command()
 def login(
-    locale: str = typer.Option(None, "--locale", help="Audible marketplace country code (e.g. us, uk, de)"),
+    locale: str = typer.Option(
+        None, "--locale", help="Audible marketplace country code (e.g. us, uk, de)"
+    ),
 ):
     """Authenticate with Audible via your web browser."""
     import audible
 
     auth_file = get_auth_file()
     if auth_file.exists():
-        typer.echo("Already authenticated. Run 'libris audible logout' first to re-authenticate.")
+        typer.echo(
+            "Already authenticated. Run 'libris audible logout' first to re-authenticate."
+        )
         return
 
     effective_locale = locale or get_locale()
@@ -535,7 +617,11 @@ def login(
     if locale:
         set_config("audible_locale", locale)
 
-    device_name = auth.device_info.get("device_name", "Unknown device") if auth.device_info else "Unknown device"
+    device_name = (
+        auth.device_info.get("device_name", "Unknown device")
+        if auth.device_info
+        else "Unknown device"
+    )
     typer.echo(f"Successfully authenticated with Audible! Device: {device_name}")
 
 
@@ -553,7 +639,11 @@ def logout():
         auth = audible.Authenticator.from_file(str(auth_file))
         auth.refresh_access_token()
         auth.deregister_device()
-        device_name = auth.device_info.get("device_name", "device") if auth.device_info else "device"
+        device_name = (
+            auth.device_info.get("device_name", "device")
+            if auth.device_info
+            else "device"
+        )
         typer.echo(f"Deregistered {device_name}.")
     except Exception as e:
         typer.echo(f"Warning: Could not deregister device: {e}")
@@ -570,7 +660,9 @@ def audible_status():
 
     auth_file = get_auth_file()
     if not auth_file.exists():
-        typer.echo("Not authenticated. Run 'libris audible login' to connect your account.")
+        typer.echo(
+            "Not authenticated. Run 'libris audible login' to connect your account."
+        )
         return
 
     try:
@@ -596,10 +688,6 @@ def audible_status():
             typer.echo("  Token: Expired (will auto-refresh on next use)")
 
 
-if __name__ == "__main__":
-    app()
-
-
 @app.command()
 def duplicates():
     """Find and report duplicate books in the vault."""
@@ -615,7 +703,6 @@ def duplicates():
         typer.echo(f"Group {i}:")
         for path in group:
             fm = read_frontmatter(path)
-            title = fm.get("title", "Unknown") if fm else "Unknown"
             isbn = fm.get("isbn") if fm else None
             gid = fm.get("google_books_id") if fm else None
             details = []
@@ -626,3 +713,172 @@ def duplicates():
             detail_str = f" ({', '.join(details)})" if details else ""
             typer.echo(f"  - {path.name}{detail_str}")
         typer.echo()
+
+
+@app.command()
+def merge(
+    auto: bool = typer.Option(
+        False,
+        "--auto",
+        help="Auto-merge duplicates when ISBN and Google ID match (no conflicts)",
+    ),
+):
+    """Merge duplicate books in the vault.
+
+    Without --auto: Interactive mode where you choose which books to merge.
+    With --auto: Automatically merge books when ISBN + Google ID match and no metadata conflicts exist.
+    """
+    vault_path = get_vault_path()
+    groups = find_duplicates(vault_path)
+
+    if not groups:
+        typer.echo("No duplicates found.")
+        return
+
+    total_merged = 0
+
+    for group_idx, group in enumerate(groups, 1):
+        typer.echo(f"\n{'=' * 60}")
+        typer.echo(f"Duplicate Group {group_idx} ({len(group)} books)")
+        typer.echo(f"{'=' * 60}")
+
+        # Display group members
+        for path in group:
+            fm = read_frontmatter(path)
+            title = fm.get("title", "Unknown") if fm else "Unknown"
+            status = fm.get("status", "Unknown") if fm else "Unknown"
+            isbn = fm.get("isbn") if fm else None
+            gid = fm.get("google_books_id") if fm else None
+            details = [f"Status: {status}"]
+            if isbn:
+                details.append(f"ISBN: {isbn}")
+            if gid:
+                details.append(f"Google ID: {gid}")
+            typer.echo(f"  {path.name}")
+            typer.echo(f"    {title} | {' | '.join(details)}")
+
+        if len(group) < 2:
+            continue
+
+        # Pick the most complete book as primary; merge others into it
+        primary = get_primary_book(group[0], group[1])
+        for candidate in group[2:]:
+            primary = get_primary_book(primary, candidate)
+        secondaries = [p for p in group if p != primary]
+
+        typer.echo(f"\n  Primary (keeper): {primary.name}")
+
+        for secondary in secondaries:
+            typer.echo(f"\n  Merging {secondary.name} into {primary.name}...")
+
+            try:
+                if auto:
+                    can_merge, reason, merge_result = check_auto_merge(
+                        primary, secondary
+                    )
+                    if not can_merge:
+                        typer.echo(f"    Skipped: {reason}")
+                        continue
+
+                    merged_fm, merged_body, _ = merge_result
+                    write_merged_book(primary, merged_fm, merged_body)
+                    delete_secondary_file(secondary)
+                    typer.echo("    Auto-merged successfully")
+                    total_merged += 1
+                else:
+                    merged_fm, merged_body, conflicts = merge_two_books(
+                        primary, secondary, allow_conflicts=False
+                    )
+
+                    if conflicts:
+                        typer.echo("    Conflicts detected:")
+                        for conflict in conflicts:
+                            typer.echo(
+                                f"      {conflict.field}: '{conflict.primary_value}' vs '{conflict.secondary_value}'"
+                            )
+                        confirm = questionary.confirm(
+                            "    Proceed with merge (keeping primary's conflicting values)?",
+                            default=False,
+                        ).ask()
+                        if not confirm:
+                            typer.echo("    Skipped by user")
+                            continue
+
+                        merged_fm, merged_body, _ = merge_two_books(
+                            primary, secondary, allow_conflicts=True
+                        )
+                    else:
+                        confirm = questionary.confirm(
+                            f"    No conflicts. Merge {secondary.name} into {primary.name}?",
+                            default=True,
+                        ).ask()
+                        if not confirm:
+                            typer.echo("    Skipped by user")
+                            continue
+
+                    write_merged_book(primary, merged_fm, merged_body)
+                    delete_secondary_file(secondary)
+                    typer.echo("    Merged successfully")
+                    total_merged += 1
+            except Exception as e:
+                typer.echo(f"    Error: {e}")
+                continue
+
+    typer.echo(f"\nMerge complete: {total_merged} duplicate(s) merged")
+
+
+@app.command(name="import")
+def import_cmd(
+    file: str = typer.Argument(..., help="Path to the import file (JSON or CSV)"),
+    fmt: str | None = typer.Option(None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"),
+    apply: bool = typer.Option(False, "--apply", help="Actually create/update notes (default is dry-run)"),
+    limit: int = typer.Option(0, "--limit", "-n", help="Process only the first N entries (0 = all)"),
+):
+    """Import books from a JSON or CSV file into your vault.
+
+    By default, runs in dry-run mode showing what would happen.
+    Use --apply to actually create and update notes.
+    """
+    file_path = Path(file).expanduser().resolve()
+    if not file_path.exists():
+        typer.echo(f"File not found: {file_path}")
+        raise typer.Exit(code=1)
+
+    vault_path = get_vault_path()
+    if not vault_path.exists():
+        typer.echo(f"Vault path does not exist: {vault_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        result = run_import(file_path, vault_path, apply=apply, format_name=fmt, limit=limit)
+    except (ValueError, FileNotFoundError) as e:
+        typer.echo(f"Error: {e}")
+        raise typer.Exit(code=1)
+
+    mode_label = "Import" if apply else "Dry run"
+    typer.echo(f"\n{mode_label} complete:")
+    typer.echo(f"  {len(result.new_books)} new book(s) {'added' if apply else 'would be added'}")
+    typer.echo(f"  {len(result.updated_books)} existing book(s) {'updated' if apply else 'would be updated'}")
+    typer.echo(f"  {len(result.skipped_books)} duplicate(s) already up-to-date (skipped)")
+
+    if result.new_books:
+        preview_count = min(len(result.new_books), 20)
+        typer.echo(f"\n{'Added' if apply else 'New'} books (showing {preview_count} of {len(result.new_books)}):")
+        for book in result.new_books[:preview_count]:
+            authors_str = ", ".join(book.authors)
+            typer.echo(f"  + {book.title} by {authors_str}")
+        if len(result.new_books) > preview_count:
+            typer.echo(f"  ... and {len(result.new_books) - preview_count} more")
+
+    if result.updated_books:
+        typer.echo(f"\n{'Updated' if apply else 'Would update'}:")
+        for book, path, updates in result.updated_books:
+            update_desc = ", ".join(updates)
+            typer.echo(f"  ~ {path.name} ({update_desc})")
+
+    if not apply and (result.new_books or result.updated_books):
+        typer.echo("\nRun with --apply to execute these changes.")
+
+
+if __name__ == "__main__":
+    app()
