@@ -10,6 +10,13 @@ from .api import GoogleBooksClient, Book
 from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates, rename_book_file, RenameResult
 from .config import get_vault_path, set_config, get_obsidian_vault_root, set_book_vault_path
 from .audible_client import get_auth_file, is_authenticated, get_locale
+from .merge import (
+    merge_two_books,
+    check_auto_merge,
+    get_primary_book,
+    write_merged_book,
+    delete_secondary_file,
+)
 
 app = typer.Typer()
 audible_app = typer.Typer(help="Audible integration commands.")
@@ -596,10 +603,6 @@ def audible_status():
             typer.echo("  Token: Expired (will auto-refresh on next use)")
 
 
-if __name__ == "__main__":
-    app()
-
-
 @app.command()
 def duplicates():
     """Find and report duplicate books in the vault."""
@@ -626,3 +629,107 @@ def duplicates():
             detail_str = f" ({', '.join(details)})" if details else ""
             typer.echo(f"  - {path.name}{detail_str}")
         typer.echo()
+
+
+@app.command()
+def merge(
+    auto: bool = typer.Option(False, "--auto", help="Auto-merge duplicates when ISBN and Google ID match (no conflicts)")
+):
+    """Merge duplicate books in the vault.
+    
+    Without --auto: Interactive mode where you choose which books to merge.
+    With --auto: Automatically merge books when ISBN + Google ID match and no metadata conflicts exist.
+    """
+    vault_path = get_vault_path()
+    groups = find_duplicates(vault_path)
+
+    if not groups:
+        typer.echo("No duplicates found.")
+        return
+
+    total_merged = 0
+
+    for group_idx, group in enumerate(groups, 1):
+        typer.echo(f"\n{'='*60}")
+        typer.echo(f"Duplicate Group {group_idx} ({len(group)} books)")
+        typer.echo(f"{'='*60}")
+        
+        # Display group members
+        for path in group:
+            fm = read_frontmatter(path)
+            title = fm.get("title", "Unknown") if fm else "Unknown"
+            status = fm.get("status", "Unknown") if fm else "Unknown"
+            isbn = fm.get("isbn") if fm else None
+            gid = fm.get("google_books_id") if fm else None
+            details = [f"Status: {status}"]
+            if isbn:
+                details.append(f"ISBN: {isbn}")
+            if gid:
+                details.append(f"Google ID: {gid}")
+            typer.echo(f"  {path.name}")
+            typer.echo(f"    {title} | {' | '.join(details)}")
+
+        if len(group) < 2:
+            continue
+
+        # Pick the most complete book as primary; merge others into it
+        primary = get_primary_book(group[0], group[1])
+        for candidate in group[2:]:
+            primary = get_primary_book(primary, candidate)
+        secondaries = [p for p in group if p != primary]
+
+        typer.echo(f"\n  Primary (keeper): {primary.name}")
+
+        for secondary in secondaries:
+            typer.echo(f"\n  Merging {secondary.name} into {primary.name}...")
+
+            try:
+                if auto:
+                    can_merge, reason, merge_result = check_auto_merge(primary, secondary)
+                    if not can_merge:
+                        typer.echo(f"    Skipped: {reason}")
+                        continue
+
+                    merged_fm, merged_body, _ = merge_result
+                    write_merged_book(primary, merged_fm, merged_body)
+                    delete_secondary_file(secondary)
+                    typer.echo(f"    Auto-merged successfully")
+                    total_merged += 1
+                else:
+                    merged_fm, merged_body, conflicts = merge_two_books(primary, secondary, allow_conflicts=False)
+
+                    if conflicts:
+                        typer.echo(f"    Conflicts detected:")
+                        for conflict in conflicts:
+                            typer.echo(f"      {conflict.field}: '{conflict.primary_value}' vs '{conflict.secondary_value}'")
+                        confirm = questionary.confirm(
+                            "    Proceed with merge (keeping primary's conflicting values)?",
+                            default=False
+                        ).ask()
+                        if not confirm:
+                            typer.echo(f"    Skipped by user")
+                            continue
+
+                        merged_fm, merged_body, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+                    else:
+                        confirm = questionary.confirm(
+                            f"    No conflicts. Merge {secondary.name} into {primary.name}?",
+                            default=True
+                        ).ask()
+                        if not confirm:
+                            typer.echo(f"    Skipped by user")
+                            continue
+
+                    write_merged_book(primary, merged_fm, merged_body)
+                    delete_secondary_file(secondary)
+                    typer.echo(f"    Merged successfully")
+                    total_merged += 1
+            except Exception as e:
+                typer.echo(f"    Error: {e}")
+                continue
+
+    typer.echo(f"\nMerge complete: {total_merged} duplicate(s) merged")
+
+
+if __name__ == "__main__":
+    app()
