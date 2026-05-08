@@ -242,6 +242,35 @@ def test_import_updates_format_on_duplicate(tmp_path):
     assert "format: Audiobook" in content
 
 
+def test_import_updates_format_when_field_missing(tmp_path):
+    """Test that format update works when the format field is completely missing from frontmatter."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    set_config("book_vault", str(vault))
+
+    # Create a book note without a format field at all
+    existing = vault / "My Book - Author A.md"
+    existing.write_text(
+        "---\n"
+        "title: My Book\n"
+        "author:\n"
+        "- Author A\n"
+        "status: Read\n"
+        "---\n",
+        encoding="utf-8"
+    )
+
+    data = [{"title": "My Book", "author": "Author A", "finished": "Yes"}]
+    json_file = _write_audible_json(tmp_path / "library.json", data)
+
+    result = run_import(json_file, vault, apply=True)
+    assert len(result.updated_books) == 1
+    assert "format" in result.updated_books[0][2]
+
+    content = existing.read_text(encoding="utf-8")
+    assert "format: Audiobook" in content
+
+
 def test_import_updates_both_status_and_format(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
