@@ -345,6 +345,25 @@ def _normalize_for_match(text: str) -> str:
     return normalize_for_match(text)
 
 
+def _build_search_query(filename_stem: str) -> str:
+    """Build an effective Google Books search query from a filename stem.
+
+    Handles common filename patterns like:
+      - "Title - Author"
+      - "Title Subtitle - Author"
+
+    Splits on " - " to separate title from author, then uses Google Books
+    query operators (intitle:/inauthor:) for more precise results.
+    If no separator is found, returns the stem as-is.
+    """
+    parts = filename_stem.split(" - ", maxsplit=1)
+    if len(parts) == 2:
+        title_part = parts[0].strip()
+        author_part = parts[1].strip()
+        return f"intitle:{title_part} inauthor:{author_part}"
+    return filename_stem
+
+
 def _titles_match(filename_stem: str, book_title: str) -> bool:
     """Check if a Google Books title fuzzy-matches the filename stem.
 
@@ -365,13 +384,13 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
     is a fuzzy match. If it matches, applies the enrichment. If not, appends
     the filename to unmatched_log for later reporting.
     """
-    query = _normalize_for_match(file_path.stem)
-    if not query:
+    query = _build_search_query(file_path.stem)
+    if not _normalize_for_match(query):
         unmatched_log.append(file_path.name)
         return False
 
     client = GoogleBooksClient()
-    results = client.search(file_path.stem)
+    results = client.search(query)
 
     if not results:
         unmatched_log.append(file_path.name)
@@ -381,7 +400,7 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
     if _titles_match(file_path.stem, first.title):
         if update_frontmatter_from_book(file_path, first):
             # Append a note to the body indicating this was an automatic match
-            _append_auto_enrich_note(file_path, first.title, file_path.stem)
+            _append_auto_enrich_note(file_path, first.title, query)
             typer.echo(f"Auto-enriched: {file_path.name} → \"{first.title}\" by {', '.join(first.authors)}")
             return True
         return False
@@ -434,7 +453,7 @@ def _append_auto_enrich_note(file_path: Path, matched_title: str, original_query
 
 def _enrich_interactive(file_path: Path) -> bool:
     """Run the interactive enrich flow for a single file. Returns True if enriched."""
-    default_query = file_path.stem
+    default_query = _build_search_query(file_path.stem)
     query = questionary.text(
         f"Search query for Google Books ({file_path.name}):",
         default=default_query,
@@ -630,7 +649,7 @@ def duplicates():
 @app.command(name="import")
 def import_cmd(
     file: str = typer.Argument(..., help="Path to the import file (JSON or CSV)"),
-    format: str = typer.Option(None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"),
+    fmt: str | None = typer.Option(None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"),
     apply: bool = typer.Option(False, "--apply", help="Actually create/update notes (default is dry-run)"),
     limit: int = typer.Option(0, "--limit", "-n", help="Process only the first N entries (0 = all)"),
 ):
@@ -650,7 +669,7 @@ def import_cmd(
         raise typer.Exit(code=1)
 
     try:
-        result = run_import(file_path, vault_path, apply=apply, format_name=format, limit=limit)
+        result = run_import(file_path, vault_path, apply=apply, format_name=fmt, limit=limit)
     except (ValueError, FileNotFoundError) as e:
         typer.echo(f"Error: {e}")
         raise typer.Exit(code=1)
