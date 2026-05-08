@@ -207,14 +207,24 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
         if fm is not None:
             file_data.append((p, fm))
 
+    def _author_key(fm: Dict[str, Any]) -> str:
+        author = fm.get("author")
+        if isinstance(author, list):
+            return ",".join(sorted(a.strip().lower() for a in author if isinstance(a, str)))
+        elif isinstance(author, str):
+            return author.strip().lower()
+        return ""
+
     # Build groups keyed by each identifier type.
     # key -> set of indices into file_data
     groups_by_key: Dict[str, set[int]] = {}
+    # Title groups need pairwise author comparison (missing author = wildcard)
+    title_groups: Dict[str, list[int]] = {}
+
     for idx, (path, fm) in enumerate(file_data):
         title = fm.get("title")
         if title and isinstance(title, str):
-            key = f"title:{title.strip().lower()}"
-            groups_by_key.setdefault(key, set()).add(idx)
+            title_groups.setdefault(title.strip().lower(), []).append(idx)
 
         isbn = fm.get("isbn")
         if isbn:
@@ -239,6 +249,17 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[rb] = ra
+
+    # Title duplicates: same title + (same author OR either has no author)
+    for members in title_groups.values():
+        if len(members) < 2:
+            continue
+        for i, idx_a in enumerate(members):
+            ak = _author_key(file_data[idx_a][1])
+            for idx_b in members[i + 1 :]:
+                bk = _author_key(file_data[idx_b][1])
+                if not ak or not bk or ak == bk:
+                    union(idx_a, idx_b)
 
     for members in groups_by_key.values():
         if len(members) < 2:
