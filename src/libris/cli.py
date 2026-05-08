@@ -10,6 +10,7 @@ from .api import GoogleBooksClient, Book
 from .markdown import create_book_note, update_book_status, list_books, ensure_frontmatter_fields, read_frontmatter, update_frontmatter_from_book, find_duplicates, rename_book_file, RenameResult
 from .config import get_vault_path, set_config, get_obsidian_vault_root, set_book_vault_path
 from .audible_client import get_auth_file, is_authenticated, get_locale
+from .importer import normalize_for_match, run_import, SUPPORTED_FORMATS
 
 app = typer.Typer()
 audible_app = typer.Typer(help="Audible integration commands.")
@@ -337,9 +338,11 @@ def cleanup(
             typer.echo(f"  • {name}")
 
 def _normalize_for_match(text: str) -> str:
-    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace."""
-    text = re.sub(r'[^\w\s]', ' ', text.lower())
-    return re.sub(r'\s+', ' ', text).strip()
+    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace.
+
+    Delegates to the shared implementation in importer module.
+    """
+    return normalize_for_match(text)
 
 
 def _titles_match(filename_stem: str, book_title: str) -> bool:
@@ -626,3 +629,56 @@ def duplicates():
             detail_str = f" ({', '.join(details)})" if details else ""
             typer.echo(f"  - {path.name}{detail_str}")
         typer.echo()
+
+
+@app.command(name="import")
+def import_cmd(
+    file: str = typer.Argument(..., help="Path to the import file (JSON or CSV)"),
+    format: str = typer.Option(None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"),
+    apply: bool = typer.Option(False, "--apply", help="Actually create/update notes (default is dry-run)"),
+    limit: int = typer.Option(0, "--limit", "-n", help="Process only the first N entries (0 = all)"),
+):
+    """Import books from a JSON or CSV file into your vault.
+
+    By default, runs in dry-run mode showing what would happen.
+    Use --apply to actually create and update notes.
+    """
+    file_path = Path(file).expanduser().resolve()
+    if not file_path.exists():
+        typer.echo(f"File not found: {file_path}")
+        raise typer.Exit(code=1)
+
+    vault_path = get_vault_path()
+    if not vault_path.exists():
+        typer.echo(f"Vault path does not exist: {vault_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        result = run_import(file_path, vault_path, apply=apply, format_name=format, limit=limit)
+    except (ValueError, FileNotFoundError) as e:
+        typer.echo(f"Error: {e}")
+        raise typer.Exit(code=1)
+
+    mode_label = "Import" if apply else "Dry run"
+    typer.echo(f"\n{mode_label} complete:")
+    typer.echo(f"  {len(result.new_books)} new book(s) {'added' if apply else 'would be added'}")
+    typer.echo(f"  {len(result.updated_books)} existing book(s) {'updated' if apply else 'would be updated'}")
+    typer.echo(f"  {len(result.skipped_books)} duplicate(s) already up-to-date (skipped)")
+
+    if result.new_books:
+        preview_count = min(len(result.new_books), 20)
+        typer.echo(f"\n{'Added' if apply else 'New'} books (showing {preview_count} of {len(result.new_books)}):")
+        for book in result.new_books[:preview_count]:
+            authors_str = ", ".join(book.authors)
+            typer.echo(f"  + {book.title} by {authors_str}")
+        if len(result.new_books) > preview_count:
+            typer.echo(f"  ... and {len(result.new_books) - preview_count} more")
+
+    if result.updated_books:
+        typer.echo(f"\n{'Updated' if apply else 'Would update'}:")
+        for book, path, updates in result.updated_books:
+            update_desc = ", ".join(updates)
+            typer.echo(f"  ~ {path.name} ({update_desc})")
+
+    if not apply and (result.new_books or result.updated_books):
+        typer.echo("\nRun with --apply to execute these changes.")
