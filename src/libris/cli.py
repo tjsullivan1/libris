@@ -245,7 +245,7 @@ def clean(
 def cleanup(
     rename: bool = typer.Option(False, "--rename", help="Rename files to canonical Title - Author.md format"),
     auto_enrich: bool = typer.Option(False, "--auto-enrich", help="Automatically enrich from Google Books when title/author is missing (uses first matching result)"),
-    limit: int = typer.Option(0, "--limit", "-n", help="Process only the first N books (0 = all)"),
+    limit: int = typer.Option(0, "--limit", "-n", help="Stop after N files that needed action (0 = unlimited)"),
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
     vault_path = get_vault_path()
@@ -255,24 +255,28 @@ def cleanup(
         typer.echo("No books found in vault.")
         return
 
-    if limit > 0:
-        books = books[:limit]
-        typer.echo(f"Processing first {len(books)} book(s) (of {len(list_books(vault_path))} total).")
-
     vault_root = get_obsidian_vault_root() or vault_path if rename else None
 
     updated_count = 0
     renamed_count = 0
     skipped_count = 0
+    action_count = 0
     unmatched_files: list[str] = []
     for i, book_file in enumerate(books, 1):
-        if i % 100 == 0:
-            typer.echo(f"Processing {i}/{len(books)}...")
+        if limit > 0 and action_count >= limit:
+            typer.echo(f"Limit reached ({limit}). Stopping.")
+            break
+
+        limit_status = f" ({action_count} of {limit} limit used)" if limit > 0 else ""
+        typer.echo(f"Processing file {i}...{limit_status} {book_file.name}", nl=False)
+
+        file_had_action = False
 
         updated, fm = ensure_frontmatter_fields(book_file)
         if updated:
             updated_count += 1
-            typer.echo(f"Updated: {book_file.name}")
+            file_had_action = True
+            typer.echo(f"\n  Updated: {book_file.name}", nl=False)
 
         if rename:
             result = rename_book_file(book_file, vault_root, frontmatter=fm)
@@ -281,9 +285,10 @@ def cleanup(
             if result.status in ("missing_title", "missing_author"):
                 enriched = False
                 if auto_enrich:
+                    typer.echo("")  # newline before enrich output
                     enriched = _enrich_auto(book_file, unmatched_files)
                 else:
-                    typer.echo(f"{book_file.name}: {result.status.replace('_', ' ')}")
+                    typer.echo(f"\n  {book_file.name}: {result.status.replace('_', ' ')}")
                     if questionary.confirm(
                         f"Enrich {book_file.name} from Google Books?",
                         default=True,
@@ -295,15 +300,24 @@ def cleanup(
                     _, fm = ensure_frontmatter_fields(book_file)
                     result = rename_book_file(book_file, vault_root, frontmatter=fm)
 
+                file_had_action = True
+
             if result.status == "renamed":
                 renamed_count += 1
-                typer.echo(f"Renamed: {book_file.name} → {result.new_path.name}")
-            else:
+                file_had_action = True
+                typer.echo(f"\n  Renamed: {book_file.name} → {result.new_path.name}", nl=False)
+            elif result.status not in ("already_canonical",):
                 msg = _format_rename_skip(book_file.name, result)
                 if msg:
                     skipped_count += 1
-                    typer.echo(msg)
+                    file_had_action = True
+                    typer.echo(f"\n  {msg}", nl=False)
 
+        typer.echo("")  # final newline for this file
+        if file_had_action:
+            action_count += 1
+
+    typer.echo("")
     if updated_count == 0:
         typer.echo("All books are already up to date.")
     else:
