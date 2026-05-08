@@ -1,6 +1,4 @@
 import pytest
-import os
-from pathlib import Path
 
 @pytest.fixture(autouse=True)
 def mock_config_dir(tmp_path, monkeypatch):

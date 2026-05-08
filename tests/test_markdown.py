@@ -2,7 +2,7 @@ from pathlib import Path
 import time
 from statistics import median
 from libris.api import Book
-from libris.markdown import create_book_note, sanitize_filename, standardize_title, list_books, read_frontmatter, update_frontmatter_from_book, compute_canonical_filename, update_wikilinks_in_vault, rename_book_file, RenameResult
+from libris.markdown import create_book_note, sanitize_filename, standardize_title, list_books, read_frontmatter, update_frontmatter_from_book, compute_canonical_filename, update_wikilinks_in_vault, rename_book_file
 
 def test_sanitize_filename():
     assert sanitize_filename("Title: With Colon") == "Title With Colon"

@@ -2,7 +2,7 @@ import httpx
 import time
 import logging
 import socket
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 from dataclasses import dataclass
 from .config import get_api_key
 

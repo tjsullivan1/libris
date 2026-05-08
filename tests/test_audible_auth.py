@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
-from libris.audible_client import get_auth_file
 from libris.cli import app
 
 runner = CliRunner()

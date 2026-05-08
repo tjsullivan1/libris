@@ -7,13 +7,9 @@ This project uses **GitHub Issues** for issue tracking.
 
 ## Build & Test
 
-_Add your build and test commands here_
-
-```bash
-# Example:
-# npm install
-# npm test
-```
+- tests use pytest
+- do NOT invoke pytest directly, use uv run pytest
+- use ruff for linting and formatting
 
 ## Architecture Overview
 

@@ -1,4 +1,3 @@
-import json
 from unittest.mock import MagicMock, patch
 
 from libris.audible_client import AudibleBook, AudibleClient, get_auth_file, is_authenticated, get_locale

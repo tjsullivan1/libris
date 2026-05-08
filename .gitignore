@@ -16,3 +16,6 @@ wheels/
 .dolt/
 *.db
 .beads-credential-key
+
+# claude worktrees 
+.claude/worktrees

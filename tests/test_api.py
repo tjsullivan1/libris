@@ -1,5 +1,5 @@
 from unittest.mock import MagicMock
-from libris.api import GoogleBooksClient, Book
+from libris.api import GoogleBooksClient
 
 def test_search_gatsby():
     client = GoogleBooksClient()
@@ -23,7 +23,6 @@ def test_search_gatsby():
         ]
     }
     
-    import httpx
     from unittest.mock import patch
     
     with patch("httpx.Client.get") as mock_get:
