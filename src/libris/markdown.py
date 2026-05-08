@@ -254,12 +254,28 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
     for members in title_groups.values():
         if len(members) < 2:
             continue
-        for i, idx_a in enumerate(members):
-            ak = _author_key(file_data[idx_a][1])
-            for idx_b in members[i + 1 :]:
-                bk = _author_key(file_data[idx_b][1])
-                if not ak or not bk or ak == bk:
-                    union(idx_a, idx_b)
+
+        author_buckets: Dict[str, list[int]] = {}
+        has_missing_author = False
+
+        for idx in members:
+            author_key = _author_key(file_data[idx][1])
+            if author_key:
+                author_buckets.setdefault(author_key, []).append(idx)
+            else:
+                has_missing_author = True
+
+        if has_missing_author:
+            first = members[0]
+            for other in members[1:]:
+                union(first, other)
+        else:
+            for bucket_members in author_buckets.values():
+                if len(bucket_members) < 2:
+                    continue
+                first = bucket_members[0]
+                for other in bucket_members[1:]:
+                    union(first, other)
 
     for members in groups_by_key.values():
         if len(members) < 2:
