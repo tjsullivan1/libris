@@ -191,11 +191,28 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
 
     if "format" in updates:
         content = path.read_text(encoding="utf-8")
-        pattern = r"(format:\s*)(.*)"
-        new_content = re.sub(pattern, f"\\1{book.format}", content)
-        if new_content == content:
-            # format field might be null — replace the null value
-            new_content = content.replace("format: null", f"format: {book.format}")
+        pattern = r"(?m)^(format:\s*).*$"
+        new_content, replacements = re.subn(
+            pattern,
+            f"\\1{book.format}",
+            content,
+            count=1,
+        )
+        if replacements == 0:
+            frontmatter_match = re.match(
+                r"\A---\n(?P<frontmatter>.*?)(?P<closing>^---\s*$)",
+                content,
+                flags=re.DOTALL | re.MULTILINE,
+            )
+            if frontmatter_match:
+                insert_at = frontmatter_match.start("closing")
+                new_content = (
+                    content[:insert_at]
+                    + f"format: {book.format}\n"
+                    + content[insert_at:]
+                )
+            else:
+                new_content = content
         path.write_text(new_content, encoding="utf-8")
 
 
