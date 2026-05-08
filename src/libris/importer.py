@@ -1,9 +1,7 @@
 import json
 import re
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from datetime import date
 from typing import Dict, List, Optional, Tuple
 
 from .api import Book
@@ -13,9 +11,6 @@ from .markdown import (
     read_frontmatter,
     update_book_status,
 )
-
-logger = logging.getLogger(__name__)
-
 
 def normalize_for_match(text: str) -> str:
     """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace."""
