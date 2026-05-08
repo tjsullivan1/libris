@@ -1,10 +1,6 @@
-import typer
 from typer.testing import CliRunner
 from libris.cli import app
-import os
-from pathlib import Path
 import yaml
-import pytest
 
 runner = CliRunner()
 
@@ -227,3 +223,27 @@ def test_list_command_timing_flag(tmp_path):
     assert result.exit_code == 0
     assert "- Book.md [To Read]" in result.output
     assert "Scan time:" in result.output
+
+
+class TestBuildSearchQuery:
+    """Tests for _build_search_query helper."""
+
+    def test_title_with_author_separator(self):
+        from libris.cli import _build_search_query
+        result = _build_search_query("The First Rule of Mastery Stop Worrying about What People Think of You - Michael Gervais")
+        assert result == "intitle:The First Rule of Mastery Stop Worrying about What People Think of You inauthor:Michael Gervais"
+
+    def test_plain_title_no_separator(self):
+        from libris.cli import _build_search_query
+        result = _build_search_query("Atomic Habits")
+        assert result == "Atomic Habits"
+
+    def test_multiple_separators_splits_on_first(self):
+        from libris.cli import _build_search_query
+        result = _build_search_query("Title - Subtitle - Author")
+        assert result == "intitle:Title inauthor:Subtitle - Author"
+
+    def test_empty_string(self):
+        from libris.cli import _build_search_query
+        result = _build_search_query("")
+        assert result == ""

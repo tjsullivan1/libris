@@ -25,6 +25,7 @@ from .config import (
     set_book_vault_path,
 )
 from .audible_client import get_auth_file, get_locale
+from .importer import normalize_for_match, run_import, SUPPORTED_FORMATS
 from .merge import (
     merge_two_books,
     check_auto_merge,
@@ -387,9 +388,30 @@ def cleanup(
 
 
 def _normalize_for_match(text: str) -> str:
-    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace."""
-    text = re.sub(r"[^\w\s]", " ", text.lower())
-    return re.sub(r"\s+", " ", text).strip()
+    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace.
+
+    Delegates to the shared implementation in importer module.
+    """
+    return normalize_for_match(text)
+
+
+def _build_search_query(filename_stem: str) -> str:
+    """Build an effective Google Books search query from a filename stem.
+
+    Handles common filename patterns like:
+      - "Title - Author"
+      - "Title Subtitle - Author"
+
+    Splits on " - " to separate title from author, then uses Google Books
+    query operators (intitle:/inauthor:) for more precise results.
+    If no separator is found, returns the stem as-is.
+    """
+    parts = filename_stem.split(" - ", maxsplit=1)
+    if len(parts) == 2:
+        title_part = parts[0].strip()
+        author_part = parts[1].strip()
+        return f"intitle:{title_part} inauthor:{author_part}"
+    return filename_stem
 
 
 def _titles_match(filename_stem: str, book_title: str) -> bool:
@@ -412,13 +434,13 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
     is a fuzzy match. If it matches, applies the enrichment. If not, appends
     the filename to unmatched_log for later reporting.
     """
-    query = _normalize_for_match(file_path.stem)
-    if not query:
+    query = _build_search_query(file_path.stem)
+    if not _normalize_for_match(query):
         unmatched_log.append(file_path.name)
         return False
 
     client = GoogleBooksClient()
-    results = client.search(file_path.stem)
+    results = client.search(query)
 
     if not results:
         unmatched_log.append(file_path.name)
@@ -428,10 +450,8 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
     if _titles_match(file_path.stem, first.title):
         if update_frontmatter_from_book(file_path, first):
             # Append a note to the body indicating this was an automatic match
-            _append_auto_enrich_note(file_path, first.title, file_path.stem)
-            typer.echo(
-                f'Auto-enriched: {file_path.name} → "{first.title}" by {", ".join(first.authors)}'
-            )
+            _append_auto_enrich_note(file_path, first.title, query)
+            typer.echo(f"Auto-enriched: {file_path.name} → \"{first.title}\" by {', '.join(first.authors)}")
             return True
         return False
     else:
@@ -485,7 +505,7 @@ def _append_auto_enrich_note(
 
 def _enrich_interactive(file_path: Path) -> bool:
     """Run the interactive enrich flow for a single file. Returns True if enriched."""
-    default_query = file_path.stem
+    default_query = _build_search_query(file_path.stem)
     query = questionary.text(
         f"Search query for Google Books ({file_path.name}):",
         default=default_query,
@@ -805,6 +825,59 @@ def merge(
                 continue
 
     typer.echo(f"\nMerge complete: {total_merged} duplicate(s) merged")
+
+
+@app.command(name="import")
+def import_cmd(
+    file: str = typer.Argument(..., help="Path to the import file (JSON or CSV)"),
+    fmt: str | None = typer.Option(None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"),
+    apply: bool = typer.Option(False, "--apply", help="Actually create/update notes (default is dry-run)"),
+    limit: int = typer.Option(0, "--limit", "-n", help="Process only the first N entries (0 = all)"),
+):
+    """Import books from a JSON or CSV file into your vault.
+
+    By default, runs in dry-run mode showing what would happen.
+    Use --apply to actually create and update notes.
+    """
+    file_path = Path(file).expanduser().resolve()
+    if not file_path.exists():
+        typer.echo(f"File not found: {file_path}")
+        raise typer.Exit(code=1)
+
+    vault_path = get_vault_path()
+    if not vault_path.exists():
+        typer.echo(f"Vault path does not exist: {vault_path}")
+        raise typer.Exit(code=1)
+
+    try:
+        result = run_import(file_path, vault_path, apply=apply, format_name=fmt, limit=limit)
+    except (ValueError, FileNotFoundError) as e:
+        typer.echo(f"Error: {e}")
+        raise typer.Exit(code=1)
+
+    mode_label = "Import" if apply else "Dry run"
+    typer.echo(f"\n{mode_label} complete:")
+    typer.echo(f"  {len(result.new_books)} new book(s) {'added' if apply else 'would be added'}")
+    typer.echo(f"  {len(result.updated_books)} existing book(s) {'updated' if apply else 'would be updated'}")
+    typer.echo(f"  {len(result.skipped_books)} duplicate(s) already up-to-date (skipped)")
+
+    if result.new_books:
+        preview_count = min(len(result.new_books), 20)
+        typer.echo(f"\n{'Added' if apply else 'New'} books (showing {preview_count} of {len(result.new_books)}):")
+        for book in result.new_books[:preview_count]:
+            authors_str = ", ".join(book.authors)
+            typer.echo(f"  + {book.title} by {authors_str}")
+        if len(result.new_books) > preview_count:
+            typer.echo(f"  ... and {len(result.new_books) - preview_count} more")
+
+    if result.updated_books:
+        typer.echo(f"\n{'Updated' if apply else 'Would update'}:")
+        for book, path, updates in result.updated_books:
+            update_desc = ", ".join(updates)
+            typer.echo(f"  ~ {path.name} ({update_desc})")
+
+    if not apply and (result.new_books or result.updated_books):
+        typer.echo("\nRun with --apply to execute these changes.")
 
 
 if __name__ == "__main__":
