@@ -1,9 +1,8 @@
 import json
 import re
-import logging
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
-from datetime import date
 from typing import Dict, List, Optional, Tuple
 
 from .api import Book
@@ -13,9 +12,6 @@ from .markdown import (
     read_frontmatter,
     update_book_status,
 )
-
-logger = logging.getLogger(__name__)
-
 
 def normalize_for_match(text: str) -> str:
     """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace."""
@@ -191,29 +187,32 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
 
     if "format" in updates:
         content = path.read_text(encoding="utf-8")
-        pattern = r"(?m)^(format:\s*).*$"
-        new_content, replacements = re.subn(
-            pattern,
-            f"\\1{book.format}",
-            content,
-            count=1,
-        )
-        if replacements == 0:
-            frontmatter_match = re.match(
-                r"\A---\n(?P<frontmatter>.*?)(?P<closing>^---\s*$)",
-                content,
-                flags=re.DOTALL | re.MULTILINE,
-            )
-            if frontmatter_match:
-                insert_at = frontmatter_match.start("closing")
-                new_content = (
-                    content[:insert_at]
-                    + f"format: {book.format}\n"
-                    + content[insert_at:]
-                )
-            else:
-                new_content = content
-        path.write_text(new_content, encoding="utf-8")
+        # Parse frontmatter using YAML to properly handle missing fields
+        match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
+        
+        if match:
+            frontmatter_yaml = match.group(1)
+            rest_of_content = match.group(2)
+            
+            try:
+                data = yaml.safe_load(frontmatter_yaml)
+                if isinstance(data, dict):
+                    # Update the format field
+                    data["format"] = book.format
+                    # Write back the updated frontmatter
+                    new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+                    # Preserve content structure: remove only leading newlines
+                    content_part = rest_of_content.lstrip('\n')
+                    new_content = f"---\n{new_frontmatter}\n---\n{content_part}"
+                    path.write_text(new_content, encoding="utf-8")
+            except yaml.YAMLError:
+                # Fallback to regex replacement if YAML parsing fails
+                pattern = r"(format:\s*)(.*)"
+                new_content = re.sub(pattern, f"\\1{book.format}", content)
+                if new_content == content:
+                    # format field might be null — replace the null value
+                    new_content = content.replace("format: null", f"format: {book.format}")
+                path.write_text(new_content, encoding="utf-8")
 
 
 def _to_api_book(import_book: ImportBook) -> Book:
@@ -263,7 +262,7 @@ def run_import(
                     new_content = content.replace("format: null", f"format: {book.format}")
                     created_path.write_text(new_content, encoding="utf-8")
         else:
-            dup_path, dup_fm, updates = dup
+            dup_path, _, updates = dup
             if updates:
                 result.updated_books.append((book, dup_path, updates))
                 if apply:
