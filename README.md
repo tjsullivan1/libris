@@ -6,6 +6,7 @@ A simple CLI tool to track your reading list in Obsidian. The name comes from th
 - Search books using the Google Books API.
 - Add books to your Obsidian vault with a pre-defined schema (Frontmatter).
 - Track reading status (To Read, Reading, Finished).
+- Enrich existing book notes with data from Google Books.
 - Interactive search and selection.
 
 ## Installation
@@ -17,10 +18,21 @@ uv run libris --help
 
 ## Usage
 
-### 1. Configure your Vault Path
-Set the directory where your book notes will be stored.
+### 1. Configure Libris
+Set the directory where your book notes will be stored, your Obsidian vault root, and optionally a Google Books API key.
+
 ```bash
+# Set the folder where book notes are stored
 libris config --vault ~/Documents/ObsidianVault/Books
+
+# Set the Obsidian vault root (used for wikilink updates when renaming files)
+libris config --obsidian-vault ~/Documents/ObsidianVault
+
+# Set a Google Books API key (optional; increases rate limits)
+libris config --api-key YOUR_KEY
+
+# Show current configuration
+libris config
 ```
 
 ### 2. Search for Books
@@ -56,7 +68,17 @@ Select a book from your vault and update its status.
 libris list
 ```
 
-### 6. Clean Up Book Notes
+### 6. Enrich a Book Note
+Fill in missing frontmatter fields for an existing book note using Google Books data.
+```bash
+# Select a book interactively
+libris enrich
+
+# Enrich a specific file
+libris enrich "The Great Gatsby.md"
+```
+
+### 7. Clean Up Book Notes
 Standardize frontmatter and optionally rename files to the canonical `Title - Author.md` format:
 ```bash
 # Clean all book frontmatter (title casing, missing fields, etc.)
@@ -65,40 +87,21 @@ libris cleanup
 # Also rename files to match Title - Author.md pattern (updates wikilinks)
 libris cleanup --rename
 
+# Automatically enrich books with missing title/author from Google Books
+libris cleanup --rename --auto-enrich
+
+# Stop after N files that needed action
+libris cleanup --limit 10
+
 # Clean a single book interactively
 libris clean
 libris clean --rename
-```
-
-### 7. Configure Obsidian Vault Root
-If your book folder is a subdirectory of a larger Obsidian vault, configure the vault root so wikilink updates search the entire vault:
-```bash
-libris config --obsidian-vault ~/Documents/ObsidianVault
 ```
 
 ### 8. Find Duplicate Books
 Scan your vault for duplicate book notes matched by title, ISBN, or Google Books ID.
 ```bash
 libris duplicates
-```
-
-### 9. Audible Integration
-Connect your Audible account to sync your audiobook library.
-
-```bash
-# Authenticate with Audible (opens your browser)
-libris audible login
-
-# Check authentication status
-libris audible status
-
-# Log out and deregister the device
-libris audible logout
-```
-
-You can specify a marketplace locale during login:
-```bash
-libris audible login --locale uk
 ```
 
 ## Schema
