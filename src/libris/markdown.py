@@ -207,14 +207,24 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
         if fm is not None:
             file_data.append((p, fm))
 
+    def _author_key(fm: Dict[str, Any]) -> tuple[str, ...]:
+        author = fm.get("author")
+        if isinstance(author, list):
+            return tuple(sorted(a.strip().lower() for a in author if isinstance(a, str)))
+        elif isinstance(author, str):
+            return (author.strip().lower(),)
+        return ()
+
     # Build groups keyed by each identifier type.
     # key -> set of indices into file_data
     groups_by_key: Dict[str, set[int]] = {}
+    # Title groups need pairwise author comparison (missing author = wildcard)
+    title_groups: Dict[str, list[int]] = {}
+
     for idx, (path, fm) in enumerate(file_data):
         title = fm.get("title")
         if title and isinstance(title, str):
-            key = f"title:{title.strip().lower()}"
-            groups_by_key.setdefault(key, set()).add(idx)
+            title_groups.setdefault(title.strip().lower(), []).append(idx)
 
         isbn = fm.get("isbn")
         if isbn:
@@ -239,6 +249,33 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[rb] = ra
+
+    # Title duplicates: same title + (same author OR either has no author)
+    for members in title_groups.values():
+        if len(members) < 2:
+            continue
+
+        author_buckets: Dict[str, list[int]] = {}
+        has_missing_author = False
+
+        for idx in members:
+            author_key = _author_key(file_data[idx][1])
+            if author_key:
+                author_buckets.setdefault(author_key, []).append(idx)
+            else:
+                has_missing_author = True
+
+        if has_missing_author:
+            first = members[0]
+            for other in members[1:]:
+                union(first, other)
+        else:
+            for bucket_members in author_buckets.values():
+                if len(bucket_members) < 2:
+                    continue
+                first = bucket_members[0]
+                for other in bucket_members[1:]:
+                    union(first, other)
 
     for members in groups_by_key.values():
         if len(members) < 2:
