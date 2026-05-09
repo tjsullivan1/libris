@@ -3,6 +3,8 @@
 This file provides instructions and context for AI coding agents working on this project.
 
 This project uses **GitHub Issues** for issue tracking.
+- When starting on a new task, before changing filess ask the user if a branch already exists. If it doesn't, create a new branch.
+- when feature development/bug fix is complete, ask user if they would like a PR
 
 
 ## Build & Test
