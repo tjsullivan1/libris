@@ -503,31 +503,37 @@ def _append_auto_enrich_note(
     file_path.write_text(content.rstrip() + note + "\n", encoding="utf-8")
 
 
-def _enrich_interactive(file_path: Path) -> bool:
-    """Run the interactive enrich flow for a single file. Returns True if enriched."""
-    default_query = _build_search_query(file_path.stem)
-    query = questionary.text(
-        f"Search query for Google Books ({file_path.name}):",
-        default=default_query,
-    ).ask()
+def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
+    """Run the interactive enrich flow for a single file. Returns True if enriched.
 
-    if not query:
-        return False
+    If *results* is provided the search step is skipped and those results are
+    presented directly for selection.
+    """
+    if results is None:
+        default_query = _build_search_query(file_path.stem)
+        query = questionary.text(
+            f"Search query for Google Books ({file_path.name}):",
+            default=default_query,
+        ).ask()
 
-    client = GoogleBooksClient()
-    results = client.search(query)
+        if not query:
+            return False
+
+        client = GoogleBooksClient()
+        results = client.search(query)
 
     if not results:
         typer.echo("No results found on Google Books.")
         return False
 
+    _SKIP_CHOICE = "[ Skip this book ]"
     result_choices = [f"{b.title} by {', '.join(b.authors)}" for b in results]
     selected_result = questionary.select(
         "Select the correct match:",
-        choices=result_choices,
+        choices=result_choices + [_SKIP_CHOICE],
     ).ask()
 
-    if not selected_result:
+    if not selected_result or selected_result == _SKIP_CHOICE:
         return False
 
     book = results[result_choices.index(selected_result)]
@@ -538,6 +544,185 @@ def _enrich_interactive(file_path: Path) -> bool:
     else:
         typer.echo(f"{file_path.name} already has all available data.")
         return False
+
+
+# Fields that are only populated via Google Books enrichment.
+_API_SOURCED_FIELDS = ("google_books_id", "thumbnail", "published_date", "page_count")
+
+
+def _needs_enrichment(fm: dict) -> bool:
+    """Return True if the book hasn't been enriched from Google Books yet.
+
+    A book is considered already enriched if *any* API-sourced field has a
+    non-empty value — this covers cases where google_books_id was not captured
+    but other fields (thumbnail, published_date, etc.) were filled by an
+    earlier enrichment.
+    """
+    return not any(fm.get(f) for f in _API_SOURCED_FIELDS)
+
+
+# Fields counted when ranking which edition has the most complete metadata.
+_COMPLETENESS_FIELDS = (
+    "isbn", "page_count", "published_date", "google_books_id",
+    "thumbnail", "genres", "description",
+)
+
+
+def _metadata_score(book) -> int:
+    """Count how many metadata fields are non-empty on a Book."""
+    score = 0
+    for field in _COMPLETENESS_FIELDS:
+        val = getattr(book, field, None)
+        if val:
+            # Lists/strings: only count if non-empty
+            if isinstance(val, (list, str)) and len(val) == 0:
+                continue
+            score += 1
+    return score
+
+
+def _best_match(candidates: list) -> object:
+    """Pick the candidate with the most complete metadata."""
+    return max(candidates, key=_metadata_score)
+
+
+def _build_query_from_frontmatter(fm: dict, file_path: Path) -> str:
+    """Build a Google Books search query preferring frontmatter over filename."""
+    title = fm.get("title")
+    author = fm.get("author")
+    if title and isinstance(title, str):
+        parts = [f"intitle:{title}"]
+        if author:
+            first_author = author[0] if isinstance(author, list) else author
+            parts.append(f"inauthor:{first_author}")
+        return " ".join(parts)
+    return _build_search_query(file_path.stem)
+
+
+@app.command()
+def autoenrich(
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        "-i",
+        help="Prompt user to select when multiple matches are found",
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n", help="Stop after N files that needed action (0 = unlimited)"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be enriched without making changes"
+    ),
+):
+    """Enrich all books in the vault by filling missing frontmatter from Google Books.
+
+    Iterates every book, searches Google Books, and auto-applies when there is
+    a single confident match.  When multiple plausible results are found, use
+    --interactive to select the right book; otherwise they are logged for later
+    review.
+    """
+    vault_path = get_vault_path()
+    books = list_books(vault_path)
+
+    if not books:
+        typer.echo("No books found in vault.")
+        return
+
+    client = GoogleBooksClient()
+
+    enriched_auto = 0
+    enriched_interactive = 0
+    skipped = 0
+    needs_interactive: list[str] = []
+    unmatched: list[str] = []
+    action_count = 0
+
+    for i, book_file in enumerate(books, 1):
+        if limit > 0 and action_count >= limit:
+            typer.echo(f"Limit reached ({limit}). Stopping.")
+            break
+
+        fm = read_frontmatter(book_file)
+        if fm is None:
+            skipped += 1
+            continue
+
+        if not _needs_enrichment(fm):
+            skipped += 1
+            continue
+
+        query = _build_query_from_frontmatter(fm, book_file)
+        typer.echo(f"[{i}/{len(books)}] {book_file.name}", nl=False)
+
+        if dry_run:
+            typer.echo(f" — would search: {query}")
+            action_count += 1
+            continue
+
+        results = client.search(query)
+
+        if not results:
+            # Fallback: try ISBN search if available
+            isbn = fm.get("isbn")
+            if isbn:
+                results = client.search(f"isbn:{isbn}")
+
+        if not results:
+            typer.echo(" — no results")
+            unmatched.append(book_file.name)
+            action_count += 1
+            continue
+
+        # Find confident matches via title comparison
+        confident = [b for b in results if _titles_match(book_file.stem, b.title)]
+
+        # Auto-apply when there's a single result, or all confident matches
+        # share the same title (i.e. different editions of the same book).
+        unique_titles = {_normalize_for_match(b.title) for b in confident} if confident else set()
+        if len(results) == 1 or (confident and len(unique_titles) == 1):
+            pick = _best_match(confident) if confident else results[0]
+            if update_frontmatter_from_book(book_file, pick):
+                typer.echo(f" — auto-enriched → \"{pick.title}\"")
+                enriched_auto += 1
+            else:
+                typer.echo(" — already up to date")
+                skipped += 1
+        elif interactive:
+            typer.echo("")  # newline before interactive prompt
+            if _enrich_interactive(book_file, results=results):
+                enriched_interactive += 1
+            else:
+                skipped += 1
+        else:
+            typer.echo(f" — {len(results)} results, needs interactive selection")
+            needs_interactive.append(book_file.name)
+
+        action_count += 1
+
+    # Summary
+    typer.echo("")
+    if dry_run:
+        typer.echo(f"Dry run: {action_count} book(s) would be enriched, {skipped} already complete.")
+        return
+
+    typer.echo(f"Enriched (auto): {enriched_auto}")
+    if enriched_interactive:
+        typer.echo(f"Enriched (interactive): {enriched_interactive}")
+    typer.echo(f"Skipped (already complete): {skipped}")
+
+    if needs_interactive:
+        typer.echo(
+            f"\n--- {len(needs_interactive)} book(s) need interactive selection (rerun with --interactive) ---"
+        )
+        for name in needs_interactive:
+            typer.echo(f"  • {name}")
+
+    if unmatched:
+        typer.echo(
+            f"\n--- {len(unmatched)} book(s) had no results ---"
+        )
+        for name in unmatched:
+            typer.echo(f"  • {name}")
 
 
 @app.command()
