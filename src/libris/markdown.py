@@ -193,6 +193,7 @@ _BOOK_TO_FRONTMATTER = {
     "description": None,  # handled separately (body, not frontmatter)
 }
 
+EXCLUDED_GOOGLE_BOOKS_IDS = {"_not_found_in_google_books_api", "_not_a_book", }
 
 def find_duplicates(vault_path: Path) -> list[list[Path]]:
     """Find groups of duplicate book notes by title, ISBN, or Google Books ID.
@@ -232,7 +233,7 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
             groups_by_key.setdefault(key, set()).add(idx)
 
         gid = fm.get("google_books_id")
-        if gid:
+        if gid and gid not in EXCLUDED_GOOGLE_BOOKS_IDS:
             key = f"gid:{str(gid).strip()}"
             groups_by_key.setdefault(key, set()).add(idx)
 
