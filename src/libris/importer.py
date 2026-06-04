@@ -1,4 +1,4 @@
-"""Import books from external sources (Audible JSON, CSV) into the vault."""
+"""Import books from external sources (currently Audible JSON) into the vault."""
 
 import json
 import re
