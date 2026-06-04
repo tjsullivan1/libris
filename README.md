@@ -120,7 +120,7 @@ Batch-enrich every book in your vault by filling missing frontmatter fields from
 # Enrich all books (auto-match only)
 libris autoenrich
 
-# Prompt for selection when multiple matches are found
+# Prompt for selection when multiple ambiguous matches are found
 libris autoenrich --interactive
 
 # Preview what would be enriched without making changes
