@@ -68,3 +68,9 @@ exclude = [
     "venv",
     ".claude",
 ]
+
+[tool.ruff.lint]
+select = ["E", "F", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
