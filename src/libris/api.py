@@ -1,3 +1,5 @@
+"""Google Books API client for searching and retrieving book metadata."""
+
 import httpx
 import time
 import logging

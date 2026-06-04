@@ -1,3 +1,5 @@
+"""Configuration management for Libris (vault paths, API keys, settings)."""
+
 import yaml
 import os
 from pathlib import Path

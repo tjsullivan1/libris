@@ -1,3 +1,5 @@
+"""Markdown file operations for book notes (frontmatter, creation, enrichment)."""
+
 import yaml
 import os
 import re

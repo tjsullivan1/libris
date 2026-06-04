@@ -1,3 +1,5 @@
+"""Import books from external sources (Audible JSON, CSV) into the vault."""
+
 import json
 import re
 import yaml
