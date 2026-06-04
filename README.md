@@ -104,6 +104,51 @@ Scan your vault for duplicate book notes matched by title, ISBN, or Google Books
 libris duplicates
 ```
 
+### 9. Merge Duplicates
+Merge duplicate book notes, combining metadata from both files into one.
+```bash
+# Interactive merge — review each duplicate group
+libris merge
+
+# Auto-merge when ISBN + Google ID match and no conflicts exist
+libris merge --auto
+```
+
+### 10. Auto-Enrich All Books
+Batch-enrich every book in your vault by filling missing frontmatter fields from Google Books. Automatically applies when there is a single result, or when all confident matches share the same title (e.g., different editions).
+```bash
+# Enrich all books (auto-match only)
+libris autoenrich
+
+# Prompt for selection when multiple ambiguous matches are found
+libris autoenrich --interactive
+
+# Preview what would be enriched without making changes
+libris autoenrich --dry-run
+
+# Stop after N files that needed action
+libris autoenrich --limit 10
+```
+
+### 11. Import Books
+Import books from external sources (e.g., Audible JSON export) into your vault. By default runs in dry-run mode showing what would happen.
+```bash
+# Dry-run: preview what would be imported
+libris import library.json
+
+# Actually create/update notes
+libris import library.json --apply
+
+# Specify format explicitly
+libris import library.json --format audible-json
+
+# Limit to first N entries
+libris import library.json --apply --limit 50
+```
+
+Currently supported import formats:
+- `audible-json` — Audible library JSON export (auto-detected for `.json` files)
+
 ## Schema
 Books are saved as Markdown files with the following frontmatter:
 - `title`
