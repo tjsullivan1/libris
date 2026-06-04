@@ -115,7 +115,7 @@ libris merge --auto
 ```
 
 ### 10. Auto-Enrich All Books
-Batch-enrich every book in your vault by filling missing frontmatter fields from Google Books. Automatically applies when a single confident match is found.
+Batch-enrich every book in your vault by filling missing frontmatter fields from Google Books. Automatically applies when there is a single result, or when all confident matches share the same title (e.g., different editions).
 ```bash
 # Enrich all books (auto-match only)
 libris autoenrich
