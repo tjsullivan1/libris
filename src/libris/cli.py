@@ -156,7 +156,10 @@ def add(
     query: str = typer.Argument(..., help="Title, author, or ISBN to search for"),
     status: str = typer.Option("To Read", "--status", "-s", help="Reading status"),
     medium: str | None = typer.Option(
-        None, "--format", "-f", help="Reading format (e.g., paperback, kindle, audiobook)"
+        None,
+        "--format",
+        "-f",
+        help="Reading format (e.g., paperback, kindle, audiobook)",
     ),
     rating: int | None = typer.Option(
         None, "--rating", "-r", help="Rating (1-5)", min=1, max=5

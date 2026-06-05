@@ -236,7 +236,9 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
             description=None,
         )
     ]
-    monkeypatch.setattr("libris.cli.GoogleBooksClient.search", lambda self, q: mock_books)
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search", lambda self, q: mock_books
+    )
 
     choice = "Dune by Frank Herbert"
 
@@ -244,7 +246,9 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
         def ask(self):
             return choice
 
-    monkeypatch.setattr("libris.cli.questionary.select", lambda *args, **kwargs: _Selection())
+    monkeypatch.setattr(
+        "libris.cli.questionary.select", lambda *args, **kwargs: _Selection()
+    )
     monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
 
     captured = {}
