@@ -2,11 +2,23 @@ from pathlib import Path
 import time
 from statistics import median
 from libris.api import Book
-from libris.markdown import create_book_note, sanitize_filename, standardize_title, list_books, read_frontmatter, update_frontmatter_from_book, compute_canonical_filename, update_wikilinks_in_vault, rename_book_file
+from libris.markdown import (
+    create_book_note,
+    sanitize_filename,
+    standardize_title,
+    list_books,
+    read_frontmatter,
+    update_frontmatter_from_book,
+    compute_canonical_filename,
+    update_wikilinks_in_vault,
+    rename_book_file,
+)
+
 
 def test_sanitize_filename():
     assert sanitize_filename("Title: With Colon") == "Title With Colon"
     assert sanitize_filename("Title / With / Slash") == "Title With Slash"
+
 
 def test_create_book_note(tmp_path):
     book = Book(
@@ -18,29 +30,32 @@ def test_create_book_note(tmp_path):
         google_books_id="xyz",
         thumbnail="http://example.com/thumb.jpg",
         genres=["Test"],
-        description="A test description"
+        description="A test description",
     )
-    
+
     file_path = create_book_note(book, tmp_path)
     assert file_path.exists()
     assert "Test Book - Author One.md" in file_path.name
-    
+
     content = file_path.read_text()
     assert "title: Test Book" in content
     assert "author:\n- Author One" in content
     assert "### Description" in content
     assert "A test description" in content
 
+
 def test_update_book_status(tmp_path):
     file_path = tmp_path / "test.md"
     file_path.write_text("---\ntitle: Test\nstatus: To Read\n---\n")
-    
+
     from libris.markdown import update_book_status
+
     update_book_status(file_path, "Reading")
-    
+
     content = file_path.read_text()
     assert "status: Reading" in content
     assert "status: To Read" not in content
+
 
 def test_ensure_frontmatter_fields(tmp_path):
     file_path = tmp_path / "legacy_book.md"
@@ -53,20 +68,20 @@ google_books_id: 123
 ## Notes
 Some existing notes here.
 """)
-    
+
     from libris.markdown import ensure_frontmatter_fields
-    
+
     # Run cleanup
     updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
-    
+
     content = file_path.read_text()
     assert "tags: Book" in content
     assert "format: null" in content
     assert "date_added:" in content
     assert "status: Finished" in content
     assert "Some existing notes here." in content
-    
+
     # Run again, should not update
     updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is False
@@ -80,6 +95,7 @@ def test_ensure_frontmatter_sets_status_read_when_date_finished(tmp_path):
     )
 
     from libris.markdown import ensure_frontmatter_fields
+
     updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
@@ -94,6 +110,7 @@ def test_ensure_frontmatter_converts_author_string_to_list(tmp_path):
     )
 
     from libris.markdown import ensure_frontmatter_fields
+
     updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
@@ -104,12 +121,15 @@ def test_ensure_frontmatter_converts_author_string_to_list(tmp_path):
 def test_ensure_frontmatter_fields_tricky_spacing(tmp_path):
     # Test with extra spaces after --- and no newline after second ---
     file_path = tmp_path / "tricky_book.md"
-    file_path.write_text("--- \ntitle: Tricky\ngoogle_books_id: 456\n--- \nSome content")
-    
+    file_path.write_text(
+        "--- \ntitle: Tricky\ngoogle_books_id: 456\n--- \nSome content"
+    )
+
     from libris.markdown import ensure_frontmatter_fields
+
     updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
-    
+
     content = file_path.read_text()
     assert "tags: Book" in content
     assert "Some content" in content
@@ -132,6 +152,7 @@ Rating out of 5: 4
 """)
 
     from libris.markdown import ensure_frontmatter_fields
+
     updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
@@ -159,6 +180,7 @@ rating: 5
 """)
 
     from libris.markdown import ensure_frontmatter_fields
+
     updated, _ = ensure_frontmatter_fields(file_path)
     assert updated is True
 
@@ -186,7 +208,9 @@ def test_read_frontmatter_returns_none_for_non_frontmatter(tmp_path):
 
 def test_update_frontmatter_from_book_fills_nulls(tmp_path):
     f = tmp_path / "book.md"
-    f.write_text("---\ntitle: null\nisbn: null\ngoogle_books_id: null\nstatus: Reading\n---\n")
+    f.write_text(
+        "---\ntitle: null\nisbn: null\ngoogle_books_id: null\nstatus: Reading\n---\n"
+    )
 
     book = Book(
         title="Real Title",
@@ -327,6 +351,7 @@ def test_list_books_benchmark_against_legacy_read_pattern(tmp_path):
 
 # --- Title Standardizer Tests ---
 
+
 def test_standardize_title_basic():
     assert standardize_title("the great gatsby") == "The Great Gatsby"
     assert standardize_title("THE GREAT GATSBY") == "The Great Gatsby"
@@ -335,13 +360,19 @@ def test_standardize_title_basic():
 
 def test_standardize_title_preserves_subtitle():
     assert standardize_title("dune: the machine crusade") == "Dune: The Machine Crusade"
-    assert standardize_title("clean code: a handbook of agile software craftsmanship") == "Clean Code: A Handbook of Agile Software Craftsmanship"
+    assert (
+        standardize_title("clean code: a handbook of agile software craftsmanship")
+        == "Clean Code: A Handbook of Agile Software Craftsmanship"
+    )
 
 
 def test_standardize_title_strips_brackets():
     assert standardize_title("Dune [Illustrated]") == "Dune"
     assert standardize_title("Python {Kindle Edition}") == "Python"
-    assert standardize_title("The Art of War [Annotated] [Illustrated]") == "The Art of War"
+    assert (
+        standardize_title("The Art of War [Annotated] [Illustrated]")
+        == "The Art of War"
+    )
 
 
 def test_standardize_title_collapses_whitespace():
@@ -362,6 +393,7 @@ def test_standardize_title_preserves_mixed_case():
 
 def test_ensure_frontmatter_standardizes_title(tmp_path):
     from libris.markdown import ensure_frontmatter_fields
+
     file_path = tmp_path / "caps_book.md"
     file_path.write_text("---\ntitle: THE GREAT GATSBY\ngoogle_books_id: abc\n---\n")
 
@@ -374,6 +406,7 @@ def test_ensure_frontmatter_standardizes_title(tmp_path):
 
 def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
     from libris.markdown import ensure_frontmatter_fields
+
     file_path = tmp_path / "good_book.md"
     # Write a file with all fields present and title already standardized
     file_path.write_text(
@@ -389,6 +422,7 @@ def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
 
 
 # --- File Rename Tests ---
+
 
 def test_compute_canonical_filename(tmp_path):
     f = tmp_path / "old name.md"

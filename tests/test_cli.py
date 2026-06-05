@@ -4,6 +4,7 @@ import yaml
 
 runner = CliRunner()
 
+
 def test_config_vault_path(tmp_path):
     # Test getting current vault path (should not fail)
     result = runner.invoke(app, ["config"])
@@ -21,11 +22,12 @@ def test_config_vault_path(tmp_path):
     result = runner.invoke(app, ["config", "--api-key", "my-secret-key"])
     assert result.exit_code == 0
     assert "API key set successfully." in result.output
-    
+
     # Test getting current config
     result = runner.invoke(app, ["config"])
     assert result.exit_code == 0
     assert "API key: *********-key" in result.output
+
 
 def test_config_vault_path_writes_legacy_and_new_keys(tmp_path):
     from libris.config import get_config_file
@@ -54,29 +56,33 @@ def test_config_command_reads_legacy_vault_key(tmp_path):
     assert result.exit_code == 0
     assert f"Current vault path: {legacy_vault.resolve()}" in result.output
 
+
 def test_cleanup_command(tmp_path):
     # Mock vault path
     vault_path = tmp_path / "my_vault"
     vault_path.mkdir()
-    
+
     # Create a legacy file
     legacy_file = vault_path / "Legacy.md"
-    legacy_file.write_text("---\ntitle: Legacy\nstatus: To Read\ngoogle_books_id: 123\n---\n")
-    
+    legacy_file.write_text(
+        "---\ntitle: Legacy\nstatus: To Read\ngoogle_books_id: 123\n---\n"
+    )
+
     # Run cleanup via CLI
     # We need to ensure the config uses this vault path
     from libris.config import set_config
+
     set_config("vault_path", str(vault_path))
-    
+
     result = runner.invoke(app, ["cleanup"])
     assert result.exit_code == 0
     assert "Updated: Legacy.md" in result.output
     assert "Finished. Updated 1 books." in result.output
-    
+
     # Verify file content
     content = legacy_file.read_text()
     assert "tags: Book" in content
-    
+
     # Run again
     result = runner.invoke(app, ["cleanup"])
     assert result.exit_code == 0
@@ -86,6 +92,7 @@ def test_cleanup_command(tmp_path):
 def test_search_command_generic(monkeypatch):
     """Search with no flags performs a generic query."""
     from libris.api import Book
+
     mock_books = [
         Book(
             title="The Great Gatsby",
@@ -99,7 +106,9 @@ def test_search_command_generic(monkeypatch):
             description="A novel about Jay Gatsby",
         )
     ]
-    monkeypatch.setattr("libris.cli.GoogleBooksClient.search", lambda self, q: mock_books)
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search", lambda self, q: mock_books
+    )
 
     result = runner.invoke(app, ["search", "gatsby"])
     assert result.exit_code == 0
@@ -114,6 +123,7 @@ def test_search_command_generic(monkeypatch):
 def test_search_command_by_author(monkeypatch):
     """Search with --author prepends inauthor: prefix."""
     from libris.api import Book
+
     captured = {}
 
     def fake_search(self, q):
@@ -144,6 +154,7 @@ def test_search_command_by_author(monkeypatch):
 def test_search_command_by_title(monkeypatch):
     """Search with --title prepends intitle: prefix."""
     from libris.api import Book
+
     captured = {}
 
     def fake_search(self, q):
@@ -173,6 +184,7 @@ def test_search_command_by_title(monkeypatch):
 def test_search_command_by_isbn(monkeypatch):
     """Search with --isbn prepends isbn: prefix."""
     from libris.api import Book
+
     captured = {}
 
     def fake_search(self, q):
@@ -214,9 +226,12 @@ def test_list_command_timing_flag(tmp_path):
 
     # Valid book note (should be listed)
     book_file = vault_path / "Book.md"
-    book_file.write_text("---\nstatus: To Read\ngoogle_books_id: 123\n---\n", encoding="utf-8")
+    book_file.write_text(
+        "---\nstatus: To Read\ngoogle_books_id: 123\n---\n", encoding="utf-8"
+    )
 
     from libris.config import set_config
+
     set_config("vault_path", str(vault_path))
 
     result = runner.invoke(app, ["list", "--timing"])
@@ -230,20 +245,29 @@ class TestBuildSearchQuery:
 
     def test_title_with_author_separator(self):
         from libris.cli import _build_search_query
-        result = _build_search_query("The First Rule of Mastery Stop Worrying about What People Think of You - Michael Gervais")
-        assert result == "intitle:The First Rule of Mastery Stop Worrying about What People Think of You inauthor:Michael Gervais"
+
+        result = _build_search_query(
+            "The First Rule of Mastery Stop Worrying about What People Think of You - Michael Gervais"
+        )
+        assert (
+            result
+            == "intitle:The First Rule of Mastery Stop Worrying about What People Think of You inauthor:Michael Gervais"
+        )
 
     def test_plain_title_no_separator(self):
         from libris.cli import _build_search_query
+
         result = _build_search_query("Atomic Habits")
         assert result == "Atomic Habits"
 
     def test_multiple_separators_splits_on_first(self):
         from libris.cli import _build_search_query
+
         result = _build_search_query("Title - Subtitle - Author")
         assert result == "intitle:Title inauthor:Subtitle - Author"
 
     def test_empty_string(self):
         from libris.cli import _build_search_query
+
         result = _build_search_query("")
         assert result == ""

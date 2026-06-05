@@ -15,15 +15,17 @@ from .markdown import (
     update_book_status,
 )
 
+
 def normalize_for_match(text: str) -> str:
     """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace."""
-    text = re.sub(r'[^\w\s]', ' ', text.lower())
-    return re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"[^\w\s]", " ", text.lower())
+    return re.sub(r"\s+", " ", text).strip()
 
 
 @dataclass
 class ImportBook:
     """Common representation for a book from any import source."""
+
     title: str
     authors: List[str]
     status: str  # "Read", "To Read", "Reading"
@@ -55,18 +57,24 @@ def parse_audible_json(path: Path) -> List[ImportBook]:
             continue
 
         author_str = entry.get("author", "").strip()
-        authors = [a.strip() for a in author_str.split(",") if a.strip()] if author_str else ["Unknown Author"]
+        authors = (
+            [a.strip() for a in author_str.split(",") if a.strip()]
+            if author_str
+            else ["Unknown Author"]
+        )
 
         finished = entry.get("finished", "").strip().lower() == "yes"
         status = "Read" if finished else "To Read"
 
-        books.append(ImportBook(
-            title=title,
-            authors=authors,
-            status=status,
-            format="Audiobook",
-            source_format="audible-json",
-        ))
+        books.append(
+            ImportBook(
+                title=title,
+                authors=authors,
+                status=status,
+                format="Audiobook",
+                source_format="audible-json",
+            )
+        )
 
     return books
 
@@ -85,7 +93,9 @@ def detect_format(path: Path) -> Optional[str]:
     return None
 
 
-def parse_import_file(path: Path, format_name: Optional[str] = None) -> List[ImportBook]:
+def parse_import_file(
+    path: Path, format_name: Optional[str] = None
+) -> List[ImportBook]:
     """Parse an import file, auto-detecting format if not specified."""
     if not path.exists():
         raise FileNotFoundError(f"Import file not found: {path}")
@@ -102,8 +112,7 @@ def parse_import_file(path: Path, format_name: Optional[str] = None) -> List[Imp
     parser = SUPPORTED_FORMATS.get(format_name)
     if parser is None:
         raise ValueError(
-            f"Unknown format: {format_name}. "
-            f"Supported: {', '.join(SUPPORTED_FORMATS)}"
+            f"Unknown format: {format_name}. Supported: {', '.join(SUPPORTED_FORMATS)}"
         )
 
     return parser(path)
@@ -144,8 +153,11 @@ def _build_vault_index(vault_path: Path) -> Dict[Tuple[str, str], Tuple[Path, Di
 @dataclass
 class ImportResult:
     """Tracks the outcome of an import operation."""
+
     new_books: List[ImportBook] = field(default_factory=list)
-    updated_books: List[Tuple[ImportBook, Path, List[str]]] = field(default_factory=list)
+    updated_books: List[Tuple[ImportBook, Path, List[str]]] = field(
+        default_factory=list
+    )
     skipped_books: List[ImportBook] = field(default_factory=list)
 
 
@@ -191,20 +203,22 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
         content = path.read_text(encoding="utf-8")
         # Parse frontmatter using YAML to properly handle missing fields
         match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
-        
+
         if match:
             frontmatter_yaml = match.group(1)
             rest_of_content = match.group(2)
-            
+
             try:
                 data = yaml.safe_load(frontmatter_yaml)
                 if isinstance(data, dict):
                     # Update the format field
                     data["format"] = book.format
                     # Write back the updated frontmatter
-                    new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+                    new_frontmatter = yaml.dump(
+                        data, sort_keys=False, allow_unicode=True
+                    ).strip()
                     # Preserve content structure: remove only leading newlines
-                    content_part = rest_of_content.lstrip('\n')
+                    content_part = rest_of_content.lstrip("\n")
                     new_content = f"---\n{new_frontmatter}\n---\n{content_part}"
                     path.write_text(new_content, encoding="utf-8")
             except yaml.YAMLError:
@@ -213,7 +227,9 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
                 new_content = re.sub(pattern, f"\\1{book.format}", content)
                 if new_content == content:
                     # format field might be null — replace the null value
-                    new_content = content.replace("format: null", f"format: {book.format}")
+                    new_content = content.replace(
+                        "format: null", f"format: {book.format}"
+                    )
                 path.write_text(new_content, encoding="utf-8")
 
 
@@ -257,11 +273,15 @@ def run_import(
             result.new_books.append(book)
             if apply:
                 api_book = _to_api_book(book)
-                created_path = create_book_note(api_book, vault_path, status=book.status)
+                created_path = create_book_note(
+                    api_book, vault_path, status=book.status
+                )
                 # Update format in the newly created note if specified
                 if book.format:
                     content = created_path.read_text(encoding="utf-8")
-                    new_content = content.replace("format: null", f"format: {book.format}")
+                    new_content = content.replace(
+                        "format: null", f"format: {book.format}"
+                    )
                     created_path.write_text(new_content, encoding="utf-8")
         else:
             dup_path, _, updates = dup

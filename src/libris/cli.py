@@ -446,7 +446,9 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
         if update_frontmatter_from_book(file_path, first):
             # Append a note to the body indicating this was an automatic match
             _append_auto_enrich_note(file_path, first.title, query)
-            typer.echo(f"Auto-enriched: {file_path.name} → \"{first.title}\" by {', '.join(first.authors)}")
+            typer.echo(
+                f'Auto-enriched: {file_path.name} → "{first.title}" by {", ".join(first.authors)}'
+            )
             return True
         return False
     else:
@@ -558,8 +560,13 @@ def _needs_enrichment(fm: dict) -> bool:
 
 # Fields counted when ranking which edition has the most complete metadata.
 _COMPLETENESS_FIELDS = (
-    "isbn", "page_count", "published_date", "google_books_id",
-    "thumbnail", "genres", "description",
+    "isbn",
+    "page_count",
+    "published_date",
+    "google_books_id",
+    "thumbnail",
+    "genres",
+    "description",
 )
 
 
@@ -673,11 +680,13 @@ def autoenrich(
 
         # Auto-apply when there's a single result, or all confident matches
         # share the same title (i.e. different editions of the same book).
-        unique_titles = {_normalize_for_match(b.title) for b in confident} if confident else set()
+        unique_titles = (
+            {_normalize_for_match(b.title) for b in confident} if confident else set()
+        )
         if len(results) == 1 or (confident and len(unique_titles) == 1):
             pick = _best_match(confident) if confident else results[0]
             if update_frontmatter_from_book(book_file, pick):
-                typer.echo(f" — auto-enriched → \"{pick.title}\"")
+                typer.echo(f' — auto-enriched → "{pick.title}"')
                 enriched_auto += 1
             else:
                 typer.echo(" — already up to date")
@@ -697,7 +706,9 @@ def autoenrich(
     # Summary
     typer.echo("")
     if dry_run:
-        typer.echo(f"Dry run: {action_count} book(s) would be enriched, {skipped} already complete.")
+        typer.echo(
+            f"Dry run: {action_count} book(s) would be enriched, {skipped} already complete."
+        )
         return
 
     typer.echo(f"Enriched (auto): {enriched_auto}")
@@ -713,9 +724,7 @@ def autoenrich(
             typer.echo(f"  • {name}")
 
     if unmatched:
-        typer.echo(
-            f"\n--- {len(unmatched)} book(s) had no results ---"
-        )
+        typer.echo(f"\n--- {len(unmatched)} book(s) had no results ---")
         for name in unmatched:
             typer.echo(f"  • {name}")
 
@@ -752,7 +761,6 @@ def enrich(
         raise typer.Exit(code=1)
 
     _enrich_interactive(selected_file)
-
 
 
 @app.command()
@@ -897,9 +905,15 @@ def merge(
 @app.command(name="import")
 def import_cmd(
     file: str = typer.Argument(..., help="Path to the import file (JSON or CSV)"),
-    fmt: str | None = typer.Option(None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"),
-    apply: bool = typer.Option(False, "--apply", help="Actually create/update notes (default is dry-run)"),
-    limit: int = typer.Option(0, "--limit", "-n", help="Process only the first N entries (0 = all)"),
+    fmt: str | None = typer.Option(
+        None, "--format", "-f", help=f"Import format ({', '.join(SUPPORTED_FORMATS)})"
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Actually create/update notes (default is dry-run)"
+    ),
+    limit: int = typer.Option(
+        0, "--limit", "-n", help="Process only the first N entries (0 = all)"
+    ),
 ):
     """Import books from a JSON or CSV file into your vault.
 
@@ -917,20 +931,30 @@ def import_cmd(
         raise typer.Exit(code=1)
 
     try:
-        result = run_import(file_path, vault_path, apply=apply, format_name=fmt, limit=limit)
+        result = run_import(
+            file_path, vault_path, apply=apply, format_name=fmt, limit=limit
+        )
     except (ValueError, FileNotFoundError) as e:
         typer.echo(f"Error: {e}")
         raise typer.Exit(code=1)
 
     mode_label = "Import" if apply else "Dry run"
     typer.echo(f"\n{mode_label} complete:")
-    typer.echo(f"  {len(result.new_books)} new book(s) {'added' if apply else 'would be added'}")
-    typer.echo(f"  {len(result.updated_books)} existing book(s) {'updated' if apply else 'would be updated'}")
-    typer.echo(f"  {len(result.skipped_books)} duplicate(s) already up-to-date (skipped)")
+    typer.echo(
+        f"  {len(result.new_books)} new book(s) {'added' if apply else 'would be added'}"
+    )
+    typer.echo(
+        f"  {len(result.updated_books)} existing book(s) {'updated' if apply else 'would be updated'}"
+    )
+    typer.echo(
+        f"  {len(result.skipped_books)} duplicate(s) already up-to-date (skipped)"
+    )
 
     if result.new_books:
         preview_count = min(len(result.new_books), 20)
-        typer.echo(f"\n{'Added' if apply else 'New'} books (showing {preview_count} of {len(result.new_books)}):")
+        typer.echo(
+            f"\n{'Added' if apply else 'New'} books (showing {preview_count} of {len(result.new_books)}):"
+        )
         for book in result.new_books[:preview_count]:
             authors_str = ", ".join(book.authors)
             typer.echo(f"  + {book.title} by {authors_str}")
