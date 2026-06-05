@@ -57,9 +57,8 @@ uv run ruff format --check .  # Format check (CI mode)
 
 ## Python Conventions
 
-- **Type hints** on ALL function signatures — no exceptions. Use Python 3.12+ syntax (`list[str]`, `str | None`).
-- **Google-style docstrings** on all public functions and classes.
-- **Imports:** No wildcard imports. No bare `except:`. Group: stdlib → third-party → local.
+- **Type hints** on all new/modified function signatures. Prefer Python 3.12+ built-in generic syntax (`list[str]`, `str | None`) when touching code; legacy `typing.List`/`Optional` may exist and can be migrated opportunistically.
+- **Google-style docstrings** on new/modified public functions and classes.
 - **Data models:** Use `@dataclass` from stdlib (not Pydantic) for data structures.
 - **HTTP:** Use `httpx.Client` inside context managers (`with` blocks).
 - **Config:** All config via `config.py` — reads `~/.config/libris/config.yaml` or `$LIBRIS_CONFIG_DIR`.
