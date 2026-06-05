@@ -18,7 +18,7 @@ Add or update docstrings on public functions and classes in `src/libris/`.
 Format:
 ```python
 def search(self, query: str) -> list[Book]:
-    """Search the Google Books API for books matching a query.
+    """Search the Google Books API for books matching a query
 
     Args:
         query: Free-text search string (title, author, ISBN, etc.).
