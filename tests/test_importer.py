@@ -182,9 +182,14 @@ def test_import_detects_duplicates(tmp_path):
     set_config("book_vault", str(vault))
 
     # Pre-existing book in vault
-    _write_book(vault, "Existing Book - Author A.md",
-                title="Existing Book", author=["Author A"],
-                status="Read", format="Audiobook")
+    _write_book(
+        vault,
+        "Existing Book - Author A.md",
+        title="Existing Book",
+        author=["Author A"],
+        status="Read",
+        format="Audiobook",
+    )
 
     data = [
         {"title": "Existing Book", "author": "Author A", "finished": "Yes"},
@@ -204,9 +209,14 @@ def test_import_updates_status_on_duplicate(tmp_path):
     set_config("book_vault", str(vault))
 
     # Existing book with "To Read" status
-    existing = _write_book(vault, "My Book - Author A.md",
-                           title="My Book", author=["Author A"],
-                           status="To Read", format=None)
+    existing = _write_book(
+        vault,
+        "My Book - Author A.md",
+        title="My Book",
+        author=["Author A"],
+        status="To Read",
+        format=None,
+    )
 
     data = [{"title": "My Book", "author": "Author A", "finished": "Yes"}]
     json_file = _write_audible_json(tmp_path / "library.json", data)
@@ -225,9 +235,14 @@ def test_import_updates_format_on_duplicate(tmp_path):
     set_config("book_vault", str(vault))
 
     # Existing book with no format
-    existing = _write_book(vault, "My Book - Author A.md",
-                           title="My Book", author=["Author A"],
-                           status="Read", format=None)
+    existing = _write_book(
+        vault,
+        "My Book - Author A.md",
+        title="My Book",
+        author=["Author A"],
+        status="Read",
+        format=None,
+    )
 
     data = [{"title": "My Book", "author": "Author A", "finished": "Yes"}]
     json_file = _write_audible_json(tmp_path / "library.json", data)
@@ -249,13 +264,8 @@ def test_import_updates_format_when_field_missing(tmp_path):
     # Create a book note without a format field at all
     existing = vault / "My Book - Author A.md"
     existing.write_text(
-        "---\n"
-        "title: My Book\n"
-        "author:\n"
-        "- Author A\n"
-        "status: Read\n"
-        "---\n",
-        encoding="utf-8"
+        "---\ntitle: My Book\nauthor:\n- Author A\nstatus: Read\n---\n",
+        encoding="utf-8",
     )
 
     data = [{"title": "My Book", "author": "Author A", "finished": "Yes"}]
@@ -274,9 +284,14 @@ def test_import_updates_both_status_and_format(tmp_path):
     vault.mkdir()
     set_config("book_vault", str(vault))
 
-    existing = _write_book(vault, "My Book - Author A.md",
-                           title="My Book", author=["Author A"],
-                           status="To Read", format=None)
+    existing = _write_book(
+        vault,
+        "My Book - Author A.md",
+        title="My Book",
+        author=["Author A"],
+        status="To Read",
+        format=None,
+    )
 
     data = [{"title": "My Book", "author": "Author A", "finished": "Yes"}]
     json_file = _write_audible_json(tmp_path / "library.json", data)
@@ -297,9 +312,14 @@ def test_import_skips_up_to_date_duplicate(tmp_path):
     vault.mkdir()
     set_config("book_vault", str(vault))
 
-    _write_book(vault, "My Book - Author A.md",
-                title="My Book", author=["Author A"],
-                status="Read", format="Audiobook")
+    _write_book(
+        vault,
+        "My Book - Author A.md",
+        title="My Book",
+        author=["Author A"],
+        status="Read",
+        format="Audiobook",
+    )
 
     data = [{"title": "My Book", "author": "Author A", "finished": "Yes"}]
     json_file = _write_audible_json(tmp_path / "library.json", data)
@@ -330,9 +350,14 @@ def test_import_case_insensitive_duplicate(tmp_path):
     vault.mkdir()
     set_config("book_vault", str(vault))
 
-    _write_book(vault, "The Great Book - Jane Smith.md",
-                title="The Great Book", author=["Jane Smith"],
-                status="Read", format="Audiobook")
+    _write_book(
+        vault,
+        "The Great Book - Jane Smith.md",
+        title="The Great Book",
+        author=["Jane Smith"],
+        status="Read",
+        format="Audiobook",
+    )
 
     # Same book with different casing
     data = [{"title": "the great book", "author": "jane smith", "finished": "Yes"}]
