@@ -36,11 +36,12 @@ class GoogleBooksClient:
         if api_key:
             params["key"] = api_key
         else:
-            # Use a unique identifier to help avoid global rate limits for unauthenticated users
+            # Use a unique identifier to help avoid global rate limits for
+            # unauthenticated users.
             try:
                 params["quotaUser"] = socket.gethostname()
-            except Exception:
-                pass
+            except OSError:
+                logger.debug("Could not determine hostname for quotaUser.")
 
         with httpx.Client(timeout=self.timeout) as client:
             for attempt in range(self.max_retries + 1):
