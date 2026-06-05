@@ -40,16 +40,17 @@ FIELD_MIGRATIONS = {
     "Author": "author",
 }
 
+
 def sanitize_filename(name: str) -> str:
     """Removes invalid characters for a filename and collapses whitespace."""
     name = re.sub(r'[\\/*?:"<>|]', "", name)
-    name = re.sub(r'\s+', ' ', name)
+    name = re.sub(r"\s+", " ", name)
     return name.strip()
 
 
 # Patterns for publisher/format annotations (not genuine title content)
-_BRACKET_ANNOTATION_PAT = re.compile(r'\s*[\[\{][^\[\]\{\}]*[\]\}]')
-_WHITESPACE_PAT = re.compile(r'\s+')
+_BRACKET_ANNOTATION_PAT = re.compile(r"\s*[\[\{][^\[\]\{\}]*[\]\}]")
+_WHITESPACE_PAT = re.compile(r"\s+")
 
 
 def standardize_title(raw: Optional[str]) -> Optional[str]:
@@ -58,18 +59,19 @@ def standardize_title(raw: Optional[str]) -> Optional[str]:
         return raw
     title = raw.strip()
     # Remove bracket annotations like [Illustrated], {Kindle Edition}
-    title = _BRACKET_ANNOTATION_PAT.sub('', title)
+    title = _BRACKET_ANNOTATION_PAT.sub("", title)
     # Collapse multiple whitespace to single space
-    title = _WHITESPACE_PAT.sub(' ', title).strip()
+    title = _WHITESPACE_PAT.sub(" ", title).strip()
     # Apply title case (NYT Manual of Style rules)
     title = titlecase(title)
     return title
+
 
 def create_book_note(book: Book, vault_path: Path, status: str = "To Read") -> Path:
     """Creates a Markdown note for a book in the specified vault path."""
     filename = sanitize_filename(f"{book.title} - {', '.join(book.authors[:1])}.md")
     file_path = vault_path / filename
-    
+
     frontmatter = {
         **DEFAULT_FRONTMATTER,
         "title": book.title,
@@ -83,26 +85,28 @@ def create_book_note(book: Book, vault_path: Path, status: str = "To Read") -> P
         "status": status,
         "date_added": date.today().isoformat(),
     }
-    
+
     yaml_content = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
-    
+
     content = f"---\n{yaml_content}---\n\n## Notes\n\n"
     if book.description:
         content += f"### Description\n{book.description}\n"
-    
+
     file_path.write_text(content, encoding="utf-8")
     return file_path
+
 
 def update_book_status(file_path: Path, new_status: str):
     """Updates the status in the book's frontmatter."""
     content = file_path.read_text(encoding="utf-8")
-    
+
     # Simple regex to find and replace status
     # This is safer than full YAML re-dumping if there are complex structures or custom user notes
     pattern = r"(status:\s*)(.*)"
     new_content = re.sub(pattern, f"\\1{new_status}", content)
-    
+
     file_path.write_text(new_content, encoding="utf-8")
+
 
 def list_books(vault_path: Path):
     """Lists all markdown files in the vault, assuming each is a book note."""
@@ -112,6 +116,7 @@ def list_books(vault_path: Path):
         if entry.is_file() and entry.name.endswith(".md")
     ]
 
+
 def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str, Any]]]:
     """Ensures that all current fields exist in the note's frontmatter.
 
@@ -120,7 +125,7 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
     frontmatter could not be parsed.
     """
     content = file_path.read_text(encoding="utf-8")
-    
+
     # Use a more robust regex to find the frontmatter block
     # Matches --- at start of file, then content, then --- on its own line
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
@@ -129,17 +134,17 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
         match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
         if not match:
             return False, None
-        
+
     frontmatter_yaml = match.group(1)
     rest_of_content = match.group(2)
-    
+
     try:
         data = yaml.safe_load(frontmatter_yaml)
         if not isinstance(data, dict):
             return False, None
     except Exception:
         return False, None
-        
+
     updated = False
 
     # Migrate legacy field names to canonical ones.
@@ -172,15 +177,16 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
         if standardized != title_val:
             data["title"] = standardized
             updated = True
-            
+
     if updated:
         # Use dump but ensure we don't add unnecessary trailing newlines or spaces
         new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
         # Ensure there is exactly one newline before and after the rest of the content
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content.lstrip()}"
         file_path.write_text(new_content, encoding="utf-8")
-    
+
     return updated, data
+
 
 # Maps Book dataclass fields to frontmatter field names.
 _BOOK_TO_FRONTMATTER = {
@@ -195,7 +201,11 @@ _BOOK_TO_FRONTMATTER = {
     "description": None,  # handled separately (body, not frontmatter)
 }
 
-EXCLUDED_GOOGLE_BOOKS_IDS = {"_not_found_in_google_books_api", "_not_a_book", }
+EXCLUDED_GOOGLE_BOOKS_IDS = {
+    "_not_found_in_google_books_api",
+    "_not_a_book",
+}
+
 
 def find_duplicates(vault_path: Path) -> list[list[Path]]:
     """Find groups of duplicate book notes by title, ISBN, or Google Books ID.
@@ -213,7 +223,9 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
     def _author_key(fm: Dict[str, Any]) -> tuple[str, ...]:
         author = fm.get("author")
         if isinstance(author, list):
-            return tuple(sorted(a.strip().lower() for a in author if isinstance(a, str)))
+            return tuple(
+                sorted(a.strip().lower() for a in author if isinstance(a, str))
+            )
         elif isinstance(author, str):
             return (author.strip().lower(),)
         return ()
@@ -342,7 +354,9 @@ def update_frontmatter_from_book(file_path: Path, book: Book) -> bool:
 
     # Add description to body if missing
     if book.description and "### Description" not in rest_of_content:
-        rest_of_content = rest_of_content.rstrip() + f"\n\n### Description\n{book.description}\n"
+        rest_of_content = (
+            rest_of_content.rstrip() + f"\n\n### Description\n{book.description}\n"
+        )
         updated = True
 
     if updated:
@@ -372,7 +386,11 @@ def compute_canonical_filename(file_path: Path) -> Optional[str]:
         return None
 
     first_author = next(
-        (candidate.strip() for candidate in author_candidates if isinstance(candidate, str) and candidate.strip()),
+        (
+            candidate.strip()
+            for candidate in author_candidates
+            if isinstance(candidate, str) and candidate.strip()
+        ),
         None,
     )
     if first_author is None:
@@ -381,7 +399,9 @@ def compute_canonical_filename(file_path: Path) -> Optional[str]:
     return sanitize_filename(f"{title} - {first_author}.md")
 
 
-def update_wikilinks_in_vault(vault_root: Path, old_stem: str, new_stem: str, exclude: Optional[Path] = None) -> int:
+def update_wikilinks_in_vault(
+    vault_root: Path, old_stem: str, new_stem: str, exclude: Optional[Path] = None
+) -> int:
     """Update all wikilinks from old_stem to new_stem across the vault. Returns count of files updated."""
     updated_count = 0
     exclude_resolved = exclude.resolve() if exclude else None
@@ -406,18 +426,30 @@ def update_wikilinks_in_vault(vault_root: Path, old_stem: str, new_stem: str, ex
     return updated_count
 
 
-RenameStatus = Literal["renamed", "already_canonical", "missing_title", "missing_author", "invalid_frontmatter", "collision"]
+RenameStatus = Literal[
+    "renamed",
+    "already_canonical",
+    "missing_title",
+    "missing_author",
+    "invalid_frontmatter",
+    "collision",
+]
 
 
 @dataclass(frozen=True)
 class RenameResult:
     """Result of a rename attempt with diagnostic information."""
+
     status: RenameStatus
     new_path: Optional[Path] = None
     detail: Optional[str] = None
 
 
-def rename_book_file(file_path: Path, vault_root: Optional[Path] = None, frontmatter: Optional[Dict[str, Any]] = None) -> RenameResult:
+def rename_book_file(
+    file_path: Path,
+    vault_root: Optional[Path] = None,
+    frontmatter: Optional[Dict[str, Any]] = None,
+) -> RenameResult:
     """Rename a book file to canonical format and update wikilinks.
 
     If frontmatter is provided, it is used directly instead of re-reading

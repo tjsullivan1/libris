@@ -32,8 +32,22 @@ def test_no_duplicates(tmp_path):
 
 
 def test_duplicate_by_title(tmp_path):
-    _write_book(tmp_path, "A.md", title="Same Title", isbn="111", google_books_id="a1", author=["Author A"])
-    _write_book(tmp_path, "B.md", title="same title", isbn="222", google_books_id="b2", author=["Author A"])
+    _write_book(
+        tmp_path,
+        "A.md",
+        title="Same Title",
+        isbn="111",
+        google_books_id="a1",
+        author=["Author A"],
+    )
+    _write_book(
+        tmp_path,
+        "B.md",
+        title="same title",
+        isbn="222",
+        google_books_id="b2",
+        author=["Author A"],
+    )
     groups = find_duplicates(tmp_path)
     assert len(groups) == 1
     names = {p.name for p in groups[0]}
@@ -58,7 +72,9 @@ def test_same_title_missing_author_is_duplicate(tmp_path):
 
 def test_duplicate_by_isbn(tmp_path):
     _write_book(tmp_path, "A.md", title="First Title", isbn="111", google_books_id="a1")
-    _write_book(tmp_path, "B.md", title="Second Title", isbn="111", google_books_id="b2")
+    _write_book(
+        tmp_path, "B.md", title="Second Title", isbn="111", google_books_id="b2"
+    )
     groups = find_duplicates(tmp_path)
     assert len(groups) == 1
 
@@ -72,8 +88,22 @@ def test_duplicate_by_google_books_id(tmp_path):
 
 def test_transitive_duplicates_merged(tmp_path):
     """A shares title with B, B shares ISBN with C => all three in one group."""
-    _write_book(tmp_path, "A.md", title="Shared Title", isbn="111", google_books_id="a1", author=["Same Author"])
-    _write_book(tmp_path, "B.md", title="Shared Title", isbn="222", google_books_id="b2", author=["Same Author"])
+    _write_book(
+        tmp_path,
+        "A.md",
+        title="Shared Title",
+        isbn="111",
+        google_books_id="a1",
+        author=["Same Author"],
+    )
+    _write_book(
+        tmp_path,
+        "B.md",
+        title="Shared Title",
+        isbn="222",
+        google_books_id="b2",
+        author=["Same Author"],
+    )
     _write_book(tmp_path, "C.md", title="Other Title", isbn="222", google_books_id="c3")
     groups = find_duplicates(tmp_path)
     assert len(groups) == 1
@@ -110,8 +140,22 @@ def test_null_fields_not_matched(tmp_path):
 def test_cli_duplicates_command_reports(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
-    _write_book(vault, "A.md", title="Dup Book", isbn="111", google_books_id="g1", author=["Author"])
-    _write_book(vault, "B.md", title="Dup Book", isbn="222", google_books_id="g2", author=["Author"])
+    _write_book(
+        vault,
+        "A.md",
+        title="Dup Book",
+        isbn="111",
+        google_books_id="g1",
+        author=["Author"],
+    )
+    _write_book(
+        vault,
+        "B.md",
+        title="Dup Book",
+        isbn="222",
+        google_books_id="g2",
+        author=["Author"],
+    )
     set_config("vault_path", str(vault))
 
     result = runner.invoke(app, ["duplicates"])

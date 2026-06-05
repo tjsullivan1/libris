@@ -8,14 +8,17 @@ from typing import Optional
 LEGACY_VAULT_KEY = "vault_path"
 BOOK_VAULT_KEY = "book_vault"
 
+
 def get_config_dir() -> Path:
     env_config_dir = os.environ.get("LIBRIS_CONFIG_DIR")
     if env_config_dir:
         return Path(env_config_dir).expanduser().resolve()
     return Path.home() / ".config" / "libris"
 
+
 def get_config_file() -> Path:
     return get_config_dir() / "config.yaml"
+
 
 def get_config() -> dict:
     config_file = get_config_file()
@@ -23,6 +26,7 @@ def get_config() -> dict:
         return {}
     with open(config_file, "r") as f:
         return yaml.safe_load(f) or {}
+
 
 def set_config(key: str, value: str):
     config_dir = get_config_dir()
@@ -32,11 +36,13 @@ def set_config(key: str, value: str):
     with open(get_config_file(), "w") as f:
         yaml.dump(config, f)
 
+
 def set_book_vault_path(path: Path):
     resolved = str(path.expanduser().resolve())
     set_config(BOOK_VAULT_KEY, resolved)
     # Keep legacy key for backward compatibility with existing configs.
     set_config(LEGACY_VAULT_KEY, resolved)
+
 
 def get_vault_path() -> Path:
     config = get_config()
@@ -45,9 +51,11 @@ def get_vault_path() -> Path:
         return Path(".").resolve()
     return Path(path_str).expanduser().resolve()
 
+
 def get_api_key() -> Optional[str]:
     config = get_config()
     return config.get("google_books_api_key")
+
 
 def get_obsidian_vault_root() -> Optional[Path]:
     """Get the Obsidian vault root path, or None if not configured."""
