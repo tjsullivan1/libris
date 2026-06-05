@@ -220,6 +220,86 @@ def test_search_command_no_results(monkeypatch):
     assert "No books found." in result.output
 
 
+def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
+    from libris.api import Book
+
+    mock_books = [
+        Book(
+            title="Dune",
+            authors=["Frank Herbert"],
+            isbn="9780441013593",
+            page_count=412,
+            published_date="1965",
+            google_books_id="dune1",
+            thumbnail=None,
+            genres=["Science Fiction"],
+            description=None,
+        )
+    ]
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search", lambda self, q: mock_books
+    )
+
+    choice = "Dune by Frank Herbert"
+
+    class _Selection:
+        def ask(self):
+            return choice
+
+    monkeypatch.setattr(
+        "libris.cli.questionary.select", lambda *args, **kwargs: _Selection()
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+
+    captured = {}
+
+    def fake_create_book_note(book, vault_path, status, overrides):
+        captured["book"] = book
+        captured["vault_path"] = vault_path
+        captured["status"] = status
+        captured["overrides"] = overrides
+        return vault_path / "Dune.md"
+
+    monkeypatch.setattr("libris.cli.create_book_note", fake_create_book_note)
+
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "dune",
+            "--status",
+            "Finished",
+            "--format",
+            "kindle",
+            "--rating",
+            "5",
+            "--referred-by",
+            "Alice",
+            "--tags",
+            "Sci-Fi,Classic",
+            "--date-started",
+            "2026-01-01",
+            "--date-finished",
+            "2026-01-10",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["book"] == mock_books[0]
+    assert captured["vault_path"] == tmp_path
+    assert captured["status"] == "Finished"
+    assert captured["overrides"] == {
+        "status": "Finished",
+        "format": "kindle",
+        "rating": 5,
+        "referred_by": "Alice",
+        "tags": "Sci-Fi,Classic",
+        "date_started": "2026-01-01",
+        "date_finished": "2026-01-10",
+    }
+    assert "Added:" in result.output
+
+
 def test_list_command_timing_flag(tmp_path):
     vault_path = tmp_path / "my_vault"
     vault_path.mkdir()

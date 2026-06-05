@@ -44,6 +44,84 @@ def test_create_book_note(tmp_path):
     assert "A test description" in content
 
 
+def test_create_book_note_with_overrides(tmp_path):
+    """Test that overrides dict sets frontmatter fields."""
+    book = Book(
+        title="Override Book",
+        authors=["Author Two"],
+        isbn="0987654321",
+        page_count=200,
+        published_date="2024",
+        google_books_id="abc",
+        thumbnail=None,
+        genres=["Fiction"],
+        description=None,
+    )
+
+    # Given overrides for format, rating, and referred_by
+    overrides = {
+        "format": "kindle",
+        "rating": 4,
+        "referred_by": "A Friend",
+    }
+
+    # When creating a book note with overrides
+    file_path = create_book_note(book, tmp_path, overrides=overrides)
+
+    # Then the overrides appear in frontmatter
+    content = file_path.read_text()
+    assert "format: kindle" in content
+    assert "rating: 4" in content
+    assert "referred_by: A Friend" in content
+
+
+def test_create_book_note_overrides_status(tmp_path):
+    """Test that status in overrides takes precedence over the status parameter."""
+    book = Book(
+        title="Status Book",
+        authors=["Author Three"],
+        isbn="1111111111",
+        page_count=150,
+        published_date="2025",
+        google_books_id="def",
+        thumbnail=None,
+        genres=[],
+        description=None,
+    )
+
+    # Given status override that differs from default
+    overrides = {"status": "Reading"}
+
+    # When creating with default status but an override
+    file_path = create_book_note(book, tmp_path, status="To Read", overrides=overrides)
+
+    # Then the override wins
+    content = file_path.read_text()
+    assert "status: Reading" in content
+
+
+def test_create_book_note_invalid_override_raises(tmp_path):
+    """Test that an unknown override key raises ValueError."""
+    import pytest
+
+    book = Book(
+        title="Bad Override",
+        authors=["Author Four"],
+        isbn="2222222222",
+        page_count=50,
+        published_date="2020",
+        google_books_id="ghi",
+        thumbnail=None,
+        genres=[],
+        description=None,
+    )
+
+    # When passing an invalid frontmatter key
+    # Then a ValueError is raised
+    with pytest.raises(ValueError, match="Unknown frontmatter field"):
+        create_book_note(book, tmp_path, overrides={"nonexistent_field": "value"})
+
+
 def test_update_book_status(tmp_path):
     file_path = tmp_path / "test.md"
     file_path.write_text("---\ntitle: Test\nstatus: To Read\n---\n")

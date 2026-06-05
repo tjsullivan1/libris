@@ -152,7 +152,29 @@ def search(
 
 
 @app.command()
-def add(query: str = typer.Argument(..., help="Title, author, or ISBN to search for")):
+def add(
+    query: str = typer.Argument(..., help="Title, author, or ISBN to search for"),
+    status: str = typer.Option("To Read", "--status", "-s", help="Reading status"),
+    medium: str | None = typer.Option(
+        None,
+        "--format",
+        "-f",
+        help="Reading format (e.g., paperback, kindle, audiobook)",
+    ),
+    rating: int | None = typer.Option(
+        None, "--rating", "-r", help="Rating (1-5)", min=1, max=5
+    ),
+    referred_by: str | None = typer.Option(
+        None, "--referred-by", help="Who recommended this book"
+    ),
+    tags: str | None = typer.Option(None, "--tags", help="Tags (default: Book)"),
+    date_started: str | None = typer.Option(
+        None, "--date-started", help="Date started reading (YYYY-MM-DD)"
+    ),
+    date_finished: str | None = typer.Option(
+        None, "--date-finished", help="Date finished reading (YYYY-MM-DD)"
+    ),
+):
     """Search for a book and add it to your Obsidian vault."""
     client = GoogleBooksClient()
     books = client.search(query)
@@ -175,8 +197,25 @@ def add(query: str = typer.Argument(..., help="Title, author, or ISBN to search 
         typer.echo(f"Vault path does not exist: {vault_path}")
         return
 
+    # Build overrides from CLI options
+    overrides = {"status": status}
+    if medium is not None:
+        overrides["format"] = medium
+    if rating is not None:
+        overrides["rating"] = rating
+    if referred_by is not None:
+        overrides["referred_by"] = referred_by
+    if tags is not None:
+        overrides["tags"] = tags
+    if date_started is not None:
+        overrides["date_started"] = date_started
+    if date_finished is not None:
+        overrides["date_finished"] = date_finished
+
     # Create the book note
-    file_path = create_book_note(selected_book, vault_path)
+    file_path = create_book_note(
+        selected_book, vault_path, status=status, overrides=overrides or None
+    )
     typer.echo(f"Added: {file_path}")
 
 

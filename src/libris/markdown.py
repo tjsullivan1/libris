@@ -67,8 +67,21 @@ def standardize_title(raw: Optional[str]) -> Optional[str]:
     return title
 
 
-def create_book_note(book: Book, vault_path: Path, status: str = "To Read") -> Path:
-    """Creates a Markdown note for a book in the specified vault path."""
+def create_book_note(
+    book: Book,
+    vault_path: Path,
+    status: str = "To Read",
+    overrides: Dict[str, Any] | None = None,
+) -> Path:
+    """Creates a Markdown note for a book in the specified vault path.
+
+    Args:
+        book: The Book dataclass with data from Google Books API.
+        vault_path: Directory where the note will be written.
+        status: Default reading status (overridden if 'status' is in overrides).
+        overrides: Optional dict of frontmatter fields to set/override.
+            Keys must exist in DEFAULT_FRONTMATTER.
+    """
     filename = sanitize_filename(f"{book.title} - {', '.join(book.authors[:1])}.md")
     file_path = vault_path / filename
 
@@ -85,6 +98,15 @@ def create_book_note(book: Book, vault_path: Path, status: str = "To Read") -> P
         "status": status,
         "date_added": date.today().isoformat(),
     }
+
+    if overrides:
+        for key, value in overrides.items():
+            if key not in DEFAULT_FRONTMATTER:
+                raise ValueError(
+                    f"Unknown frontmatter field: '{key}'. "
+                    f"Valid fields: {', '.join(DEFAULT_FRONTMATTER.keys())}"
+                )
+            frontmatter[key] = value
 
     yaml_content = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
 
