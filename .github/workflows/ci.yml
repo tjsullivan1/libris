@@ -56,4 +56,6 @@ jobs:
         run: uv sync --frozen
 
       - name: Audit dependencies
-        run: uv export --no-hashes --frozen | pip-audit -r /dev/stdin
+        run: |
+          uv export --no-hashes --frozen > requirements.txt
+          uv tool run pip-audit -r requirements.txt
