@@ -195,7 +195,7 @@ def add(
         return
 
     # Build overrides from CLI options
-    overrides = {}
+    overrides = {"status": status}
     if format is not None:
         overrides["format"] = format
     if rating is not None:
