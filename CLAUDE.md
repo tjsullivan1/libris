@@ -2,6 +2,8 @@
 
 @AGENTS.md
 
+See also: [AGENTS.md](AGENTS.md)
+
 ## Claude-Specific Notes
 
 - When starting on a new task, ask the user if a branch already exists. If it doesn't, create a new branch.
