@@ -155,7 +155,7 @@ def search(
 def add(
     query: str = typer.Argument(..., help="Title, author, or ISBN to search for"),
     status: str = typer.Option("To Read", "--status", "-s", help="Reading status"),
-    format: str | None = typer.Option(
+    medium: str | None = typer.Option(
         None, "--format", "-f", help="Reading format (e.g., paperback, kindle, audiobook)"
     ),
     rating: int | None = typer.Option(
@@ -196,8 +196,8 @@ def add(
 
     # Build overrides from CLI options
     overrides = {"status": status}
-    if format is not None:
-        overrides["format"] = format
+    if medium is not None:
+        overrides["format"] = medium
     if rating is not None:
         overrides["rating"] = rating
     if referred_by is not None:
