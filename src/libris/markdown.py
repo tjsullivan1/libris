@@ -110,7 +110,7 @@ def create_book_note(
 
     yaml_content = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
 
-    content = f"---\n{yaml_content}---\n\n## Notes\n\n"
+    content = f"---\n{yaml_content}---\n\n# {book.title}\n\n## Notes\n\n"
     if book.description:
         content += f"### Description\n{book.description}\n"
 
