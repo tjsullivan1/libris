@@ -200,6 +200,17 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
             data["title"] = standardized
             updated = True
 
+    title = data.get("title")
+    stripped_content = rest_of_content.lstrip()
+    if (
+        isinstance(title, str)
+        and title
+        and stripped_content.startswith("## Notes")
+        and not re.search(r"(?m)^#\s+", stripped_content)
+    ):
+        rest_of_content = f"# {title}\n\n{rest_of_content.lstrip()}"
+        updated = True
+
     if updated:
         # Use dump but ensure we don't add unnecessary trailing newlines or spaces
         new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
@@ -373,6 +384,17 @@ def update_frontmatter_from_book(file_path: Path, book: Book) -> bool:
         if value is not None and data.get(fm_field) is None:
             data[fm_field] = value
             updated = True
+
+    title = data.get("title")
+    stripped_content = rest_of_content.lstrip()
+    if (
+        isinstance(title, str)
+        and title
+        and stripped_content.startswith("## Notes")
+        and not re.search(r"(?m)^#\s+", stripped_content)
+    ):
+        rest_of_content = f"# {title}\n\n{rest_of_content.lstrip()}"
+        updated = True
 
     # Add description to body if missing
     if book.description and "### Description" not in rest_of_content:

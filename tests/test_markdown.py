@@ -165,6 +165,30 @@ Some existing notes here.
     assert updated is False
 
 
+def test_ensure_frontmatter_fields_adds_title_heading_when_missing(tmp_path):
+    file_path = tmp_path / "legacy_book.md"
+    file_path.write_text(
+        """---
+title: Legacy Book
+status: Finished
+google_books_id: 123
+---
+
+## Notes
+Some existing notes here.
+"""
+    )
+
+    from libris.markdown import ensure_frontmatter_fields
+
+    updated, _ = ensure_frontmatter_fields(file_path)
+    assert updated is True
+
+    content = file_path.read_text()
+    assert "# Legacy Book\n\n## Notes" in content
+    assert "Some existing notes here." in content
+
+
 def test_ensure_frontmatter_sets_status_read_when_date_finished(tmp_path):
     file_path = tmp_path / "finished_book.md"
     file_path.write_text(
@@ -336,6 +360,28 @@ def test_update_frontmatter_from_book_skips_existing_description(tmp_path):
     assert content.count("### Description") == 1
     assert "Existing desc" in content
     assert "New desc" not in content
+
+
+def test_update_frontmatter_from_book_adds_title_heading_when_missing(tmp_path):
+    f = tmp_path / "book.md"
+    f.write_text("---\ntitle: Test Book\nauthor: null\n---\n\n## Notes\n")
+
+    book = Book(
+        title="Test Book",
+        authors=["Author"],
+        isbn="123",
+        page_count=100,
+        published_date="2024",
+        google_books_id="gid",
+        thumbnail=None,
+        genres=[],
+        description=None,
+    )
+
+    assert update_frontmatter_from_book(f, book) is True
+
+    content = f.read_text()
+    assert "# Test Book\n\n## Notes" in content
 
 
 def test_update_frontmatter_from_book_does_not_overwrite(tmp_path):
