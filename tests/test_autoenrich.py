@@ -1,7 +1,8 @@
 import yaml
 from typer.testing import CliRunner
-from libris.cli import app
+
 from libris.api import Book
+from libris.cli import app
 
 runner = CliRunner()
 

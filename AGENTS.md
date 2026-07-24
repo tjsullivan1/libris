@@ -37,7 +37,8 @@ uv sync --frozen              # Install dependencies (use --frozen in CI)
 uv run pytest                 # Run tests (NEVER invoke pytest directly)
 uv run pytest tests/test_api.py::test_search  # Run a single test
 uv run pytest --cov=src/libris               # Run with coverage
-uv run ruff check .           # Lint
+uv run ruff check --fix .     # Lint and auto-fix (run before committing)
+uv run ruff check .           # Lint check only (CI mode)
 uv run ruff format .          # Format
 uv run ruff format --check .  # Format check (CI mode)
 ```
@@ -45,7 +46,7 @@ uv run ruff format --check .  # Format check (CI mode)
 ## Workflow
 
 - **Branching:** Always create a feature branch from `main`. Never commit directly to `main`.
-- **Pre-commit:** Run `uv run ruff check .` and `uv run pytest` before every commit. Fix any failures.
+- **Pre-commit:** Run `uv run ruff check --fix .` (auto-fix lint issues, including import sorting) and `uv run pytest` before every commit. Fix any remaining failures.
 - **Commit messages:** Use [Conventional Commits](https://www.conventionalcommits.org/):
   - `feat: add book export command`
   - `fix: handle missing ISBN in frontmatter`
@@ -67,7 +68,7 @@ uv run ruff format --check .  # Format check (CI mode)
   - Never use bare `except:` — always catch specific exception types.
   - Use `typer.echo()` for user-facing error messages in CLI code.
   - Let library code (`api.py`, `markdown.py`) raise exceptions; CLI layer catches and displays.
-- **Ruff rules active:** `E` (pycodestyle), `F` (pyflakes), `S` (bandit security). `S101` suppressed in `tests/**`.
+- **Ruff rules active:** `E` (pycodestyle), `F` (pyflakes), `I` (isort), `S` (bandit security). `S101` suppressed in `tests/**`.
 
 ## Testing
 

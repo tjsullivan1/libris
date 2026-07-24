@@ -1,11 +1,13 @@
 """Google Books API client for searching and retrieving book metadata."""
 
-import httpx
-import time
 import logging
 import socket
-from typing import List, Optional
+import time
 from dataclasses import dataclass
+from typing import List, Optional
+
+import httpx
+
 from .config import get_api_key
 
 logger = logging.getLogger(__name__)

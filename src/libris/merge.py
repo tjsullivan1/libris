@@ -5,10 +5,11 @@ Implements intelligent merging of two books with conflict detection and user-gui
 """
 
 import re
-import yaml
-from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 from .markdown import read_frontmatter
 

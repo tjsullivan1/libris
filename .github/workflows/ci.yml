@@ -63,4 +63,4 @@ jobs:
           runtime_requirements="$(mktemp -t runtime-requirements.XXXXXX.txt)"
           trap 'rm -f "$runtime_requirements"' EXIT
           uv export --no-hashes --frozen --no-dev > "$runtime_requirements"
-          uv tool run pip-audit -r "$runtime_requirements"
+          uv tool run pip-audit --skip-editable -r "$runtime_requirements"
