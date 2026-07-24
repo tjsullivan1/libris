@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from libris.api import GoogleBooksClient, parse_retry_after
 
