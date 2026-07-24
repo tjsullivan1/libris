@@ -27,8 +27,9 @@ def _default_rate_limit_notice(
         attempt: 1-based retry attempt number.
         max_retries: Total number of retries that will be attempted.
     """
+    wait_display = f"{wait_seconds:.1f}".rstrip("0").rstrip(".")
     print(
-        f"Rate limited by Google Books API. Waiting {wait_seconds:.0f}s before retrying "
+        f"Rate limited by Google Books API. Waiting {wait_display}s before retrying "
         f"(attempt {attempt}/{max_retries})...",
         file=sys.stderr,
         flush=True,
@@ -41,9 +42,9 @@ def parse_retry_after(value: object, now: datetime | None = None) -> float | Non
     Supports both the delta-seconds form (e.g. ``"120"``) and the HTTP-date
     form (e.g. ``"Wed, 21 Oct 2015 07:28:00 GMT"``).
 
-    Args:
-        value: Raw header value. Non-string, missing, or malformed values
-            yield ``None``.
+        value: Raw header value. Strings are parsed as ``Retry-After`` (delta-seconds
+            or HTTP-date); numeric values are treated as delta-seconds. Missing or
+            malformed values yield ``None``.
         now: Reference time used for HTTP-date values. Defaults to the
             current UTC time.
 
@@ -116,6 +117,8 @@ class GoogleBooksClient:
         """
         self.timeout = timeout
         self.max_retries = max_retries
+        if max_retry_wait < 0:
+            raise ValueError("max_retry_wait must be non-negative.")
         self.max_retry_wait = max_retry_wait
         self.on_rate_limit = on_rate_limit or _default_rate_limit_notice
 
