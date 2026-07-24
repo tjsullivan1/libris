@@ -2,10 +2,11 @@
 
 import json
 import re
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import yaml
 
 from .api import Book
 from .markdown import (

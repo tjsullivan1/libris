@@ -3,13 +3,15 @@ Tests for book merge functionality.
 """
 
 from pathlib import Path
+
 import pytest
+
 from libris.merge import (
-    merge_two_books,
     check_auto_merge,
-    get_primary_book,
-    write_merged_book,
     delete_secondary_file,
+    get_primary_book,
+    merge_two_books,
+    write_merged_book,
 )
 
 
@@ -622,6 +624,7 @@ class TestMergeCLI:
 
     def test_merge_auto_no_duplicates(self, tmp_path):
         from typer.testing import CliRunner
+
         from libris.cli import app
         from libris.config import set_config
 
@@ -637,6 +640,7 @@ class TestMergeCLI:
 
     def test_merge_auto_succeeds(self, tmp_path):
         from typer.testing import CliRunner
+
         from libris.cli import app
         from libris.config import set_config
 
@@ -672,6 +676,7 @@ class TestMergeCLI:
 
     def test_merge_auto_skips_conflicts(self, tmp_path):
         from typer.testing import CliRunner
+
         from libris.cli import app
         from libris.config import set_config
 

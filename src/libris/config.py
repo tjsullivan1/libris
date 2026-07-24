@@ -1,9 +1,10 @@
 """Configuration management for Libris (vault paths, API keys, settings)."""
 
-import yaml
 import os
 from pathlib import Path
 from typing import Optional
+
+import yaml
 
 LEGACY_VAULT_KEY = "vault_path"
 BOOK_VAULT_KEY = "book_vault"

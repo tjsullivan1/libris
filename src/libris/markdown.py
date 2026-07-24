@@ -1,13 +1,15 @@
 """Markdown file operations for book notes (frontmatter, creation, enrichment)."""
 
-import yaml
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from datetime import date
-from typing import Dict, Any, Literal, Optional
+from pathlib import Path
+from typing import Any, Dict, Literal, Optional
+
+import yaml
 from titlecase import titlecase
+
 from .api import Book
 
 DEFAULT_FRONTMATTER = {

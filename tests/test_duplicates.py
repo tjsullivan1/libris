@@ -1,8 +1,10 @@
 from pathlib import Path
+
 from typer.testing import CliRunner
+
 from libris.cli import app
-from libris.markdown import find_duplicates
 from libris.config import set_config
+from libris.markdown import find_duplicates
 
 runner = CliRunner()
 

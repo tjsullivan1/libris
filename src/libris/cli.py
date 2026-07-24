@@ -1,34 +1,35 @@
-import typer
-import questionary
 import re
 import time
 from pathlib import Path
-from .api import GoogleBooksClient
-from .markdown import (
-    create_book_note,
-    update_book_status,
-    list_books,
-    ensure_frontmatter_fields,
-    read_frontmatter,
-    update_frontmatter_from_book,
-    find_duplicates,
-    rename_book_file,
-    RenameResult,
-)
-from .config import (
-    get_vault_path,
-    set_config,
-    get_obsidian_vault_root,
-    set_book_vault_path,
-)
 
-from .importer import normalize_for_match, run_import, SUPPORTED_FORMATS
+import questionary
+import typer
+
+from .api import GoogleBooksClient
+from .config import (
+    get_obsidian_vault_root,
+    get_vault_path,
+    set_book_vault_path,
+    set_config,
+)
+from .importer import SUPPORTED_FORMATS, normalize_for_match, run_import
+from .markdown import (
+    RenameResult,
+    create_book_note,
+    ensure_frontmatter_fields,
+    find_duplicates,
+    list_books,
+    read_frontmatter,
+    rename_book_file,
+    update_book_status,
+    update_frontmatter_from_book,
+)
 from .merge import (
-    merge_two_books,
     check_auto_merge,
-    get_primary_book,
-    write_merged_book,
     delete_secondary_file,
+    get_primary_book,
+    merge_two_books,
+    write_merged_book,
 )
 
 app = typer.Typer()
@@ -500,6 +501,7 @@ def _append_auto_enrich_note(
 ) -> None:
     """Append a note to the document body and add 'review' tag indicating auto-enrichment."""
     from datetime import date
+
     import yaml
 
     content = file_path.read_text(encoding="utf-8")
