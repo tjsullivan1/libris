@@ -32,6 +32,7 @@ from .merge import (
     merge_two_books,
     write_merged_book,
 )
+from .migrate import apply_migration, plan_migration
 
 app = typer.Typer()
 
@@ -1015,6 +1016,80 @@ def import_cmd(
 
     if not apply and (result.new_books or result.updated_books):
         typer.echo("\nRun with --apply to execute these changes.")
+
+
+@app.command()
+def migrate(
+    apply: bool = typer.Option(
+        False, "--apply", help="Write the changes (a dry run by default)"
+    ),
+    limit: int = typer.Option(
+        3, "--limit", "-n", help="How many diffs to print (0 for all)"
+    ),
+    out: str | None = typer.Option(
+        None, "--out", help="Write the full diff to this file for review"
+    ),
+):
+    """Migrate the Shelf to the canonical Book Note shape.
+
+    A dry run by default: summarises what would change, prints a sample of
+    diffs, and writes nothing. Review the diff before using --apply.
+    """
+    vault_path = get_vault_path()
+    if not vault_path.exists():
+        typer.echo(f"Shelf does not exist: {vault_path}")
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Planning migration for {vault_path}...")
+    plans = plan_migration(vault_path)
+    changing = [plan for plan in plans if plan.changed]
+
+    change_counts: dict[str, int] = {}
+    for plan in plans:
+        for change in plan.changes:
+            label = change.split(";")[0]
+            change_counts[label] = change_counts.get(label, 0) + 1
+
+    typer.echo(f"\n{len(plans)} notes planned, {len(changing)} would change.\n")
+    for label, count in sorted(change_counts.items(), key=lambda kv: -kv[1]):
+        typer.echo(f"  {count:5d}  {label}")
+
+    flagged = [plan for plan in plans if plan.warnings]
+    if flagged:
+        typer.echo(f"\n{len(flagged)} notes need a look:")
+        for plan in flagged[:20]:
+            typer.echo(f"  {plan.path.name}: {'; '.join(plan.warnings)}")
+
+    if out:
+        out_path = Path(out).expanduser()
+        out_path.write_text("".join(plan.diff() for plan in changing), encoding="utf-8")
+        typer.echo(f"\nFull diff written to {out_path}")
+
+    shown = changing if limit == 0 else changing[:limit]
+    for plan in shown:
+        typer.echo("")
+        typer.echo(plan.diff())
+
+    if not apply:
+        typer.echo(
+            f"\nDry run. Nothing written. Re-run with --apply to migrate "
+            f"{len(changing)} notes."
+        )
+        return
+
+    if not flagged and not changing:
+        typer.echo("Nothing to do.")
+        return
+
+    confirm = questionary.confirm(
+        f"Rewrite {len(changing)} notes in {vault_path}?", default=False
+    ).ask()
+    if not confirm:
+        typer.echo("Cancelled. Nothing written.")
+        return
+
+    written = apply_migration(plans)
+    typer.echo(f"Migrated {written} notes.")
 
 
 if __name__ == "__main__":
