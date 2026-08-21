@@ -40,7 +40,7 @@ def test_create_book_note(tmp_path):
 
     content = file_path.read_text()
     assert "title: Test Book" in content
-    assert "author:\n- Author One" in content
+    assert "authors:\n- Author One" in content
     assert "### Description" in content
     assert "A test description" in content
 
@@ -206,7 +206,7 @@ def test_ensure_frontmatter_sets_status_read_when_date_finished(tmp_path):
     assert "status: Read" in content
 
 
-def test_ensure_frontmatter_converts_author_string_to_list(tmp_path):
+def test_ensure_frontmatter_migrates_legacy_author_to_authors_list(tmp_path):
     file_path = tmp_path / "string_author.md"
     file_path.write_text(
         "---\ntitle: Test\nauthor: John Doe\ngoogle_books_id: abc\n---\n"
@@ -218,7 +218,7 @@ def test_ensure_frontmatter_converts_author_string_to_list(tmp_path):
     assert updated is True
 
     content = file_path.read_text()
-    assert "author:\n- John Doe" in content
+    assert "authors:\n- John Doe" in content
 
 
 def test_ensure_frontmatter_fields_tricky_spacing(tmp_path):
@@ -388,9 +388,9 @@ def test_update_frontmatter_from_book_adds_title_heading_when_missing(tmp_path):
 def test_update_frontmatter_from_book_does_not_overwrite(tmp_path):
     f = tmp_path / "book.md"
     f.write_text(
-        "---\ntitle: My Title\nauthor:\n- Original\nisbn: '999'\n"
-        "page_count: 50\npublished_date: '2019'\ngoogle_books_id: existing\n"
-        "thumbnail: http://old.jpg\ngenres:\n- Nonfiction\n---\n"
+        "---\ntitle: My Title\nauthors:\n- Original\nisbn: '999'\n"
+        "page_count: 50\ndate_published: '2019'\ngoogle_books_id: existing\n"
+        "cover_thumbnail: http://old.jpg\ngenres:\n- Nonfiction\n---\n"
     )
 
     book = Book(
@@ -535,9 +535,9 @@ def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
     file_path = tmp_path / "good_book.md"
     # Write a file with all fields present and title already standardized
     file_path.write_text(
-        "---\ntitle: The Great Gatsby\nauthor:\n- F. Scott Fitzgerald\nisbn: '123'\n"
-        "page_count: 200\npublished_date: '1925'\ngoogle_books_id: abc\n"
-        "thumbnail: null\ngenres: null\ntags: Book\nformat: null\n"
+        "---\ntitle: The Great Gatsby\nauthors:\n- F. Scott Fitzgerald\nisbn: '123'\n"
+        "page_count: 200\ndate_published: '1925'\ngoogle_books_id: abc\n"
+        "cover_thumbnail: null\ngenres: null\ntags: Book\nformat: null\n"
         "status: To Read\nrating: null\nreferred_by: null\n"
         "date_added: null\ndate_started: null\ndate_finished: null\n---\n"
     )

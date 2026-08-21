@@ -14,12 +14,12 @@ from .api import Book
 
 DEFAULT_FRONTMATTER = {
     "title": None,
-    "author": None,
+    "authors": None,
     "isbn": None,
     "page_count": None,
-    "published_date": None,
+    "date_published": None,
     "google_books_id": None,
-    "thumbnail": None,
+    "cover_thumbnail": None,
     "genres": None,
     "tags": "Book",
     "format": None,
@@ -39,7 +39,11 @@ FIELD_MIGRATIONS = {
     "Date Read": "date_finished",
     "Date Added": "date_added",
     "Status": "status",
-    "Author": "author",
+    "Author": "authors",
+    # Names this code wrote before ADR 0005 settled the canonical vocabulary.
+    "author": "authors",
+    "published_date": "date_published",
+    "thumbnail": "cover_thumbnail",
 }
 
 
@@ -90,12 +94,12 @@ def create_book_note(
     frontmatter = {
         **DEFAULT_FRONTMATTER,
         "title": book.title,
-        "author": book.authors,
+        "authors": book.authors,
         "isbn": book.isbn,
         "page_count": book.page_count,
-        "published_date": book.published_date,
+        "date_published": book.published_date,
         "google_books_id": book.google_books_id,
-        "thumbnail": book.thumbnail,
+        "cover_thumbnail": book.thumbnail,
         "genres": book.genres,
         "status": status,
         "date_added": date.today().isoformat(),
@@ -189,9 +193,9 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
         data["status"] = "Read"
         updated = True
 
-    # Ensure author is always a list
-    if isinstance(data.get("author"), str):
-        data["author"] = [data["author"]]
+    # Ensure authors is always a list
+    if isinstance(data.get("authors"), str):
+        data["authors"] = [data["authors"]]
         updated = True
 
     # Standardize title casing and strip annotations
@@ -226,12 +230,12 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
 # Maps Book dataclass fields to frontmatter field names.
 _BOOK_TO_FRONTMATTER = {
     "title": "title",
-    "authors": "author",
+    "authors": "authors",
     "isbn": "isbn",
     "page_count": "page_count",
-    "published_date": "published_date",
+    "published_date": "date_published",
     "google_books_id": "google_books_id",
-    "thumbnail": "thumbnail",
+    "thumbnail": "cover_thumbnail",
     "genres": "genres",
     "description": None,  # handled separately (body, not frontmatter)
 }

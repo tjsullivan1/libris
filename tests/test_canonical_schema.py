@@ -198,9 +198,6 @@ def test_already_enriched_note_is_not_re_enriched():
     assert _needs_enrichment(fm) is False
 
 
-@pytest.mark.xfail(
-    strict=True, reason="#61: DEFAULT_FRONTMATTER uses author/published_date/thumbnail"
-)
 def test_created_notes_use_the_canonical_field_names(vault):
     # Given a book resolved from Google Books
     book = Book(
