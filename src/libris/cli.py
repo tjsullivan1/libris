@@ -585,7 +585,12 @@ def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
 
 
 # Fields that are only populated via Google Books enrichment.
-_API_SOURCED_FIELDS = ("google_books_id", "thumbnail", "published_date", "page_count")
+_API_SOURCED_FIELDS = (
+    "google_books_id",
+    "cover_thumbnail",
+    "date_published",
+    "page_count",
+)
 
 
 def _needs_enrichment(fm: dict) -> bool:

@@ -176,10 +176,6 @@ def test_enrichment_query_searches_by_author(vault):
     assert "inauthor:Catullus" in query
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#61: _API_SOURCED_FIELDS names thumbnail and published_date, which do not exist",
-)
 def test_already_enriched_note_is_not_re_enriched():
     # Given a note carrying metadata that only Google Books could have supplied
     fm = {
