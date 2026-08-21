@@ -99,7 +99,7 @@ def test_reordering_does_not_rewrite_values_it_did_not_change():
 def test_description_below_the_notes_heading_is_separated():
     # Given the shape most notes have
     prose, description = split_body(
-        "# Dune\n\n## Notes\n\nmy prose\n\n### Description\nblurb\n"
+        "# Dune\n\n## Notes\n\nmy prose\n\n### Description\nblurb\n", ("Dune",)
     )
 
     # Then the reader's prose and the blurb are told apart
@@ -110,7 +110,7 @@ def test_description_below_the_notes_heading_is_separated():
 def test_description_above_the_notes_heading_does_not_swallow_prose():
     # Given a note where the description comes first
     prose, description = split_body(
-        "# Dune\n\n### Description\nblurb\n\n# Notes\n\nmy prose\n"
+        "# Dune\n\n### Description\nblurb\n\n# Notes\n\nmy prose\n", ("Dune",)
     )
 
     # Then the description stops at the next heading
@@ -133,7 +133,8 @@ def test_merged_content_is_prose_not_blurb():
 def test_an_already_migrated_body_reads_back_unchanged():
     # Given a body in the shape the migration produces
     prose, description = split_body(
-        "# Dune\n\n## Notes\n\nmy prose\n\n> [!abstract]- Description\n> blurb\n> more\n"
+        "# Dune\n\n## Notes\n\nmy prose\n\n> [!abstract]- Description\n> blurb\n> more\n",
+        ("Dune",),
     )
 
     # Then it round-trips, so the migration is safe to run twice
@@ -147,6 +148,36 @@ def test_callout_quotes_every_line_including_blank_ones():
 
     # Then every line is quoted and the callout is collapsed
     assert rendered == "> [!abstract]- Description\n> first\n>\n> second"
+
+
+def test_a_heading_the_reader_wrote_is_not_mistaken_for_the_title():
+    # Given a note opening with the reader's own H1
+    prose, _ = split_body(
+        "# Notes from GetAbstract\n\nthe seven habits are:\n", ("The 7 Habits",)
+    )
+
+    # Then it survives, because it does not name the title
+    assert prose.startswith("# Notes from GetAbstract")
+
+
+def test_a_heading_further_down_the_note_is_never_consumed():
+    # Given a contents list above the reader's first heading
+    prose, _ = split_body(
+        "- [[#General]]\n- [[#Healthy]]\n\n# General\n\nsome content\n",
+        ("Tools of Titans",),
+    )
+
+    # Then nothing is stripped, because no title heading leads the body
+    assert "# General" in prose
+    assert "[[#Healthy]]" in prose
+
+
+def test_a_leaked_heading_is_consumed_even_without_a_title():
+    # Given a note whose H1 the linter replaced with the Notes heading
+    prose, _ = split_body("# Notes\n\nmy prose\n", ())
+
+    # Then it is removed, since it was never the reader's
+    assert prose == "my prose"
 
 
 # --- Repairs ---

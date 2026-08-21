@@ -177,7 +177,7 @@ def render_description_callout(description: str) -> str:
     return "\n".join(lines)
 
 
-def split_body(body: str) -> tuple[str, str | None]:
+def split_body(body: str, titles: tuple[str, ...] = ()) -> tuple[str, str | None]:
     """Separate the reader's own prose from the description supplied by an API.
 
     The description is the content under its own heading, ending at the next
@@ -191,6 +191,8 @@ def split_body(body: str) -> tuple[str, str | None]:
 
     Args:
         body: Everything after the closing frontmatter fence.
+        titles: Headings that count as the note's own title heading and may be
+            consumed. Any other leading H1 belongs to the reader and is kept.
 
     Returns:
         The reader's prose, and the description if the note carries one.
@@ -213,9 +215,35 @@ def split_body(body: str) -> tuple[str, str | None]:
         description = after[:end].strip()
         remainder = body[: heading.start()] + after[end:]
 
-    prose = _H1.sub("", remainder, count=1)
+    prose = _strip_title_heading(remainder, titles)
     prose = _NOTES_HEADING.sub("", prose)
     return prose.strip(), (description or None)
+
+
+def _strip_title_heading(text: str, titles: tuple[str, ...]) -> str:
+    """Remove a leading H1 only when it is the note's title heading.
+
+    A note may open with a heading the reader wrote - a contents list, or
+    "Notes from GetAbstract" - and removing it would destroy their writing. Only
+    a first-line H1 naming the title, or one of the headings the linter leaked
+    into the title, is the migration's to consume.
+
+    Args:
+        text: The note content with any description already removed.
+        titles: Headings that count as the note's own title heading.
+
+    Returns:
+        The text, with the title heading removed if it was there.
+    """
+    leading = text.lstrip("\n")
+    match = _H1.match(leading)
+    if match is None:
+        return text
+
+    heading = match.group(1).strip()
+    if heading in LEAKED_HEADINGS or heading in titles:
+        return leading[match.end() :]
+    return text
 
 
 def _take_callout(text: str) -> tuple[str, str]:
@@ -410,7 +438,8 @@ def plan_note_migration(path: Path) -> NoteMigration:
     if [k for k, _ in ordered] != [k for k, _ in blocks]:
         changes.append("regrouped frontmatter")
 
-    prose, description = split_body(body)
+    candidate_titles = tuple(value for value in (note.title, repaired_title) if value)
+    prose, description = split_body(body, candidate_titles)
     if title is None:
         warnings.append("no title; body left alone")
         new_body = body
