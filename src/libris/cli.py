@@ -14,6 +14,7 @@ from .config import (
 )
 from .importer import SUPPORTED_FORMATS, normalize_for_match, run_import
 from .markdown import (
+    BookNote,
     RenameResult,
     create_book_note,
     ensure_frontmatter_fields,
@@ -636,15 +637,14 @@ def _best_match(candidates: list) -> object:
 
 def _build_query_from_frontmatter(fm: dict, file_path: Path) -> str:
     """Build a Google Books search query preferring frontmatter over filename."""
-    title = fm.get("title")
-    author = fm.get("author")
-    if title and isinstance(title, str):
-        parts = [f"intitle:{title}"]
-        if author:
-            first_author = author[0] if isinstance(author, list) else author
-            parts.append(f"inauthor:{first_author}")
-        return " ".join(parts)
-    return _build_search_query(file_path.stem)
+    note = BookNote(path=file_path, frontmatter=fm)
+    if note.title is None:
+        return _build_search_query(file_path.stem)
+
+    parts = [f"intitle:{note.title}"]
+    if note.first_author is not None:
+        parts.append(f"inauthor:{note.first_author}")
+    return " ".join(parts)
 
 
 @app.command()

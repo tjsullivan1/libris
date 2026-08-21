@@ -47,6 +47,81 @@ FIELD_MIGRATIONS = {
 }
 
 
+@dataclass
+class BookNote:
+    """A book on the Shelf: the file it lives in, its frontmatter, and its body.
+
+    Frontmatter arrives from YAML and may hold any shape, so the accessors
+    normalise rather than trusting what is on disk. Callers should read fields
+    through them instead of reaching into the dict, which is how this code came
+    to read a key that no note has ever carried.
+    """
+
+    path: Path
+    frontmatter: dict[str, Any]
+    body: str = ""
+
+    @classmethod
+    def read(cls, path: Path) -> "BookNote | None":
+        """Read a Book Note from disk.
+
+        Args:
+            path: Path to the Markdown file.
+
+        Returns:
+            The Book Note, or None if the file has no parseable frontmatter.
+        """
+        frontmatter = read_frontmatter(path)
+        if frontmatter is None:
+            return None
+        return cls(path=path, frontmatter=frontmatter)
+
+    @property
+    def libris_id(self) -> str | None:
+        """The note's stable identity, or None until the vault is migrated."""
+        value = self.frontmatter.get("libris_id")
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def title(self) -> str | None:
+        """The book's title, or None when absent or blank."""
+        value = self.frontmatter.get("title")
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def authors(self) -> list[str]:
+        """The book's authors as a list of non-empty names.
+
+        Accepts the list every note in the vault carries and the bare string that
+        older notes used. Anything else counts as naming no author at all.
+        """
+        value = self.frontmatter.get("authors")
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [
+            name.strip() for name in value if isinstance(name, str) and name.strip()
+        ]
+
+    @property
+    def first_author(self) -> str | None:
+        """The first named author, or None when the note names none."""
+        authors = self.authors
+        return authors[0] if authors else None
+
+    @property
+    def canonical_filename(self) -> str | None:
+        """The 'Title - Author.md' filename this note should have.
+
+        Returns:
+            The filename, or None when the note lacks a title or an author.
+        """
+        if self.title is None or self.first_author is None:
+            return None
+        return sanitize_filename(f"{self.title} - {self.first_author}.md")
+
+
 def sanitize_filename(name: str) -> str:
     """Removes invalid characters for a filename and collapses whitespace."""
     name = re.sub(r'[\\/*?:"<>|]', "", name)
@@ -252,22 +327,14 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
     Returns a list of groups where each group contains two or more paths
     that share at least one matching identifier.
     """
-    books = list_books(vault_path)
-    file_data: list[tuple[Path, Dict[str, Any]]] = []
-    for p in books:
-        fm = read_frontmatter(p)
-        if fm is not None:
-            file_data.append((p, fm))
+    notes: list[BookNote] = []
+    for book_path in list_books(vault_path):
+        note = BookNote.read(book_path)
+        if note is not None:
+            notes.append(note)
 
-    def _author_key(fm: Dict[str, Any]) -> tuple[str, ...]:
-        author = fm.get("author")
-        if isinstance(author, list):
-            return tuple(
-                sorted(a.strip().lower() for a in author if isinstance(a, str))
-            )
-        elif isinstance(author, str):
-            return (author.strip().lower(),)
-        return ()
+    def _author_key(note: BookNote) -> tuple[str, ...]:
+        return tuple(sorted(name.lower() for name in note.authors))
 
     # Build groups keyed by each identifier type.
     # key -> set of indices into file_data
@@ -275,23 +342,22 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
     # Title groups need pairwise author comparison (missing author = wildcard)
     title_groups: Dict[str, list[int]] = {}
 
-    for idx, (path, fm) in enumerate(file_data):
-        title = fm.get("title")
-        if title and isinstance(title, str):
-            title_groups.setdefault(title.strip().lower(), []).append(idx)
+    for idx, note in enumerate(notes):
+        if note.title is not None:
+            title_groups.setdefault(note.title.lower(), []).append(idx)
 
-        isbn = fm.get("isbn")
+        isbn = note.frontmatter.get("isbn")
         if isbn:
             key = f"isbn:{str(isbn).strip()}"
             groups_by_key.setdefault(key, set()).add(idx)
 
-        gid = fm.get("google_books_id")
+        gid = note.frontmatter.get("google_books_id")
         if gid and gid not in EXCLUDED_GOOGLE_BOOKS_IDS:
             key = f"gid:{str(gid).strip()}"
             groups_by_key.setdefault(key, set()).add(idx)
 
     # Union-find to merge overlapping groups
-    parent = list(range(len(file_data)))
+    parent = list(range(len(notes)))
 
     def find(x: int) -> int:
         while parent[x] != x:
@@ -313,7 +379,7 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
         has_missing_author = False
 
         for idx in members:
-            author_key = _author_key(file_data[idx][1])
+            author_key = _author_key(notes[idx])
             if author_key:
                 author_buckets.setdefault(author_key, []).append(idx)
             else:
@@ -341,9 +407,9 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
 
     # Collect final groups with 2+ members
     clusters: Dict[int, list[Path]] = {}
-    for idx, (path, _) in enumerate(file_data):
+    for idx, note in enumerate(notes):
         root = find(idx)
-        clusters.setdefault(root, []).append(path)
+        clusters.setdefault(root, []).append(note.path)
 
     return [sorted(group) for group in clusters.values() if len(group) >= 2]
 
@@ -420,33 +486,8 @@ def update_frontmatter_from_book(file_path: Path, book: Book) -> bool:
 
 def compute_canonical_filename(file_path: Path) -> Optional[str]:
     """Compute the canonical 'Title - Author.md' filename from frontmatter."""
-    fm = read_frontmatter(file_path)
-    if not fm:
-        return None
-    title = fm.get("title")
-    author = fm.get("author")
-    if not title or not isinstance(title, str):
-        return None
-
-    if isinstance(author, list):
-        author_candidates = author
-    elif isinstance(author, str):
-        author_candidates = [author]
-    else:
-        return None
-
-    first_author = next(
-        (
-            candidate.strip()
-            for candidate in author_candidates
-            if isinstance(candidate, str) and candidate.strip()
-        ),
-        None,
-    )
-    if first_author is None:
-        return None
-
-    return sanitize_filename(f"{title} - {first_author}.md")
+    note = BookNote.read(file_path)
+    return note.canonical_filename if note is not None else None
 
 
 def update_wikilinks_in_vault(
@@ -505,30 +546,21 @@ def rename_book_file(
     If frontmatter is provided, it is used directly instead of re-reading
     the file. This avoids redundant I/O when called after ensure_frontmatter_fields.
     """
-    fm = frontmatter if frontmatter is not None else read_frontmatter(file_path)
-    if not fm:
+    note = (
+        BookNote(path=file_path, frontmatter=frontmatter)
+        if frontmatter is not None
+        else BookNote.read(file_path)
+    )
+    if note is None or not note.frontmatter:
         return RenameResult(status="invalid_frontmatter")
 
-    title = fm.get("title")
-    if not isinstance(title, str) or not title.strip():
+    if note.title is None:
         return RenameResult(status="missing_title")
 
-    author = fm.get("author")
-    if isinstance(author, list):
-        author_candidates = author
-    elif isinstance(author, str):
-        author_candidates = [author]
-    else:
+    if note.first_author is None:
         return RenameResult(status="missing_author")
 
-    first_author = next(
-        (c.strip() for c in author_candidates if isinstance(c, str) and c.strip()),
-        None,
-    )
-    if first_author is None:
-        return RenameResult(status="missing_author")
-
-    canonical_name = sanitize_filename(f"{title.strip()} - {first_author}.md")
+    canonical_name = note.canonical_filename
     if canonical_name == file_path.name:
         return RenameResult(status="already_canonical")
 

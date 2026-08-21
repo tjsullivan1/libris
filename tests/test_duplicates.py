@@ -40,7 +40,7 @@ def test_duplicate_by_title(tmp_path):
         title="Same Title",
         isbn="111",
         google_books_id="a1",
-        author=["Author A"],
+        authors=["Author A"],
     )
     _write_book(
         tmp_path,
@@ -48,7 +48,7 @@ def test_duplicate_by_title(tmp_path):
         title="same title",
         isbn="222",
         google_books_id="b2",
-        author=["Author A"],
+        authors=["Author A"],
     )
     groups = find_duplicates(tmp_path)
     assert len(groups) == 1
@@ -57,14 +57,14 @@ def test_duplicate_by_title(tmp_path):
 
 
 def test_same_title_different_author_not_duplicate(tmp_path):
-    _write_book(tmp_path, "A.md", title="Zero Day", isbn="111", author=["Author A"])
-    _write_book(tmp_path, "B.md", title="Zero Day", isbn="222", author=["Author B"])
+    _write_book(tmp_path, "A.md", title="Zero Day", isbn="111", authors=["Author A"])
+    _write_book(tmp_path, "B.md", title="Zero Day", isbn="222", authors=["Author B"])
     assert find_duplicates(tmp_path) == []
 
 
 def test_same_title_missing_author_is_duplicate(tmp_path):
     """A book with no author should match same-titled books as a potential duplicate."""
-    _write_book(tmp_path, "A.md", title="Zero Day", isbn="111", author=["Author A"])
+    _write_book(tmp_path, "A.md", title="Zero Day", isbn="111", authors=["Author A"])
     _write_book(tmp_path, "B.md", title="Zero Day", isbn="222")
     groups = find_duplicates(tmp_path)
     assert len(groups) == 1
@@ -96,7 +96,7 @@ def test_transitive_duplicates_merged(tmp_path):
         title="Shared Title",
         isbn="111",
         google_books_id="a1",
-        author=["Same Author"],
+        authors=["Same Author"],
     )
     _write_book(
         tmp_path,
@@ -104,7 +104,7 @@ def test_transitive_duplicates_merged(tmp_path):
         title="Shared Title",
         isbn="222",
         google_books_id="b2",
-        author=["Same Author"],
+        authors=["Same Author"],
     )
     _write_book(tmp_path, "C.md", title="Other Title", isbn="222", google_books_id="c3")
     groups = find_duplicates(tmp_path)
@@ -113,18 +113,18 @@ def test_transitive_duplicates_merged(tmp_path):
 
 
 def test_multiple_independent_groups(tmp_path):
-    _write_book(tmp_path, "A.md", title="Group One", isbn="111", author=["Author X"])
-    _write_book(tmp_path, "B.md", title="Group One", isbn="112", author=["Author X"])
-    _write_book(tmp_path, "C.md", title="Group Two", isbn="333", author=["Author Y"])
-    _write_book(tmp_path, "D.md", title="Group Two", isbn="444", author=["Author Y"])
+    _write_book(tmp_path, "A.md", title="Group One", isbn="111", authors=["Author X"])
+    _write_book(tmp_path, "B.md", title="Group One", isbn="112", authors=["Author X"])
+    _write_book(tmp_path, "C.md", title="Group Two", isbn="333", authors=["Author Y"])
+    _write_book(tmp_path, "D.md", title="Group Two", isbn="444", authors=["Author Y"])
     _write_book(tmp_path, "E.md", title="Unique", isbn="555")
     groups = find_duplicates(tmp_path)
     assert len(groups) == 2
 
 
 def test_files_without_frontmatter_skipped(tmp_path):
-    _write_book(tmp_path, "A.md", title="Same", isbn="111", author=["Author"])
-    _write_book(tmp_path, "B.md", title="Same", isbn="222", author=["Author"])
+    _write_book(tmp_path, "A.md", title="Same", isbn="111", authors=["Author"])
+    _write_book(tmp_path, "B.md", title="Same", isbn="222", authors=["Author"])
     # File without frontmatter
     (tmp_path / "plain.md").write_text("# Just a heading\n")
     groups = find_duplicates(tmp_path)
@@ -148,7 +148,7 @@ def test_cli_duplicates_command_reports(tmp_path):
         title="Dup Book",
         isbn="111",
         google_books_id="g1",
-        author=["Author"],
+        authors=["Author"],
     )
     _write_book(
         vault,
@@ -156,7 +156,7 @@ def test_cli_duplicates_command_reports(tmp_path):
         title="Dup Book",
         isbn="222",
         google_books_id="g2",
-        author=["Author"],
+        authors=["Author"],
     )
     set_config("vault_path", str(vault))
 

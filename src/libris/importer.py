@@ -10,9 +10,9 @@ import yaml
 
 from .api import Book
 from .markdown import (
+    BookNote,
     create_book_note,
     list_books,
-    read_frontmatter,
     update_book_status,
 )
 
@@ -119,34 +119,24 @@ def parse_import_file(
     return parser(path)
 
 
-def _build_vault_index(vault_path: Path) -> Dict[Tuple[str, str], Tuple[Path, Dict]]:
-    """Build an index of existing vault books keyed by normalized (title, first_author)."""
-    index: Dict[Tuple[str, str], Tuple[Path, Dict]] = {}
+def _build_vault_index(vault_path: Path) -> dict[tuple[str, str], BookNote]:
+    """Build an index of Book Notes keyed by normalized (title, first_author).
+
+    Args:
+        vault_path: The Shelf to index.
+
+    Returns:
+        A mapping from normalized title and first author to the Book Note. Notes
+        without a title or an author cannot be matched and are left out.
+    """
+    index: dict[tuple[str, str], BookNote] = {}
     for book_path in list_books(vault_path):
-        fm = read_frontmatter(book_path)
-        if fm is None:
+        note = BookNote.read(book_path)
+        if note is None or note.title is None or note.first_author is None:
             continue
 
-        title = fm.get("title")
-        if not isinstance(title, str) or not title.strip():
-            continue
-
-        author = fm.get("author")
-        if isinstance(author, list):
-            first_author = next(
-                (a.strip() for a in author if isinstance(a, str) and a.strip()),
-                None,
-            )
-        elif isinstance(author, str):
-            first_author = author.strip() or None
-        else:
-            first_author = None
-
-        if first_author is None:
-            continue
-
-        key = (normalize_for_match(title), normalize_for_match(first_author))
-        index[key] = (book_path, fm)
+        key = (normalize_for_match(note.title), normalize_for_match(note.first_author))
+        index[key] = note
 
     return index
 
@@ -164,7 +154,7 @@ class ImportResult:
 
 def _check_duplicate(
     book: ImportBook,
-    vault_index: Dict[Tuple[str, str], Tuple[Path, Dict]],
+    vault_index: dict[tuple[str, str], BookNote],
 ) -> Optional[Tuple[Path, Dict, List[str]]]:
     """Check if an import book matches an existing vault entry.
 
@@ -177,11 +167,11 @@ def _check_duplicate(
         return None
 
     key = (normalize_for_match(book.title), normalize_for_match(first_author))
-    match = vault_index.get(key)
-    if match is None:
+    note = vault_index.get(key)
+    if note is None:
         return None
 
-    path, fm = match
+    fm = note.frontmatter
     updates: List[str] = []
 
     existing_status = fm.get("status", "")
@@ -192,7 +182,7 @@ def _check_duplicate(
     if not existing_format and book.format:
         updates.append("format")
 
-    return (path, fm, updates)
+    return (note.path, fm, updates)
 
 
 def _apply_updates(path: Path, book: ImportBook, updates: List[str]):

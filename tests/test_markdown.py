@@ -365,7 +365,7 @@ def test_update_frontmatter_from_book_skips_existing_description(tmp_path):
 
 def test_update_frontmatter_from_book_adds_title_heading_when_missing(tmp_path):
     f = tmp_path / "book.md"
-    f.write_text("---\ntitle: Test Book\nauthor: null\n---\n\n## Notes\n")
+    f.write_text("---\ntitle: Test Book\nauthors: null\n---\n\n## Notes\n")
 
     book = Book(
         title="Test Book",
@@ -551,26 +551,26 @@ def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
 
 def test_compute_canonical_filename(tmp_path):
     f = tmp_path / "old name.md"
-    f.write_text("---\ntitle: The Great Gatsby\nauthor:\n- F. Scott Fitzgerald\n---\n")
+    f.write_text("---\ntitle: The Great Gatsby\nauthors:\n- F. Scott Fitzgerald\n---\n")
     result = compute_canonical_filename(f)
     assert result == "The Great Gatsby - F. Scott Fitzgerald.md"
 
 
 def test_compute_canonical_filename_missing_author(tmp_path):
     f = tmp_path / "no_author.md"
-    f.write_text("---\ntitle: Solo Title\nauthor: null\n---\n")
+    f.write_text("---\ntitle: Solo Title\nauthors: null\n---\n")
     assert compute_canonical_filename(f) is None
 
 
 def test_compute_canonical_filename_missing_title(tmp_path):
     f = tmp_path / "no_title.md"
-    f.write_text("---\ntitle: null\nauthor:\n- Someone\n---\n")
+    f.write_text("---\ntitle: null\nauthors:\n- Someone\n---\n")
     assert compute_canonical_filename(f) is None
 
 
 def test_compute_canonical_filename_sanitizes(tmp_path):
     f = tmp_path / "bad.md"
-    f.write_text("---\ntitle: 'Title: With Colon'\nauthor:\n- Author\n---\n")
+    f.write_text("---\ntitle: 'Title: With Colon'\nauthors:\n- Author\n---\n")
     result = compute_canonical_filename(f)
     assert ":" not in result
     assert result == "Title With Colon - Author.md"
@@ -633,7 +633,7 @@ def test_update_wikilinks_excludes_target_file(tmp_path):
 
 def test_rename_book_file(tmp_path):
     f = tmp_path / "wrong name.md"
-    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    f.write_text("---\ntitle: Dune\nauthors:\n- Frank Herbert\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "renamed"
     assert result.new_path.name == "Dune - Frank Herbert.md"
@@ -643,7 +643,7 @@ def test_rename_book_file(tmp_path):
 
 def test_rename_book_file_updates_links(tmp_path):
     book = tmp_path / "wrong name.md"
-    book.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    book.write_text("---\ntitle: Dune\nauthors:\n- Frank Herbert\n---\n")
     note = tmp_path / "reading log.md"
     note.write_text("Currently reading [[wrong name]].\n")
 
@@ -655,7 +655,7 @@ def test_rename_book_file_updates_links(tmp_path):
 
 def test_rename_book_file_collision_skips(tmp_path):
     f = tmp_path / "wrong name.md"
-    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    f.write_text("---\ntitle: Dune\nauthors:\n- Frank Herbert\n---\n")
     collision = tmp_path / "Dune - Frank Herbert.md"
     collision.write_text("---\ntitle: Dune\n---\n")
 
@@ -667,14 +667,14 @@ def test_rename_book_file_collision_skips(tmp_path):
 
 def test_rename_book_file_already_canonical(tmp_path):
     f = tmp_path / "Dune - Frank Herbert.md"
-    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    f.write_text("---\ntitle: Dune\nauthors:\n- Frank Herbert\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "already_canonical"
 
 
 def test_rename_book_file_missing_title(tmp_path):
     f = tmp_path / "some file.md"
-    f.write_text("---\ntitle: null\nauthor:\n- Some Author\n---\n")
+    f.write_text("---\ntitle: null\nauthors:\n- Some Author\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_title"
     assert f.exists()
@@ -682,7 +682,7 @@ def test_rename_book_file_missing_title(tmp_path):
 
 def test_rename_book_file_missing_author(tmp_path):
     f = tmp_path / "some file.md"
-    f.write_text("---\ntitle: Some Title\nauthor: null\n---\n")
+    f.write_text("---\ntitle: Some Title\nauthors: null\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_author"
     assert f.exists()
@@ -690,13 +690,13 @@ def test_rename_book_file_missing_author(tmp_path):
 
 def test_rename_book_file_empty_author_list(tmp_path):
     f = tmp_path / "some file.md"
-    f.write_text("---\ntitle: Some Title\nauthor: []\n---\n")
+    f.write_text("---\ntitle: Some Title\nauthors: []\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_author"
 
 
 def test_rename_book_file_whitespace_title(tmp_path):
     f = tmp_path / "some file.md"
-    f.write_text("---\ntitle: '   '\nauthor:\n- Author\n---\n")
+    f.write_text("---\ntitle: '   '\nauthors:\n- Author\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_title"

@@ -83,10 +83,6 @@ def vault(tmp_path):
     return shelf
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#61: _build_vault_index reads fm['author'], so every note is skipped",
-)
 def test_vault_index_finds_notes_written_with_canonical_fields(vault):
     # Given two Book Notes shaped like the ones in the vault
     write_note(
@@ -108,10 +104,6 @@ def test_vault_index_finds_notes_written_with_canonical_fields(vault):
     assert len(index) == 2
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#61: _author_key reads fm['author'], making author a wildcard for every note",
-)
 def test_duplicates_does_not_group_books_by_different_authors(vault):
     # Given two unrelated books that happen to share a title
     write_note(vault, "Poems - Catullus.md", title="Poems", authors=["Catullus"])
@@ -131,9 +123,6 @@ def test_duplicates_does_not_group_books_by_different_authors(vault):
     assert groups == []
 
 
-@pytest.mark.xfail(
-    strict=True, reason="#61: compute_canonical_filename reads fm['author']"
-)
 def test_canonical_filename_resolves_from_the_authors_field(vault):
     # Given a Book Note with a misnamed file
     note = write_note(vault, "wrong-name.md", title="Dune", authors=["Frank Herbert"])
@@ -146,7 +135,6 @@ def test_canonical_filename_resolves_from_the_authors_field(vault):
     assert result == "Dune - Frank Herbert.md"
 
 
-@pytest.mark.xfail(strict=True, reason="#61: rename_book_file reads fm['author']")
 def test_rename_reads_the_authors_field(vault):
     # Given a Book Note with a misnamed file
     note = write_note(vault, "wrong-name.md", title="Dune", authors=["Frank Herbert"])
@@ -159,9 +147,6 @@ def test_rename_reads_the_authors_field(vault):
     assert result.status != "missing_author"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="#61: _build_query_from_frontmatter reads fm['author']"
-)
 def test_enrichment_query_searches_by_author(vault):
     # Given frontmatter from a Book Note in the vault
     fm = {**CANONICAL_FRONTMATTER, "title": "Poems", "authors": ["Catullus"]}
