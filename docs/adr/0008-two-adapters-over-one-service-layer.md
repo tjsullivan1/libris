@@ -17,3 +17,7 @@ what it wants.
 
 Only the endpoints sync needs are built now. Query endpoints for a mobile app or a published
 view are additive over the same service layer.
+
+Extended by ADR 0010: there are three adapters, not two. The Edge extension (#51) reaches
+the same service layer over a local daemon, and the count here was taken before that plan
+was known.

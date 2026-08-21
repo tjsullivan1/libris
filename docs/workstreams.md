@@ -49,10 +49,15 @@ Two live consequences, both caused by that:
   `_needs_enrichment` therefore tests two fields instead of four, and reports 152 notes as
   unenriched when only 5 are — a 97% false-positive rate on every run.
 
-## 2. MCP tool surface
+## 2. Service layer and its first adapters
 
-`search_books`, `add_book`, `update_book` over stdio, driven from Claude Code locally. No
-Azure. This is where the design risk lives (ADR 0003).
+Extract matching and note-writing into a shared service layer (#53), then put adapters over
+it. Two candidates, both needing no infrastructure, ordering not yet settled:
+
+- `libris serve` on loopback plus the Edge extension (#51, #52, #53) — already specified,
+  and the adapter with the stronger duplicate guarantee (ADR 0010)
+- `search_books` / `add_book` / `update_book` over stdio MCP, driven from Claude Code — where
+  the resolution design risk lives (ADR 0003, ADR 0007)
 
 ## 3. Sync
 
