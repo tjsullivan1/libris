@@ -10,9 +10,22 @@ notes and missing from 1,751.
 So a machine-generated blurb, occasionally in the wrong language, was the dominant content
 of every note, sitting above the 8% of notes holding something irreplaceable.
 
-`## Notes` is normalised onto every Book Note and comes first. The description moves below it
-into a collapsed `> [!abstract]-` callout: still indexed by Omnisearch, no longer dominating
-the read view. Frontmatter is grouped rather than arbitrary — identity, bibliographic,
+A Book Note opens with an `# Title` H1, then `## Notes`, then the description in a collapsed
+`> [!abstract]-` callout: still indexed by Omnisearch, no longer dominating the read view.
+`## Notes` is normalised onto every note; it is currently present on only 1,386 of 3,137.
+
+The H1 is load-bearing and must not be tidied away. Obsidian Linter's `yaml-title-alias`
+rule is enabled with `keep-alias-that-matches-the-filename: false`, so it derives an alias
+from the first heading. With no H1 it took `## Notes` or `### Description`, which is how
+eleven notes came to be aliased "Notes" and three "Description" — those notes carry a
+corrupted `# Notes` or `# Description` heading too, and the migration repairs both. With a
+correct H1 it mints the title as an alias, which is what lets `[[Dune]]` resolve against a
+file named `Dune - Frank Herbert.md`.
+
+Aliases are left to the linter rather than written by the migration. It owns the rule and
+its own formatting conventions, and hand-writing them invites a fight the next time it runs.
+The consequence is accepted: aliases exist on 240 notes today and will spread only as notes
+are edited. Frontmatter is grouped rather than arbitrary — identity, bibliographic,
 reading state, then dates — because nineteen fields in no order is unreadable in Obsidian's
 Properties panel.
 
