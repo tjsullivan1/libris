@@ -29,8 +29,15 @@ Scope:
 - Introduce a `BookNote` type: `libris_id`, path, typed frontmatter, body
 - Rename `Book` to `BookCandidate`; collapse `ImportBook` into it with a `source` field
 - Move `cli.py` off raw `fm.get(...)` dict access
-- Restructure the note body: `## Notes` first on every note, description into a collapsed
+- Restructure the note body: `# Title` then `## Notes` then the description in a collapsed
   callout, frontmatter grouped (ADR 0009, closes #57)
+- Repair four flavours of Obsidian Linter damage: 4 notes whose `title` is "Notes", 18+
+  whose `title` carries the author, 14 with a corrupted `# Notes` or `# Description`
+  heading, and 14 aliased "Notes" or "Description" (ADR 0012)
+
+**Do not run `clean --rename` before the migration.** It was a no-op for the life of this
+vault and is now live; against today's titles it would rename 156 files and rewrite
+wikilinks, some into `Title - Author - Author.md`.
 
 The last three are the reason the first four were needed. There is no type for a book in the
 Library: `list_books` returns `list[Path]`, `read_frontmatter` returns `Dict[str, Any]`,
