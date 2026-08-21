@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
-from .api import Book
+from .api import BookCandidate
 from .markdown import (
     BookNote,
     create_book_note,
@@ -25,22 +25,27 @@ def normalize_for_match(text: str) -> str:
 
 @dataclass
 class ImportBook:
-    """Common representation for a book from any import source."""
+    """A book from an import source, paired with how that source says it was read.
 
-    title: str
-    authors: List[str]
+    The candidate carries what the source knows about the book; status and format
+    are reading state and travel separately, because they are not metadata about
+    the book itself.
+    """
+
+    candidate: BookCandidate
     status: str  # "Read", "To Read", "Reading"
-    format: Optional[str] = None  # "Audiobook", "Hardcover", "Paperback", "eBook"
-    isbn: Optional[str] = None
-    page_count: Optional[int] = None
-    published_date: Optional[str] = None
-    rating: Optional[float] = None
-    date_added: Optional[str] = None
-    date_finished: Optional[str] = None
-    genres: List[str] = field(default_factory=list)
-    description: Optional[str] = None
-    source_id: Optional[str] = None
+    format: str | None = None  # "Audiobook", "Hardcover", "Paperback", "eBook"
     source_format: str = ""
+
+    @property
+    def title(self) -> str:
+        """The candidate's title."""
+        return self.candidate.title
+
+    @property
+    def authors(self) -> list[str]:
+        """The candidate's authors."""
+        return self.candidate.authors
 
 
 def parse_audible_json(path: Path) -> List[ImportBook]:
@@ -69,8 +74,7 @@ def parse_audible_json(path: Path) -> List[ImportBook]:
 
         books.append(
             ImportBook(
-                title=title,
-                authors=authors,
+                candidate=BookCandidate(title=title, authors=authors, source="audible"),
                 status=status,
                 format="Audiobook",
                 source_format="audible-json",
@@ -224,21 +228,6 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
                 path.write_text(new_content, encoding="utf-8")
 
 
-def _to_api_book(import_book: ImportBook) -> Book:
-    """Convert an ImportBook to an api.Book for note creation."""
-    return Book(
-        title=import_book.title,
-        authors=import_book.authors,
-        isbn=import_book.isbn,
-        page_count=import_book.page_count,
-        published_date=import_book.published_date,
-        google_books_id="",
-        thumbnail=None,
-        genres=import_book.genres,
-        description=import_book.description,
-    )
-
-
 def run_import(
     path: Path,
     vault_path: Path,
@@ -263,17 +252,13 @@ def run_import(
         if dup is None:
             result.new_books.append(book)
             if apply:
-                api_book = _to_api_book(book)
-                created_path = create_book_note(
-                    api_book, vault_path, status=book.status
+                overrides = {"format": book.format} if book.format else None
+                create_book_note(
+                    book.candidate,
+                    vault_path,
+                    status=book.status,
+                    overrides=overrides,
                 )
-                # Update format in the newly created note if specified
-                if book.format:
-                    content = created_path.read_text(encoding="utf-8")
-                    new_content = content.replace(
-                        "format: null", f"format: {book.format}"
-                    )
-                    created_path.write_text(new_content, encoding="utf-8")
         else:
             dup_path, _, updates = dup
             if updates:

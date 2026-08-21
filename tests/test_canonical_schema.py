@@ -10,7 +10,7 @@ These tests build notes shaped like real ones. See #61.
 
 import pytest
 
-from libris.api import Book
+from libris.api import BookCandidate
 from libris.cli import _build_query_from_frontmatter, _needs_enrichment
 from libris.importer import _build_vault_index
 from libris.markdown import (
@@ -181,7 +181,7 @@ def test_already_enriched_note_is_not_re_enriched():
 
 def test_created_notes_use_the_canonical_field_names(vault):
     # Given a book resolved from Google Books
-    book = Book(
+    book = BookCandidate(
         title="Dune",
         authors=["Frank Herbert"],
         isbn="9780441013593",

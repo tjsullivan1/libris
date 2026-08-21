@@ -1,7 +1,7 @@
 import yaml
 from typer.testing import CliRunner
 
-from libris.api import Book
+from libris.api import BookCandidate
 from libris.cli import app
 
 runner = CliRunner()
@@ -20,7 +20,7 @@ def _make_book(**overrides):
         description="A novel about the American dream.",
     )
     defaults.update(overrides)
-    return Book(**defaults)
+    return BookCandidate(**defaults)
 
 
 def _write_book(vault, name, fm_overrides=None):

@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 from statistics import median
 
-from libris.api import Book
+from libris.api import BookCandidate
 from libris.markdown import (
     compute_canonical_filename,
     create_book_note,
@@ -22,7 +22,7 @@ def test_sanitize_filename():
 
 
 def test_create_book_note(tmp_path):
-    book = Book(
+    book = BookCandidate(
         title="Test Book",
         authors=["Author One"],
         isbn="1234567890",
@@ -47,7 +47,7 @@ def test_create_book_note(tmp_path):
 
 def test_create_book_note_with_overrides(tmp_path):
     """Test that overrides dict sets frontmatter fields."""
-    book = Book(
+    book = BookCandidate(
         title="Override Book",
         authors=["Author Two"],
         isbn="0987654321",
@@ -78,7 +78,7 @@ def test_create_book_note_with_overrides(tmp_path):
 
 def test_create_book_note_overrides_status(tmp_path):
     """Test that status in overrides takes precedence over the status parameter."""
-    book = Book(
+    book = BookCandidate(
         title="Status Book",
         authors=["Author Three"],
         isbn="1111111111",
@@ -105,7 +105,7 @@ def test_create_book_note_invalid_override_raises(tmp_path):
     """Test that an unknown override key raises ValueError."""
     import pytest
 
-    book = Book(
+    book = BookCandidate(
         title="Bad Override",
         authors=["Author Four"],
         isbn="2222222222",
@@ -315,7 +315,7 @@ def test_update_frontmatter_from_book_fills_nulls(tmp_path):
         "---\ntitle: null\nisbn: null\ngoogle_books_id: null\nstatus: Reading\n---\n"
     )
 
-    book = Book(
+    book = BookCandidate(
         title="Real Title",
         authors=["Author A"],
         isbn="1234567890",
@@ -344,7 +344,7 @@ def test_update_frontmatter_from_book_skips_existing_description(tmp_path):
     f = tmp_path / "book.md"
     f.write_text("---\ntitle: null\n---\n\n### Description\nExisting desc\n")
 
-    book = Book(
+    book = BookCandidate(
         title="Title",
         authors=["A"],
         isbn=None,
@@ -367,7 +367,7 @@ def test_update_frontmatter_from_book_adds_title_heading_when_missing(tmp_path):
     f = tmp_path / "book.md"
     f.write_text("---\ntitle: Test Book\nauthors: null\n---\n\n## Notes\n")
 
-    book = Book(
+    book = BookCandidate(
         title="Test Book",
         authors=["Author"],
         isbn="123",
@@ -393,7 +393,7 @@ def test_update_frontmatter_from_book_does_not_overwrite(tmp_path):
         "cover_thumbnail: http://old.jpg\ngenres:\n- Nonfiction\n---\n"
     )
 
-    book = Book(
+    book = BookCandidate(
         title="Other Title",
         authors=["Author B"],
         isbn="111",

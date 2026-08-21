@@ -92,10 +92,10 @@ def test_cleanup_command(tmp_path):
 
 def test_search_command_generic(monkeypatch):
     """Search with no flags performs a generic query."""
-    from libris.api import Book
+    from libris.api import BookCandidate
 
     mock_books = [
-        Book(
+        BookCandidate(
             title="The Great Gatsby",
             authors=["F. Scott Fitzgerald"],
             isbn="1234567890123",
@@ -123,14 +123,14 @@ def test_search_command_generic(monkeypatch):
 
 def test_search_command_by_author(monkeypatch):
     """Search with --author prepends inauthor: prefix."""
-    from libris.api import Book
+    from libris.api import BookCandidate
 
     captured = {}
 
     def fake_search(self, q):
         captured["query"] = q
         return [
-            Book(
+            BookCandidate(
                 title="Dune",
                 authors=["Frank Herbert"],
                 isbn=None,
@@ -154,14 +154,14 @@ def test_search_command_by_author(monkeypatch):
 
 def test_search_command_by_title(monkeypatch):
     """Search with --title prepends intitle: prefix."""
-    from libris.api import Book
+    from libris.api import BookCandidate
 
     captured = {}
 
     def fake_search(self, q):
         captured["query"] = q
         return [
-            Book(
+            BookCandidate(
                 title="Dune",
                 authors=["Frank Herbert"],
                 isbn=None,
@@ -184,14 +184,14 @@ def test_search_command_by_title(monkeypatch):
 
 def test_search_command_by_isbn(monkeypatch):
     """Search with --isbn prepends isbn: prefix."""
-    from libris.api import Book
+    from libris.api import BookCandidate
 
     captured = {}
 
     def fake_search(self, q):
         captured["query"] = q
         return [
-            Book(
+            BookCandidate(
                 title="Dune",
                 authors=["Frank Herbert"],
                 isbn="9780441013593",
@@ -222,10 +222,10 @@ def test_search_command_no_results(monkeypatch):
 
 
 def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
-    from libris.api import Book
+    from libris.api import BookCandidate
 
     mock_books = [
-        Book(
+        BookCandidate(
             title="Dune",
             authors=["Frank Herbert"],
             isbn="9780441013593",

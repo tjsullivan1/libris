@@ -10,7 +10,7 @@ from typing import Any, Dict, Literal, Optional
 import yaml
 from titlecase import titlecase
 
-from .api import Book
+from .api import BookCandidate
 
 DEFAULT_FRONTMATTER = {
     "title": None,
@@ -149,7 +149,7 @@ def standardize_title(raw: Optional[str]) -> Optional[str]:
 
 
 def create_book_note(
-    book: Book,
+    book: BookCandidate,
     vault_path: Path,
     status: str = "To Read",
     overrides: Dict[str, Any] | None = None,
@@ -157,7 +157,7 @@ def create_book_note(
     """Creates a Markdown note for a book in the specified vault path.
 
     Args:
-        book: The Book dataclass with data from Google Books API.
+        book: The candidate whose metadata seeds the note.
         vault_path: Directory where the note will be written.
         status: Default reading status (overridden if 'status' is in overrides).
         overrides: Optional dict of frontmatter fields to set/override.
@@ -302,7 +302,7 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
     return updated, data
 
 
-# Maps Book dataclass fields to frontmatter field names.
+# Maps BookCandidate fields to frontmatter field names.
 _BOOK_TO_FRONTMATTER = {
     "title": "title",
     "authors": "authors",
@@ -429,8 +429,8 @@ def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def update_frontmatter_from_book(file_path: Path, book: Book) -> bool:
-    """Fill null frontmatter fields with data from a Book. Returns True if changed."""
+def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
+    """Fill null frontmatter fields from a candidate. Returns True if changed."""
     content = file_path.read_text(encoding="utf-8")
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
     if not match:

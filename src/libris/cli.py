@@ -618,7 +618,7 @@ _COMPLETENESS_FIELDS = (
 
 
 def _metadata_score(book) -> int:
-    """Count how many metadata fields are non-empty on a Book."""
+    """Count how many metadata fields are non-empty on a BookCandidate."""
     score = 0
     for field in _COMPLETENESS_FIELDS:
         val = getattr(book, field, None)
