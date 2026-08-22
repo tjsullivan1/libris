@@ -14,42 +14,20 @@ See ADR 0001, ADR 0005, ADR 0009, ADR 0011 and ADR 0012.
 import difflib
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
 from pathlib import Path
 
-from ulid import ULID
-
 from .markdown import BookNote, list_books
-
-# Frontmatter order, grouped so the Properties panel reads sensibly (ADR 0009).
-IDENTITY_FIELDS = ("libris_id", "title", "authors")
-BIBLIOGRAPHIC_FIELDS = (
-    "isbn",
-    "page_count",
-    "date_published",
-    "google_books_id",
-    "cover_thumbnail",
-    "genres",
-    "series",
+from .note_format import (
+    LEAKED_HEADINGS,
+    MODELLED_FIELDS,
+    has_description_callout,
+    has_title_heading,
+    mint_libris_id,
+    render_body,
+    split_body,
 )
-READING_FIELDS = ("status", "priority", "rating", "format", "tags", "referred_by")
-DATE_FIELDS = ("date_added", "date_started", "date_finished")
-
-MODELLED_FIELDS = IDENTITY_FIELDS + BIBLIOGRAPHIC_FIELDS + READING_FIELDS + DATE_FIELDS
-
-# Headings the linter mistook for a title, and the values that leaked from them.
-LEAKED_HEADINGS = ("Notes", "Description")
 
 _KEY_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_ \-]*):")
-_DESCRIPTION_HEADING = re.compile(r"^#{1,6}[ \t]*Description[ \t]*$", re.MULTILINE)
-_CALLOUT_HEADING = re.compile(
-    r"^>[ \t]*\[!abstract\]-?[ \t]*Description[ \t]*$", re.MULTILINE
-)
-_NOTES_HEADING = re.compile(r"^#{1,6}[ \t]*Notes[ \t]*$", re.MULTILINE)
-_H1 = re.compile(r"^#[ \t]+(.+?)[ \t]*$", re.MULTILINE)
-# A section ends at the next heading or a thematic break. merge.py joins bodies
-# with a "---" divider, and the reader's writing must not be swept into a blurb.
-_SECTION_BREAK = re.compile(r"^(?:#{1,6}[ \t]+\S|-{3,}[ \t]*$)", re.MULTILINE)
 
 
 @dataclass
@@ -77,38 +55,6 @@ class NoteMigration:
                 tofile=f"b/{self.path.name}",
             )
         )
-
-
-def mint_libris_id(date_added: object) -> str:
-    """Mint a Libris ID whose timestamp comes from when the book was added.
-
-    ULIDs sort lexicographically by their timestamp, so deriving it from
-    `date_added` makes the Library sort in the order it was acquired rather than
-    the order the migration happened to visit it (ADR 0011).
-
-    Args:
-        date_added: The note's `date_added` value, as a date, a datetime, an
-            ISO-8601 string, or anything unparseable.
-
-    Returns:
-        A 26-character ULID string.
-    """
-    moment: datetime | None = None
-    if isinstance(date_added, datetime):
-        moment = date_added
-    elif isinstance(date_added, date):
-        moment = datetime.combine(date_added, time.min)
-    elif isinstance(date_added, str) and date_added.strip():
-        try:
-            moment = datetime.fromisoformat(date_added.strip())
-        except ValueError:
-            moment = None
-
-    if moment is None:
-        return str(ULID())
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return str(ULID.from_datetime(moment))
 
 
 def split_frontmatter_blocks(frontmatter_text: str) -> list[tuple[str, str]]:
@@ -160,135 +106,6 @@ def reorder_frontmatter(blocks: list[tuple[str, str]]) -> list[tuple[str, str]]:
     ordered = [(key, by_key.get(key, f"{key}:")) for key in MODELLED_FIELDS]
     ordered.extend((key, raw) for key, raw in blocks if key not in MODELLED_FIELDS)
     return ordered
-
-
-def render_description_callout(description: str) -> str:
-    """Render a description as a collapsed Obsidian callout (ADR 0009).
-
-    Args:
-        description: The description text, without any callout markup.
-
-    Returns:
-        The callout block, with every line prefixed.
-    """
-    lines = ["> [!abstract]- Description"]
-    for line in description.strip().splitlines():
-        lines.append(f"> {line}" if line.strip() else ">")
-    return "\n".join(lines)
-
-
-def split_body(body: str, titles: tuple[str, ...] = ()) -> tuple[str, str | None]:
-    """Separate the reader's own prose from the description supplied by an API.
-
-    The description is the content under its own heading, ending at the next
-    heading rather than at the end of the note — some notes carry the description
-    above `## Notes` rather than below it, and running to the end would sweep the
-    reader's own writing into the blurb.
-
-    Understands the shapes this vault holds: with and without an H1, description
-    under a heading or already inside a callout, in either order. Headings the
-    reader added stay with their content in the prose.
-
-    Args:
-        body: Everything after the closing frontmatter fence.
-        titles: Headings that count as the note's own title heading and may be
-            consumed. Any other leading H1 belongs to the reader and is kept.
-
-    Returns:
-        The reader's prose, and the description if the note carries one.
-    """
-    description: str | None = None
-    remainder = body
-
-    callout = _CALLOUT_HEADING.search(body)
-    heading = _DESCRIPTION_HEADING.search(body)
-
-    if callout is not None:
-        after = body[callout.end() :]
-        quoted, rest = _take_callout(after)
-        description = quoted
-        remainder = body[: callout.start()] + rest
-    elif heading is not None:
-        after = body[heading.end() :]
-        section_break = _SECTION_BREAK.search(after)
-        end = section_break.start() if section_break else len(after)
-        description = after[:end].strip()
-        remainder = body[: heading.start()] + after[end:]
-
-    prose = _strip_title_heading(remainder, titles)
-    prose = _NOTES_HEADING.sub("", prose)
-    return prose.strip(), (description or None)
-
-
-def _strip_title_heading(text: str, titles: tuple[str, ...]) -> str:
-    """Remove a leading H1 only when it is the note's title heading.
-
-    A note may open with a heading the reader wrote - a contents list, or
-    "Notes from GetAbstract" - and removing it would destroy their writing. Only
-    a first-line H1 naming the title, or one of the headings the linter leaked
-    into the title, is the migration's to consume.
-
-    Args:
-        text: The note content with any description already removed.
-        titles: Headings that count as the note's own title heading.
-
-    Returns:
-        The text, with the title heading removed if it was there.
-    """
-    leading = text.lstrip("\n")
-    match = _H1.match(leading)
-    if match is None:
-        return text
-
-    heading = match.group(1).strip()
-    if heading in LEAKED_HEADINGS or heading in titles:
-        return leading[match.end() :]
-    return text
-
-
-def _take_callout(text: str) -> tuple[str, str]:
-    """Take the quoted lines of a callout, returning its content and what follows.
-
-    Args:
-        text: The note content immediately after a callout's heading line.
-
-    Returns:
-        The callout's text with its quote markers stripped, and the remainder of
-        the note.
-    """
-    quoted: list[str] = []
-    lines = text.splitlines(keepends=True)
-    consumed = 0
-    for line in lines:
-        stripped = line.rstrip("\n")
-        if stripped.startswith(">"):
-            quoted.append(stripped[2:] if stripped.startswith("> ") else stripped[1:])
-            consumed += 1
-        elif not stripped.strip() and not quoted:
-            consumed += 1
-        else:
-            break
-    return "\n".join(quoted).strip(), "".join(lines[consumed:])
-
-
-def render_body(title: str, prose: str, description: str | None) -> str:
-    """Render a Book Note body: title, then the reader's notes, then the blurb.
-
-    Args:
-        title: The book's title, which becomes the H1 the linter reads for an
-            alias (ADR 0012).
-        prose: Whatever the reader wrote.
-        description: The description from an external source, if any.
-
-    Returns:
-        The body, ending in a single newline.
-    """
-    sections = [f"# {title}", "## Notes"]
-    if prose:
-        sections.append(prose)
-    if description:
-        sections.append(render_description_callout(description))
-    return "\n\n".join(sections) + "\n"
 
 
 def _render_scalar(key: str, value: str) -> str:
@@ -445,9 +262,9 @@ def plan_note_migration(path: Path) -> NoteMigration:
         new_body = body
     else:
         new_body = render_body(title, prose, description)
-        if _H1.search(body) is None:
+        if not has_title_heading(body):
             changes.append("added H1")
-        if description and _CALLOUT_HEADING.search(body) is None:
+        if description and not has_description_callout(body):
             changes.append("description moved into a callout")
 
     if description and re.search(r"^#{1,6}\s", description, re.MULTILINE):

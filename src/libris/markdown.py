@@ -11,24 +11,21 @@ import yaml
 from titlecase import titlecase
 
 from .api import BookCandidate
+from .note_format import (
+    MODELLED_FIELDS,
+    has_description_callout,
+    mint_libris_id,
+    render_body,
+    render_description_callout,
+)
 
+# Values a Book Note starts with when nothing else supplies them.
+_FRONTMATTER_DEFAULTS = {"tags": "Book", "status": "To Read"}
+
+# Derived from the canonical field order so a note written today and a note
+# migrated from years ago cannot disagree about which fields exist.
 DEFAULT_FRONTMATTER = {
-    "title": None,
-    "authors": None,
-    "isbn": None,
-    "page_count": None,
-    "date_published": None,
-    "google_books_id": None,
-    "cover_thumbnail": None,
-    "genres": None,
-    "tags": "Book",
-    "format": None,
-    "status": "To Read",
-    "rating": None,
-    "referred_by": None,
-    "date_added": None,
-    "date_started": None,
-    "date_finished": None,
+    name: _FRONTMATTER_DEFAULTS.get(name) for name in MODELLED_FIELDS
 }
 
 # Maps legacy/extraneous field names to their canonical counterparts.
@@ -166,8 +163,10 @@ def create_book_note(
     filename = sanitize_filename(f"{book.title} - {', '.join(book.authors[:1])}.md")
     file_path = vault_path / filename
 
+    added = date.today()
     frontmatter = {
         **DEFAULT_FRONTMATTER,
+        "libris_id": mint_libris_id(added),
         "title": book.title,
         "authors": book.authors,
         "isbn": book.isbn,
@@ -177,7 +176,7 @@ def create_book_note(
         "cover_thumbnail": book.thumbnail,
         "genres": book.genres,
         "status": status,
-        "date_added": date.today().isoformat(),
+        "date_added": added.isoformat(),
     }
 
     if overrides:
@@ -191,11 +190,8 @@ def create_book_note(
 
     yaml_content = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
 
-    content = f"---\n{yaml_content}---\n\n# {book.title}\n\n## Notes\n\n"
-    if book.description:
-        content += f"### Description\n{book.description}\n"
-
-    file_path.write_text(content, encoding="utf-8")
+    body = render_body(book.title, "", book.description)
+    file_path.write_text(f"---\n{yaml_content}---\n\n{body}", encoding="utf-8")
     return file_path
 
 
@@ -262,6 +258,12 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
         if field not in data:
             data[field] = default
             updated = True
+
+    # A note that reached us without an identity gets one here, so a book typed
+    # straight into Obsidian is not left unaddressable (ADR 0001, ADR 0011).
+    if not data.get("libris_id"):
+        data["libris_id"] = mint_libris_id(data.get("date_added"))
+        updated = True
 
     # If date_finished is set, status should be "Read"
     if data.get("date_finished") is not None and data.get("status") != "Read":
@@ -469,9 +471,12 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
         updated = True
 
     # Add description to body if missing
-    if book.description and "### Description" not in rest_of_content:
+    if book.description and not has_description_callout(rest_of_content):
         rest_of_content = (
-            rest_of_content.rstrip() + f"\n\n### Description\n{book.description}\n"
+            rest_of_content.rstrip()
+            + "\n\n"
+            + render_description_callout(book.description)
+            + "\n"
         )
         updated = True
 

@@ -1,4 +1,5 @@
 import time
+from datetime import date
 from pathlib import Path
 from statistics import median
 
@@ -14,6 +15,7 @@ from libris.markdown import (
     update_frontmatter_from_book,
     update_wikilinks_in_vault,
 )
+from libris.note_format import mint_libris_id
 
 
 def test_sanitize_filename():
@@ -41,8 +43,8 @@ def test_create_book_note(tmp_path):
     content = file_path.read_text()
     assert "title: Test Book" in content
     assert "authors:\n- Author One" in content
-    assert "### Description" in content
-    assert "A test description" in content
+    assert "> [!abstract]- Description" in content
+    assert "> A test description" in content
 
 
 def test_create_book_note_with_overrides(tmp_path):
@@ -221,6 +223,25 @@ def test_ensure_frontmatter_migrates_legacy_author_to_authors_list(tmp_path):
     assert "authors:\n- John Doe" in content
 
 
+def test_ensuring_frontmatter_mints_a_missing_libris_id(tmp_path):
+    from libris.markdown import ensure_frontmatter_fields
+
+    # Given a note typed straight into Obsidian, with no identity
+    file_path = tmp_path / "typed by hand.md"
+    file_path.write_text(
+        "---\ntitle: Dune\nauthors:\n- Frank Herbert\ndate_added: 2019-03-12\n---\n",
+        encoding="utf-8",
+    )
+
+    # When its frontmatter is ensured
+    updated, data = ensure_frontmatter_fields(file_path)
+
+    # Then it gains an identity, timed from when the book was added
+    assert updated is True
+    assert len(data["libris_id"]) == 26
+    assert data["libris_id"] < mint_libris_id(date(2026, 1, 1))
+
+
 def test_ensure_frontmatter_fields_tricky_spacing(tmp_path):
     # Test with extra spaces after --- and no newline after second ---
     file_path = tmp_path / "tricky_book.md"
@@ -336,13 +357,15 @@ def test_update_frontmatter_from_book_fills_nulls(tmp_path):
     assert data["status"] == "Reading"
     # description should be added to the body
     content = f.read_text()
-    assert "### Description" in content
+    assert "> [!abstract]- Description" in content
     assert "A description" in content
 
 
 def test_update_frontmatter_from_book_skips_existing_description(tmp_path):
     f = tmp_path / "book.md"
-    f.write_text("---\ntitle: null\n---\n\n### Description\nExisting desc\n")
+    f.write_text(
+        "---\ntitle: null\n---\n\n> [!abstract]- Description\n> Existing desc\n"
+    )
 
     book = BookCandidate(
         title="Title",
@@ -358,7 +381,7 @@ def test_update_frontmatter_from_book_skips_existing_description(tmp_path):
 
     update_frontmatter_from_book(f, book)
     content = f.read_text()
-    assert content.count("### Description") == 1
+    assert content.count("[!abstract]- Description") == 1
     assert "Existing desc" in content
     assert "New desc" not in content
 
@@ -535,10 +558,12 @@ def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
     file_path = tmp_path / "good_book.md"
     # Write a file with all fields present and title already standardized
     file_path.write_text(
-        "---\ntitle: The Great Gatsby\nauthors:\n- F. Scott Fitzgerald\nisbn: '123'\n"
+        "---\nlibris_id: 01JQ8Z3K7M4X2VB9WCN5PDRT6E\n"
+        "title: The Great Gatsby\nauthors:\n- F. Scott Fitzgerald\nisbn: '123'\n"
         "page_count: 200\ndate_published: '1925'\ngoogle_books_id: abc\n"
-        "cover_thumbnail: null\ngenres: null\ntags: Book\nformat: null\n"
-        "status: To Read\nrating: null\nreferred_by: null\n"
+        "cover_thumbnail: null\ngenres: null\nseries: null\n"
+        "status: To Read\npriority: null\nrating: null\nformat: null\n"
+        "tags: Book\nreferred_by: null\n"
         "date_added: null\ndate_started: null\ndate_finished: null\n---\n"
     )
 

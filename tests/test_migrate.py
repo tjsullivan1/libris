@@ -5,13 +5,15 @@ from datetime import date
 from libris.markdown import BookNote
 from libris.migrate import (
     leaked_alias_keys,
-    mint_libris_id,
     plan_note_migration,
     recover_title,
-    render_description_callout,
     reorder_frontmatter,
-    split_body,
     split_frontmatter_blocks,
+)
+from libris.note_format import (
+    mint_libris_id,
+    render_description_callout,
+    split_body,
 )
 
 
