@@ -61,8 +61,8 @@ Two live consequences, both caused by that:
 Extract matching and note-writing into a shared service layer (#53), then put adapters over
 it. Both candidate adapters need no infrastructure, and the order is settled:
 
-1. `matching.py`, extracted from `cli.py` on its own. Both adapters need it and neither can
-   be built well without it.
+1. `matching.py`, extracted from `cli.py` on its own (#63). Both adapters need it and
+   neither can be built well without it.
 2. `libris serve` on loopback plus the Edge extension (#52, #53, #54, #55). Already
    specified, and the adapter with the stronger duplicate guarantee (ADR 0010).
 3. `search_books` / `add_book` / `update_book` over stdio MCP, driven from Claude Code.
@@ -88,10 +88,10 @@ ID, and deletions propagate behind a refusal guard (ADR 0015).
 Carried forward into this workstream from those decisions:
 
 - `merge.py` records `superseded_ids` on the surviving note instead of deleting the loser
-  without trace (ADR 0014). The field must exist before the remote does; no Libris ID has
+  without trace (ADR 0014, #64). The field must exist before the remote does; no Libris ID has
   reached a remote yet, so merging today's three duplicate groups loses nothing.
-- Nothing validates `status` today - `markdown.py` defaults it to "To Read" and never checks
-  the value - so an Intent could write a value outside the four the Library allows. Rejecting
+- Nothing validates `status` today (#65) - `markdown.py` defaults it to "To Read" and never
+  checks the value - so an Intent could write a value outside the four the Library allows. Rejecting
   an Intent for an illegal value needs that validation to exist.
 
 ## 4. Infrastructure
