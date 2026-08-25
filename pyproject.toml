@@ -12,6 +12,15 @@ dependencies = [
     "titlecase>=2.4",
     "typer>=0.24.1",
 ]
+
+# The local daemon the browser extension talks to (#52). Optional so the core
+# CLI installs and runs without a web stack; cli.py imports it lazily.
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
 [dependency-groups]
 dev = [
   {include-group = "lint"},
