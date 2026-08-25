@@ -183,8 +183,11 @@ def create_book_note(
     filename = sanitize_filename(f"{book.title} - {', '.join(book.authors[:1])}.md")
     file_path = vault_path / filename
 
-    validate_field_value("status", status)
+    if overrides and "status" in overrides:
+        status = overrides["status"]
+        overrides = {k: v for k, v in overrides.items() if k != "status"}
 
+    validate_field_value("status", status)
     added = date.today()
     frontmatter = {
         **DEFAULT_FRONTMATTER,

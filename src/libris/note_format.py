@@ -79,7 +79,7 @@ def validate_field_value(field: str, value: object) -> None:
             in it.
     """
     allowed = FIELD_VOCABULARIES.get(field)
-    if allowed is None or value is None or value == "":
+    if allowed is None or value is None:
         return
     if value not in allowed:
         raise InvalidFieldValue(
