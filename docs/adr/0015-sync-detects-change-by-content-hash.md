@@ -13,12 +13,12 @@ Reading and hashing all 3,136 notes takes 2.54 seconds against 4.6 MB. With sync
 every thirty minutes there is no performance case for cleverness, so there is no mtime
 prefilter and no incremental cache to go stale: every run hashes the whole Shelf.
 
-The state file maps Libris ID to content hash and lives in `~/.config/libris/` beside
-`config.yaml`. Keyed by ID rather than path, because paths move - `clean --rename` alone
-moves 132 of them - and surviving exactly that is what a Libris ID is for (ADR 0001). Kept
-outside the Vault, because it is per-machine state: in the Vault it would sync to the phone
-and land in every backup to no purpose. If it is lost, the next run pushes everything and
-repairs it.
+The state file maps Libris ID to content hash and lives in Libris's config directory (the
+same directory as `config.yaml`, honoring `$LIBRIS_CONFIG_DIR` when set). Keyed by ID rather
+than path, because paths move - `clean --rename` alone moves 132 of them - and surviving
+exactly that is what a Libris ID is for (ADR 0001). Kept outside the Vault, because it is
+per-machine state: in the Vault it would sync to the phone and land in every backup to no
+purpose. If it is lost, the next run pushes everything and repairs it.
 
 Pushing the whole Shelf every run was the alternative that needed no detection at all. It was
 rejected on cost rather than principle: 4.6 MB and roughly 150,000 Cosmos writes a day to
