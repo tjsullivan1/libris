@@ -59,18 +59,40 @@ Two live consequences, both caused by that:
 ## 2. Service layer and its first adapters
 
 Extract matching and note-writing into a shared service layer (#53), then put adapters over
-it. Two candidates, both needing no infrastructure, ordering not yet settled:
+it. Both candidate adapters need no infrastructure, and the order is settled:
 
-- `libris serve` on loopback plus the Edge extension (#51, #52, #53) — already specified,
-  and the adapter with the stronger duplicate guarantee (ADR 0010)
-- `search_books` / `add_book` / `update_book` over stdio MCP, driven from Claude Code — where
-  the resolution design risk lives (ADR 0003, ADR 0007)
+1. `matching.py`, extracted from `cli.py` on its own (#63). Both adapters need it and
+   neither can be built well without it.
+2. `libris serve` on loopback plus the Edge extension (#52, #53, #54, #55). Already
+   specified, and the adapter with the stronger duplicate guarantee (ADR 0010).
+3. `search_books` / `add_book` / `update_book` over stdio MCP, driven from Claude Code.
+
+Chosen for momentum: the daemon and its endpoints are specified down to the test list, so a
+session starts on implementation rather than on a spec. The accepted cost is that the
+resolution design (ADR 0003) — search returns candidates carrying Libris IDs, and a
+confidence threshold was rejected — stays unvalidated against the real Shelf until the MCP
+adapter lands, and workstreams 3-5 lean on it.
+
+Neither adapter records Intents. Both write straight to the Shelf, so an Intent that cannot
+apply is a workstream 3 problem, not a workstream 2 one.
 
 ## 3. Sync
 
 `libris sync`, the Intent protocol, the Scheduled Task (ADR 0002).
 
-Open: what happens to an Intent that cannot apply, and how sync detects changed notes.
+Both questions left open here are now settled. An Intent that cannot apply is absorbed or
+rejected, and rejections come back through a Libris-owned note next to the Shelf (ADR 0013).
+Sync detects change by hashing every note against a per-machine state file keyed on Libris
+ID, and deletions propagate behind a refusal guard (ADR 0015).
+
+Carried forward into this workstream from those decisions:
+
+- `merge.py` records `superseded_ids` on the surviving note instead of deleting the loser
+  without trace (ADR 0014, #64). The field must exist before the remote does; no Libris ID has
+  reached a remote yet, so merging today's three duplicate groups loses nothing.
+- Nothing validates `status` today (#65) - `markdown.py` defaults it to "To Read" and never
+  checks the value - so an Intent could write a value outside the four the Library allows. Rejecting
+  an Intent for an illegal value needs that validation to exist.
 
 ## 4. Infrastructure
 
