@@ -43,6 +43,11 @@ The ULID stamped into a Book Note's frontmatter that identifies it across every 
 Stable across renames, title standardisation, and merges.
 _Avoid_: uid, book id, key
 
+**Superseded ID**:
+A Libris ID that identified a Book Note which has since merged into another. It is not
+reused and never dangles: it resolves to the surviving note.
+_Avoid_: dead id, old id, tombstone
+
 **Matching**:
 Deciding whether two Book Notes describe the same book — the judgement behind duplicate
 detection and import de-duplication. Deliberately separate from identity, and allowed to be
@@ -62,6 +67,12 @@ A change to the Library recorded by a Surface and applied to the Shelf later by 
 either adding a Book Note or setting named fields on an existing one. An Intent names only
 the fields it changes, so it can never overwrite a field it knows nothing about.
 _Avoid_: delta, patch, command, event
+
+**Intent Outcome**:
+What became of an Intent once the CLI tried to apply it. *Applied*: the Shelf changed as
+asked. *Absorbed*: the Library already satisfied it, and the outcome names the Libris ID it
+turned out to mean. *Rejected*: it could not apply and a person has to decide.
+_Avoid_: intent status, failure, error
 
 **Resolution**:
 Turning a person's reference to a book ("that Sanderson one I just finished") into a Libris
