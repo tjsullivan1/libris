@@ -62,7 +62,9 @@ def write_note(vault, filename, **overrides):
                 lines.append(f"{key}: []")
             else:
                 lines.append(f"{key}:")
-                lines.extend(f"  - {item}" for item in value)
+                # Quote as the vault does, so a wikilink is a string and not a
+                # nested YAML sequence.
+                lines.extend(f'  - "{item}"' for item in value)
         elif isinstance(value, str):
             lines.append(f'{key}: "{value}"')
         else:
@@ -203,3 +205,38 @@ def test_created_notes_use_the_canonical_field_names(vault):
     assert "authors:" in content
     assert "date_published:" in content
     assert "cover_thumbnail:" in content
+
+
+def test_an_author_written_as_a_wikilink_reads_as_a_plain_name(vault):
+    # Given a note that links its author to their own note
+    note = write_note(
+        vault,
+        "Atlas Shrugged - Ayn Rand.md",
+        title="Atlas Shrugged",
+        authors=["[[Ayn Rand]]"],
+    )
+
+    # Then the name is used, not the link markup
+    # Seven notes in the vault store authors this way; the brackets would
+    # otherwise end up in a canonical filename.
+    from libris.markdown import BookNote
+
+    assert BookNote.read(note).authors == ["Ayn Rand"]
+    assert BookNote.read(note).canonical_filename == "Atlas Shrugged - Ayn Rand.md"
+
+
+def test_stray_whitespace_in_an_author_name_is_collapsed(vault):
+    # Given an author name carrying a doubled space
+    note = write_note(
+        vault,
+        "10% Happier - Dan Harris.md",
+        title="10% Happier",
+        authors=["Dan   Harris"],
+    )
+
+    # Then it matches the same name written normally
+    # This is why the migration first missed one polluted title: the check
+    # compared "Dan   Harris" against "Dan Harris" literally.
+    from libris.markdown import BookNote
+
+    assert BookNote.read(note).first_author == "Dan Harris"

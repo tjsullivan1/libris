@@ -44,6 +44,21 @@ FIELD_MIGRATIONS = {
 }
 
 
+def _normalize_author(name: str) -> str:
+    """Reduce an author name as written to the name itself.
+
+    Args:
+        name: The value as it appears in frontmatter, possibly a wikilink.
+
+    Returns:
+        The plain name, with runs of whitespace collapsed.
+    """
+    unlinked = re.sub(r"^\[\[(.+?)\]\]$", r"\1", name.strip())
+    if "|" in unlinked:
+        unlinked = unlinked.split("|", 1)[1]
+    return re.sub(r"\s+", " ", unlinked).strip()
+
+
 @dataclass
 class BookNote:
     """A book on the Shelf: the file it lives in, its frontmatter, and its body.
@@ -87,19 +102,23 @@ class BookNote:
 
     @property
     def authors(self) -> list[str]:
-        """The book's authors as a list of non-empty names.
+        """The book's authors as a list of plain, non-empty names.
 
         Accepts the list every note in the vault carries and the bare string that
         older notes used. Anything else counts as naming no author at all.
+
+        Names are normalised for use rather than taken literally: some notes hold
+        an author as a wikilink to their own note, and some carry stray inner
+        whitespace. Both would otherwise leak into filenames and defeat matching,
+        while the note itself keeps whatever it holds.
         """
         value = self.frontmatter.get("authors")
         if isinstance(value, str):
             value = [value]
         if not isinstance(value, list):
             return []
-        return [
-            name.strip() for name in value if isinstance(name, str) and name.strip()
-        ]
+        names = (_normalize_author(name) for name in value if isinstance(name, str))
+        return [name for name in names if name]
 
     @property
     def first_author(self) -> str | None:
