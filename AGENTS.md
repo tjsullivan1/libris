@@ -46,7 +46,7 @@ uv run ruff format --check .  # Format check (CI mode)
 ## Workflow
 
 - **Branching:** Always create a feature branch from `main`. Never commit directly to `main`.
-- **Pre-commit:** Run `uv run ruff check --fix .` (auto-fix lint issues, including import sorting) and `uv run pytest` before every commit. Fix any remaining failures.
+- **Pre-commit:** Run `uv run ruff check --fix .` (auto-fix lint issues, including import sorting), `uv run ruff format .`, and `uv run pytest` before every commit. Fix any remaining failures. All three are needed: CI lints and checks formatting as separate steps, so a commit that ran only `ruff check` still fails `ruff format --check .`.
 - **Commit messages:** Use [Conventional Commits](https://www.conventionalcommits.org/):
   - `feat: add book export command`
   - `fix: handle missing ISBN in frontmatter`
