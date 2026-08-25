@@ -42,6 +42,7 @@ from .merge import (
     write_merged_book,
 )
 from .migrate import apply_migration, plan_migration
+from .note_format import InvalidFieldValue, validate_field_value
 
 app = typer.Typer()
 
@@ -188,6 +189,14 @@ def add(
     ),
 ):
     """Search for a book and add it to your Obsidian vault."""
+    # Checked before the search, so an invalid status is not reported after a
+    # network round trip and a book picker.
+    try:
+        validate_field_value("status", status)
+    except InvalidFieldValue as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
+
     client = GoogleBooksClient()
     books = client.search(query)
 

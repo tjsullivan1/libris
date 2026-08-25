@@ -17,6 +17,7 @@ from .note_format import (
     mint_libris_id,
     render_body,
     render_description_callout,
+    validate_field_value,
 )
 
 # Values a Book Note starts with when nothing else supplies them.
@@ -182,6 +183,8 @@ def create_book_note(
     filename = sanitize_filename(f"{book.title} - {', '.join(book.authors[:1])}.md")
     file_path = vault_path / filename
 
+    validate_field_value("status", status)
+
     added = date.today()
     frontmatter = {
         **DEFAULT_FRONTMATTER,
@@ -205,6 +208,7 @@ def create_book_note(
                     f"Unknown frontmatter field: '{key}'. "
                     f"Valid fields: {', '.join(DEFAULT_FRONTMATTER.keys())}"
                 )
+            validate_field_value(key, value)
             frontmatter[key] = value
 
     yaml_content = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
@@ -215,7 +219,12 @@ def create_book_note(
 
 
 def update_book_status(file_path: Path, new_status: str):
-    """Updates the status in the book's frontmatter."""
+    """Updates the status in the book's frontmatter.
+
+    Raises:
+        InvalidFieldValue: If the status is not one the Library defines.
+    """
+    validate_field_value("status", new_status)
     content = file_path.read_text(encoding="utf-8")
 
     # Simple regex to find and replace status
