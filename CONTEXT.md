@@ -98,6 +98,12 @@ Where a book sits in the reading cycle: To Read, Reading, Read, or Not To Read.
 **Priority**: 
 How much a To Read book is wanted: Low, Medium, or High. Absent on books never triaged.
 
+**Format**:
+The media the reader has a Book in - Physical, Ebook, or Audiobook. Several at once is normal:
+a book owned on paper and listened to as an audiobook is both. Reading state, not a property of
+the work or of any edition.
+_Avoid_: medium, edition, binding
+
 **Series**:
 A link to the note for the series a book belongs to. A relationship within the Vault, not a
 text label, and meaningless outside it.
