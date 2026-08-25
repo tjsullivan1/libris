@@ -15,6 +15,15 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
+        # The server extra is optional, so both states are supported states and
+        # both get tested: with it the daemon works, without it every other
+        # command still does.
+        extras: ["none", "server"]
+        include:
+          - extras: "none"
+            sync-args: ""
+          - extras: "server"
+            sync-args: "--extra server"
     steps:
       - uses: actions/checkout@v7
 
@@ -23,7 +32,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen ${{ matrix.sync-args }}
+
+      # Server tests skip when FastAPI is absent, and skipped tests exit 0. This
+      # fails loudly if the extra ever stops installing, rather than letting the
+      # suite report green over a server that was never exercised.
+      - name: Verify the server extra installed
+        if: matrix.extras == 'server'
+        run: uv run python -c "import fastapi, uvicorn"
 
       - name: Run tests
         run: uv run pytest
@@ -62,5 +78,5 @@ jobs:
         run: |
           runtime_requirements="$(mktemp -t runtime-requirements.XXXXXX.txt)"
           trap 'rm -f "$runtime_requirements"' EXIT
-          uv export --no-hashes --frozen --no-dev > "$runtime_requirements"
+          uv export --no-hashes --frozen --no-dev --all-extras > "$runtime_requirements"
           uv tool run pip-audit --skip-editable -r "$runtime_requirements"
