@@ -64,8 +64,8 @@ _Avoid_: client, front end
 
 **Duplicate Guarantee**:
 What a Surface's duplicate check was made against: the live Shelf, or a replica no fresher than
-the last sync. Every write states which one it gave, so a Surface can say "added" or "queued"
-truthfully rather than guessing.
+the last sync. Every add attempt states which one it gave, so a Surface can say "added" or
+"queued" truthfully rather than guessing.
 _Avoid_: freshness, confidence
 
 **Intent**:

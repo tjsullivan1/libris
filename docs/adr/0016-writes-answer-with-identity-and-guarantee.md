@@ -7,7 +7,7 @@ wrong in ways that only surface later, so the write endpoints answer differently
 the endpoint as written would have handed the extension the one field that moves and withheld
 the one that does not: `clean --rename` alone would move 132 files, and surviving exactly that
 is what a Libris ID is for (ADR 0001). Every write therefore answers with the `libris_id`. The
-path travels too, but as something to show a person - "added as Dune - Frank Herbert.md" -
+path travels too, but as something to show a person — "added as Dune - Frank Herbert.md" —
 never as a handle to the Book.
 
 **A bare `already_exists` does not say what backs it.** ADR 0010 requires a response to state
