@@ -223,3 +223,72 @@ def test_serve_binds_loopback_by_default(monkeypatch):
     # Then it listens only on loopback, on the documented port
     assert result.exit_code == 0
     assert started == [{"host": "127.0.0.1", "port": 8787, "reload": False}]
+
+
+def test_serve_accepts_any_loopback_address(monkeypatch):
+    # Given a loopback address that is not 127.0.0.1
+    started = []
+    monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
+
+    # When the daemon is asked to bind it
+    result = runner.invoke(cli_app, ["serve", "--host", "127.0.0.2"])
+
+    # Then it starts, rather than pushing the user towards --allow-remote to do
+    # something that never leaves the machine
+    assert result.exit_code == 0
+    assert started == [{"host": "127.0.0.2", "port": 8787, "reload": False}]
+
+
+def test_serve_accepts_ipv6_loopback(monkeypatch):
+    # Given the IPv6 loopback address
+    started = []
+    monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
+
+    # When the daemon is asked to bind it
+    result = runner.invoke(cli_app, ["serve", "--host", "::1"])
+
+    # Then it starts
+    assert result.exit_code == 0
+    assert started == [{"host": "::1", "port": 8787, "reload": False}]
+
+
+def test_serve_refuses_a_routable_address(monkeypatch):
+    # Given an address that is reachable from the network
+    started = []
+    monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
+
+    # When the daemon is asked to bind it
+    result = runner.invoke(cli_app, ["serve", "--host", "192.168.1.10"])
+
+    # Then it refuses
+    assert result.exit_code != 0
+    assert "--allow-remote" in result.output
+    assert started == []
+
+
+def test_serve_refuses_an_unresolvable_hostname(monkeypatch):
+    # Given a host that is neither a loopback name nor an address
+    started = []
+    monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
+
+    # When the daemon is asked to bind it
+    result = runner.invoke(cli_app, ["serve", "--host", "books.example.com"])
+
+    # Then it refuses rather than resolving it to find out
+    assert result.exit_code != 0
+    assert started == []
+
+
+def test_serve_allows_a_routable_address_when_explicitly_permitted(monkeypatch):
+    # Given an operator who means it
+    started = []
+    monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
+
+    # When the daemon is started with --allow-remote
+    result = runner.invoke(
+        cli_app, ["serve", "--host", "192.168.1.10", "--allow-remote"]
+    )
+
+    # Then it binds what was asked for
+    assert result.exit_code == 0
+    assert started == [{"host": "192.168.1.10", "port": 8787, "reload": False}]

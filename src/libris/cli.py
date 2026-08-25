@@ -1,3 +1,4 @@
+import ipaddress
 import re
 import time
 from pathlib import Path
@@ -1044,9 +1045,32 @@ if __name__ == "__main__":
     app()
 
 
-# Binding anything else exposes the Shelf to the network with only a bearer
-# token in front of it, so it takes an explicit flag.
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+# Names that mean this machine but are not addresses. Everything else is
+# decided by the address itself, so the whole 127.0.0.0/8 range and ::1 count.
+_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
+
+
+def _is_loopback(host: str) -> bool:
+    """Check whether a host binds this machine only.
+
+    Binding anything else exposes the Shelf to the network with only a bearer
+    token in front of it, so the CLI refuses it without an explicit flag. The
+    check is done on the parsed address rather than an allowlist of literals,
+    so 127.0.0.2 is correctly treated as loopback and does not push someone
+    towards --allow-remote to do something safe.
+
+    Args:
+        host: The interface the daemon was asked to bind.
+
+    Returns:
+        True if the host reaches only this machine.
+    """
+    if host.lower() in _LOOPBACK_HOSTNAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 @app.command()
@@ -1070,7 +1094,7 @@ def serve(
         typer.echo(ensure_server_token())
         return
 
-    if host not in _LOOPBACK_HOSTS and not allow_remote:
+    if not _is_loopback(host) and not allow_remote:
         typer.echo(
             f"Refusing to bind {host}: a bearer token is the only thing guarding the Shelf."
         )
