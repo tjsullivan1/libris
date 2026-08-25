@@ -62,6 +62,12 @@ agent. Only the CLI writes to the Shelf; every other Surface reaches the Library
 the remote replica.
 _Avoid_: client, front end
 
+**Duplicate Guarantee**:
+What a Surface's duplicate check was made against: the live Shelf, or a replica no fresher than
+the last sync. Every write states which one it gave, so a Surface can say "added" or "queued"
+truthfully rather than guessing.
+_Avoid_: freshness, confidence
+
 **Intent**:
 A change to the Library recorded by a Surface and applied to the Shelf later by the CLI —
 either adding a Book Note or setting named fields on an existing one. An Intent names only
