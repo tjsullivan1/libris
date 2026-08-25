@@ -5,7 +5,10 @@ Tests for book merge functionality.
 from pathlib import Path
 
 import pytest
+import yaml
 
+from libris.api import BookCandidate
+from libris.markdown import BookNote, create_book_note, read_frontmatter
 from libris.merge import (
     check_auto_merge,
     delete_secondary_file,
@@ -707,3 +710,125 @@ class TestMergeCLI:
         # Both files should still exist
         assert (vault / "A.md").exists()
         assert (vault / "B.md").exists()
+
+
+# --- superseded ids (#64, ADR 0014) ---
+
+
+def _note(tmp_path, name, **frontmatter):
+    """Write a Book Note with the given frontmatter and a line of reader's notes."""
+    fields = {
+        "libris_id": name.upper(),
+        "title": name,
+        "authors": ["Frank Herbert"],
+        "status": "To Read",
+    }
+    fields.update(frontmatter)
+    path = tmp_path / f"{name}.md"
+    body = yaml.dump(fields, sort_keys=False, allow_unicode=True)
+    path.write_text(
+        f"---\n{body}---\n\n# {name}\n\n## Notes\n\nMine.\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_merging_records_the_losing_id_on_the_survivor(tmp_path):
+    # Given two notes for one Book
+    primary = _note(tmp_path, "Keeper", isbn="9780441013593")
+    secondary = _note(tmp_path, "Loser")
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then the survivor carries the identity the deleted note had, so an Intent
+    # naming it still resolves (ADR 0014)
+    assert merged_fm["superseded_ids"] == ["LOSER"]
+
+
+def test_merging_carries_forward_ids_the_loser_had_absorbed(tmp_path):
+    # Given a note that had itself already absorbed another
+    primary = _note(tmp_path, "Keeper")
+    secondary = _note(tmp_path, "Loser", superseded_ids=["EARLIER"])
+
+    # When it is merged away in turn
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then the whole chain survives; a second merge must not break the first
+    assert merged_fm["superseded_ids"] == ["LOSER", "EARLIER"]
+
+
+def test_merging_keeps_ids_the_survivor_had_already_absorbed(tmp_path):
+    # Given a survivor that has absorbed a note before
+    primary = _note(tmp_path, "Keeper", superseded_ids=["OLDEST"])
+    secondary = _note(tmp_path, "Loser")
+
+    # When it absorbs another
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then both are held
+    assert merged_fm["superseded_ids"] == ["OLDEST", "LOSER"]
+
+
+def test_superseded_ids_are_not_duplicated(tmp_path):
+    # Given both notes claiming the same superseded id
+    primary = _note(tmp_path, "Keeper", superseded_ids=["SHARED"])
+    secondary = _note(tmp_path, "Loser", superseded_ids=["SHARED"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then it appears once
+    assert merged_fm["superseded_ids"] == ["SHARED", "LOSER"]
+
+
+def test_the_survivor_never_supersedes_itself(tmp_path):
+    # Given a secondary that somehow lists the survivor's own id
+    primary = _note(tmp_path, "Keeper")
+    secondary = _note(tmp_path, "Loser", superseded_ids=["KEEPER"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then the survivor's live identity is not also listed as superseded, which
+    # would make it resolve to itself through two different fields
+    assert "KEEPER" not in merged_fm["superseded_ids"]
+    assert merged_fm["libris_id"] == "KEEPER"
+
+
+def test_a_note_that_absorbed_nothing_has_no_superseded_ids(tmp_path):
+    # Given a note created normally
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+
+    # Then the field is absent rather than present and empty: it is not part of
+    # the canonical shape every note carries
+    assert "superseded_ids" not in read_frontmatter(path)
+
+
+def test_a_merge_with_no_ids_to_record_adds_no_field(tmp_path):
+    # Given notes from before identities existed
+    primary = _note(tmp_path, "Keeper", libris_id=None)
+    secondary = _note(tmp_path, "Loser", libris_id=None)
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then nothing is invented
+    assert not merged_fm.get("superseded_ids")
+
+
+def test_the_written_survivor_holds_the_superseded_id(tmp_path):
+    # Given a completed merge
+    primary = _note(tmp_path, "Keeper")
+    secondary = _note(tmp_path, "Loser")
+    merged_fm, merged_body, _ = merge_two_books(
+        primary, secondary, allow_conflicts=True
+    )
+
+    # When it is written to disk
+    write_merged_book(primary, merged_fm, merged_body)
+
+    # Then the file itself carries the forwarding address
+    note = BookNote.read(primary)
+    assert note.superseded_ids == ["LOSER"]

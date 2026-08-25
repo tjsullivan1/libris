@@ -39,6 +39,14 @@ FIELD_VOCABULARIES = {
 }
 DATE_FIELDS = ("date_added", "date_started", "date_finished")
 
+# The identities of Book Notes merged into this one (ADR 0014). Deliberately
+# NOT part of MODELLED_FIELDS: it is absent on a note that has never absorbed
+# another, which is all but a handful, and adding it to the canonical shape
+# would write `superseded_ids: null` into every note in the Shelf to say
+# nothing. Both `ensure_frontmatter_fields` and the migration preserve keys
+# they do not model, so a note that carries it keeps it.
+SUPERSEDED_IDS_FIELD = "superseded_ids"
+
 MODELLED_FIELDS = IDENTITY_FIELDS + BIBLIOGRAPHIC_FIELDS + READING_FIELDS + DATE_FIELDS
 
 # Headings the linter mistook for a title, and the values that leaked from them.
