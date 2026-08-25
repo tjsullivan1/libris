@@ -1,6 +1,10 @@
+import sys
+
 import yaml
 from typer.testing import CliRunner
 
+import libris
+from libris import config
 from libris.cli import app
 
 runner = CliRunner()
@@ -352,3 +356,33 @@ class TestBuildSearchQuery:
 
         result = _build_search_query("")
         assert result == ""
+
+
+# --- serve ---
+
+
+def test_serve_reports_a_missing_server_extra_clearly(monkeypatch):
+    # Given libris installed without the server extra. Both the module cache and
+    # the attribute on the package have to go: `from . import server` resolves
+    # via the parent attribute when a previous test has already imported it.
+    monkeypatch.setitem(sys.modules, "fastapi", None)
+    monkeypatch.delitem(sys.modules, "libris.server", raising=False)
+    monkeypatch.delattr(libris, "server", raising=False)
+
+    # When the daemon is started
+    result = runner.invoke(app, ["serve"])
+
+    # Then it says what to install rather than raising an ImportError at the user
+    assert result.exit_code != 0
+    assert "libris[server]" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_serve_show_token_prints_the_token():
+    # Given no token yet configured
+    # When the token is asked for
+    result = runner.invoke(app, ["serve", "--show-token"])
+
+    # Then it is generated, printed, and the daemon does not start
+    assert result.exit_code == 0
+    assert config.get_server_token() in result.output

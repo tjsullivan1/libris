@@ -7,6 +7,7 @@ import typer
 
 from .api import GoogleBooksClient
 from .config import (
+    ensure_server_token,
     get_obsidian_vault_root,
     get_vault_path,
     set_book_vault_path,
@@ -1041,3 +1042,52 @@ def migrate(
 
 if __name__ == "__main__":
     app()
+
+
+# Binding anything else exposes the Shelf to the network with only a bearer
+# token in front of it, so it takes an explicit flag.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind."),
+    port: int = typer.Option(8787, "--port", help="Port to listen on."),
+    show_token: bool = typer.Option(
+        False,
+        "--show-token",
+        help="Print the bearer token the extension needs, and exit.",
+    ),
+    reload: bool = typer.Option(
+        False, "--reload", help="Restart on source changes, for development."
+    ),
+    allow_remote: bool = typer.Option(
+        False, "--allow-remote", help="Allow binding an interface other than loopback."
+    ),
+):
+    """Run the local daemon that the browser extension talks to."""
+    if show_token:
+        typer.echo(ensure_server_token())
+        return
+
+    if host not in _LOOPBACK_HOSTS and not allow_remote:
+        typer.echo(
+            f"Refusing to bind {host}: a bearer token is the only thing guarding the Shelf."
+        )
+        typer.echo(
+            "Pass --allow-remote if you intend to expose it beyond this machine."
+        )
+        raise typer.Exit(1)
+
+    try:
+        from . import server
+    except ImportError:
+        typer.echo("The server extra is not installed, so `libris serve` cannot run.")
+        typer.echo("Install it with: uv sync --extra server")
+        typer.echo("or, outside this repo: pip install 'libris[server]'")
+        raise typer.Exit(1) from None
+
+    ensure_server_token()
+    typer.echo(f"Libris daemon listening on http://{host}:{port}")
+    typer.echo("Run `libris serve --show-token` for the token the extension needs.")
+    server.run(host=host, port=port, reload=reload)
