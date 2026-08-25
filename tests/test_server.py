@@ -10,11 +10,14 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
 from libris import config  # noqa: E402
+from libris.api import BookCandidate  # noqa: E402
 from libris.cli import app as cli_app  # noqa: E402
+from libris.markdown import create_book_note  # noqa: E402
 from libris.server import create_app  # noqa: E402
 
 runner = CliRunner()
@@ -292,3 +295,334 @@ def test_serve_allows_a_routable_address_when_explicitly_permitted(monkeypatch):
     # Then it binds what was asked for
     assert result.exit_code == 0
     assert started == [{"host": "192.168.1.10", "port": 8787, "reload": False}]
+
+
+# --- /api/v1/lookup ---
+
+
+def _mock_search(monkeypatch, results):
+    """Point the service's Google Books search at fixed results."""
+    captured = {}
+
+    def _search(self, query):
+        captured["query"] = query
+        return results
+
+    monkeypatch.setattr("libris.service.GoogleBooksClient.search", _search)
+    return captured
+
+
+def test_lookup_needs_a_token(client):
+    # Given no credential
+    # When lookup is called
+    response = client.post("/api/v1/lookup", json={"isbn": "9780441013593"})
+
+    # Then it is refused like every other path
+    assert response.status_code == 401
+
+
+def test_lookup_by_isbn_searches_by_isbn(client, token, monkeypatch):
+    # Given a page that yielded an ISBN
+    captured = _mock_search(
+        monkeypatch, [BookCandidate(title="Dune", authors=["Frank Herbert"])]
+    )
+
+    # When the extension looks it up
+    response = client.post(
+        "/api/v1/lookup",
+        json={"isbn": "9780441013593", "title": "Dune"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then the identifier is used rather than the title
+    assert response.status_code == 200
+    assert captured["query"] == "isbn:9780441013593"
+    assert response.json()["candidates"][0]["title"] == "Dune"
+
+
+def test_lookup_ranks_the_best_described_candidate_first(client, token, monkeypatch):
+    # Given two editions of the same book, one better described
+    sparse = BookCandidate(title="Dune", authors=["Frank Herbert"])
+    rich = BookCandidate(
+        title="Dune",
+        authors=["Frank Herbert"],
+        isbn="9780441013593",
+        page_count=412,
+        description="A desert planet.",
+    )
+    _mock_search(monkeypatch, [sparse, rich])
+
+    # When the extension looks the book up
+    response = client.post(
+        "/api/v1/lookup",
+        json={"title": "Dune"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then the popup's first choice is the one with the most metadata
+    candidates = response.json()["candidates"]
+    assert candidates[0]["isbn"] == "9780441013593"
+    assert len(candidates) == 2
+
+
+def test_lookup_with_a_kindle_asin_falls_back_to_names(client, token, monkeypatch):
+    # Given a Kindle page, whose ASIN is not an ISBN
+    captured = _mock_search(monkeypatch, [])
+
+    # When the extension looks it up
+    client.post(
+        "/api/v1/lookup",
+        json={"asin": "B000FC0SIM", "title": "Dune", "authors": ["Frank Herbert"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then the search is by name, not by a fake ISBN
+    assert captured["query"] == "intitle:Dune inauthor:Frank Herbert"
+
+
+def test_lookup_with_no_results_is_not_an_error(client, token, monkeypatch):
+    # Given a search that matches nothing
+    _mock_search(monkeypatch, [])
+
+    # When the extension looks it up
+    response = client.post(
+        "/api/v1/lookup",
+        json={"title": "A Book That Does Not Exist"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then the answer is an empty list, so the popup can say "no matches"
+    # rather than "something went wrong"
+    assert response.status_code == 200
+    assert response.json()["candidates"] == []
+
+
+def test_lookup_reports_an_upstream_failure_as_502(client, token, monkeypatch):
+    # Given Google Books being unreachable
+    def _boom(self, query):
+        raise httpx.RequestError("connection refused")
+
+    monkeypatch.setattr("libris.service.GoogleBooksClient.search", _boom)
+
+    # When the extension looks a book up
+    response = client.post(
+        "/api/v1/lookup",
+        json={"isbn": "9780441013593"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then the daemon says the upstream failed, not that it did
+    assert response.status_code == 502
+    assert "Traceback" not in response.text
+
+
+# --- GET /api/v1/books ---
+
+
+def test_existing_note_is_found_by_isbn(token, tmp_path):
+    # Given a Book Note on the Shelf
+    config.set_book_vault_path(tmp_path)
+    create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"], isbn="9780441013593"),
+        tmp_path,
+    )
+
+    # When the extension asks whether the book is already held
+    response = TestClient(create_app()).get(
+        "/api/v1/books",
+        params={"isbn": "9780441013593"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then it is told so, with the identity rather than only a filename
+    assert response.status_code == 200
+    body = response.json()
+    assert body["libris_id"]
+    assert "Dune" in body["path"]
+
+
+def test_a_book_not_held_answers_404(token, tmp_path):
+    # Given an empty Shelf
+    config.set_book_vault_path(tmp_path)
+
+    # When the extension asks about a book
+    response = TestClient(create_app()).get(
+        "/api/v1/books",
+        params={"isbn": "9780441013593"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then a miss is a miss (ADR 0003)
+    assert response.status_code == 404
+
+
+# --- POST /api/v1/books ---
+
+
+def _post_book(token, **extra):
+    payload = {
+        "candidate": {
+            "title": "Dune",
+            "authors": ["Frank Herbert"],
+            "isbn": "9780441013593",
+        }
+    }
+    payload.update(extra)
+    return TestClient(create_app()).post(
+        "/api/v1/books",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def test_creating_a_book_note_answers_with_its_identity(token, tmp_path):
+    # Given a Shelf without the book
+    config.set_book_vault_path(tmp_path)
+
+    # When the extension adds it
+    response = _post_book(token)
+
+    # Then the answer carries the durable identity, what happened, and which
+    # guarantee stands behind it (ADR 0016)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["libris_id"]
+    assert body["outcome"] == "created"
+    assert body["guarantee"] == "live_shelf"
+    assert (tmp_path / "Dune - Frank Herbert.md").exists()
+
+
+def test_adding_a_book_already_held_leaves_it_untouched(token, tmp_path):
+    # Given the book already on the Shelf
+    config.set_book_vault_path(tmp_path)
+    first = _post_book(token).json()
+    note_path = tmp_path / "Dune - Frank Herbert.md"
+    original = note_path.read_text(encoding="utf-8")
+
+    # When it is captured a second time
+    response = _post_book(token)
+
+    # Then the Library already satisfied it, and the reader's own writing in
+    # that note is not overwritten
+    assert response.status_code == 200
+    body = response.json()
+    assert body["outcome"] == "already_present"
+    assert body["libris_id"] == first["libris_id"]
+    assert note_path.read_text(encoding="utf-8") == original
+
+
+def test_creating_applies_overrides(token, tmp_path):
+    # Given a book captured as already read
+    config.set_book_vault_path(tmp_path)
+
+    # When it is added with overrides
+    response = _post_book(token, overrides={"status": "Read", "rating": 5})
+
+    # Then the note carries them
+    assert response.status_code == 201
+    text = (tmp_path / "Dune - Frank Herbert.md").read_text(encoding="utf-8")
+    assert "status: Read" in text
+
+
+def test_an_unknown_override_field_is_refused(token, tmp_path):
+    # Given an override naming a field the schema has no place for
+    config.set_book_vault_path(tmp_path)
+
+    # When the extension sends it
+    response = _post_book(token, overrides={"nonsense": "x"})
+
+    # Then it is refused as a bad request, not raised as a crash
+    assert response.status_code == 422
+    assert "Traceback" not in response.text
+
+
+def test_an_illegal_status_value_is_refused(token, tmp_path):
+    # Given a status the Library does not define, arriving from a browser
+    config.set_book_vault_path(tmp_path)
+
+    # When the extension sends it
+    response = _post_book(token, overrides={"status": "finished"})
+
+    # Then it is refused before anything is written (#65)
+    assert response.status_code == 422
+    assert not any(tmp_path.glob("*.md"))
+
+
+def test_a_near_title_is_offered_rather_than_decided(token, tmp_path):
+    # Given a note whose title carries a subtitle the scraped page does not
+    config.set_book_vault_path(tmp_path)
+    create_book_note(
+        BookCandidate(title="The Brass Verdict: A Novel", authors=["Michael Connelly"]),
+        tmp_path,
+    )
+
+    # When the extension asks about the short form
+    response = TestClient(create_app()).get(
+        "/api/v1/books",
+        params={"title": "The Brass Verdict", "authors": ["Michael Connelly"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then it is still a miss - nothing claims this is the same Book - but the
+    # popup is given the near match so a person can settle it
+    assert response.status_code == 404
+    similar = response.json()["detail"]["similar"]
+    assert len(similar) == 1
+    assert similar[0]["title"] == "The Brass Verdict: A Novel"
+    assert similar[0]["libris_id"]
+
+
+def test_a_different_book_by_the_same_author_is_not_offered(token, tmp_path):
+    # Given two unrelated books by one author, the case measured on the real
+    # Shelf: "Mercy" and "Long Road to Mercy" are different books
+    config.set_book_vault_path(tmp_path)
+    create_book_note(
+        BookCandidate(title="Memory Man", authors=["David Baldacci"]), tmp_path
+    )
+
+    # When the extension asks about the other
+    response = TestClient(create_app()).get(
+        "/api/v1/books",
+        params={"title": "The Innocent", "authors": ["David Baldacci"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then nothing is offered, because nothing resembles it
+    assert response.status_code == 404
+    assert response.json()["detail"]["similar"] == []
+
+
+def test_a_near_title_by_another_author_is_not_offered(token, tmp_path):
+    # Given a similarly titled book by someone else
+    config.set_book_vault_path(tmp_path)
+    create_book_note(
+        BookCandidate(title="Dune: Deluxe Edition", authors=["Someone Else"]), tmp_path
+    )
+
+    # When the extension asks about Frank Herbert's
+    response = TestClient(create_app()).get(
+        "/api/v1/books",
+        params={"title": "Dune", "authors": ["Frank Herbert"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then the author keeps them apart
+    assert response.status_code == 404
+    assert response.json()["detail"]["similar"] == []
+
+
+def test_an_exact_match_still_answers_directly(token, tmp_path):
+    # Given a note matching exactly
+    config.set_book_vault_path(tmp_path)
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path)
+
+    # When the extension asks about it
+    response = TestClient(create_app()).get(
+        "/api/v1/books",
+        params={"title": "Dune", "authors": ["Frank Herbert"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then it is answered, not offered as a maybe
+    assert response.status_code == 200
+    assert response.json()["libris_id"]
