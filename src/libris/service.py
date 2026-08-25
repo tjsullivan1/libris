@@ -176,11 +176,13 @@ def find_existing(
             return note
         if (
             wanted_title
+            and wanted_author
             and note.title
             and normalize_for_match(note.title) == wanted_title
+            and note.first_author
+            and normalize_for_match(note.first_author) == wanted_author
         ):
-            if wanted_author is None:
-                return note
+            return note
             if (
                 note.first_author
                 and normalize_for_match(note.first_author) == wanted_author

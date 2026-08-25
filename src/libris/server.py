@@ -211,7 +211,11 @@ def create_app() -> FastAPI:
                 asin=request.asin,
                 title=request.title,
                 authors=request.authors,
-                client=GoogleBooksClient(max_retry_wait=UPSTREAM_MAX_WAIT_SECONDS),
+                client=GoogleBooksClient(
+                    timeout=UPSTREAM_MAX_WAIT_SECONDS / 3,
+                    max_retries=1,
+                    max_retry_wait=UPSTREAM_MAX_WAIT_SECONDS / 3,
+                ),
             )
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             raise HTTPException(
