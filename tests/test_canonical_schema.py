@@ -18,7 +18,9 @@ from libris.markdown import (
     create_book_note,
     find_duplicates,
     rename_book_file,
+    update_book_status,
 )
+from libris.note_format import InvalidFieldValue
 
 # The exact key set present on all 3,137 notes in the vault.
 CANONICAL_FRONTMATTER = {
@@ -240,3 +242,122 @@ def test_stray_whitespace_in_an_author_name_is_collapsed(vault):
     from libris.markdown import BookNote
 
     assert BookNote.read(note).first_author == "Dan Harris"
+
+
+# --- field value vocabularies (#65) ---
+#
+# Measured against the vault before writing these: all 3,136 notes already hold
+# a legal status (1,667 Read, 1,467 To Read, 1 Reading, 1 Not To Read) and a
+# legal priority (2,251 unset, then Low/Medium/High). Nothing needs migrating,
+# so this is pure enforcement. `format` is deliberately not validated here: it
+# holds eleven shapes across two types and needs a migration of its own.
+
+
+def _candidate() -> BookCandidate:
+    return BookCandidate(title="Dune", authors=["Frank Herbert"])
+
+
+@pytest.mark.parametrize("status", ["To Read", "Reading", "Read", "Not To Read"])
+def test_every_status_the_vault_uses_is_accepted(tmp_path, status):
+    # Given a status that exists in the vault today
+    # When a note is created with it
+    path = create_book_note(_candidate(), tmp_path, status=status)
+
+    # Then it is written
+    assert path.exists()
+
+
+def test_an_unknown_status_is_refused(tmp_path):
+    # Given a status outside the four the Library defines
+    # When a note is created with it
+    # Then it is refused rather than silently written into the Shelf
+    with pytest.raises(InvalidFieldValue):
+        create_book_note(_candidate(), tmp_path, status="finished")
+
+
+def test_a_status_differing_only_in_case_is_refused(tmp_path):
+    # Given the right word in the wrong case
+    # When a note is created with it
+    # Then it is refused; the vault's Bases views group on the exact string
+    with pytest.raises(InvalidFieldValue):
+        create_book_note(_candidate(), tmp_path, status="read")
+
+
+def test_the_refusal_names_the_field_and_the_legal_values(tmp_path):
+    # Given an illegal status
+    # When a note is created with it
+    with pytest.raises(InvalidFieldValue) as excinfo:
+        create_book_note(_candidate(), tmp_path, status="finished")
+
+    # Then the message is usable without reading the source
+    message = str(excinfo.value)
+    assert "status" in message
+    assert "finished" in message
+    assert "To Read" in message
+
+
+@pytest.mark.parametrize("priority", ["Low", "Medium", "High"])
+def test_every_priority_the_vault_uses_is_accepted(tmp_path, priority):
+    # Given a priority that exists in the vault today
+    # When a note is created with it
+    path = create_book_note(_candidate(), tmp_path, overrides={"priority": priority})
+
+    # Then it is written
+    assert path.exists()
+
+
+def test_priority_may_be_unset(tmp_path):
+    # Given a book never triaged - 2,251 notes in the vault
+    # When a note is created with no priority
+    path = create_book_note(_candidate(), tmp_path, overrides={"priority": None})
+
+    # Then that is legal; absent is not the same as invalid
+    assert path.exists()
+
+
+def test_an_unknown_priority_is_refused(tmp_path):
+    # Given a priority outside Low, Medium, High
+    # When a note is created with it
+    # Then it is refused
+    with pytest.raises(InvalidFieldValue):
+        create_book_note(_candidate(), tmp_path, overrides={"priority": "Urgent"})
+
+
+def test_status_override_is_validated_too(tmp_path):
+    # Given an illegal status arriving as an override rather than the argument
+    # When a note is created
+    # Then the same rule applies; there is one gate, not two
+    with pytest.raises(InvalidFieldValue):
+        create_book_note(_candidate(), tmp_path, overrides={"status": "finished"})
+
+
+def test_updating_to_an_unknown_status_is_refused(tmp_path):
+    # Given an existing note
+    path = create_book_note(_candidate(), tmp_path, status="To Read")
+
+    # When its status is updated to something the Library does not define
+    # Then it is refused and the note is left alone
+    with pytest.raises(InvalidFieldValue):
+        update_book_status(path, "finished")
+    assert "status: To Read" in path.read_text(encoding="utf-8")
+
+
+def test_updating_to_a_known_status_is_allowed(tmp_path):
+    # Given an existing note
+    path = create_book_note(_candidate(), tmp_path, status="To Read")
+
+    # When its status is updated to a legal value
+    update_book_status(path, "Read")
+
+    # Then the note carries it
+    assert "status: Read" in path.read_text(encoding="utf-8")
+
+
+def test_format_is_not_validated_yet(tmp_path):
+    # Given the vault holds format as both string and list, in mixed case
+    # When a note is created with a bare string, as `libris add -f` writes today
+    path = create_book_note(_candidate(), tmp_path, overrides={"format": "Audiobook"})
+
+    # Then it is accepted. Validating this needs the field's type settled and
+    # 1,341 notes migrated first, which is its own piece of work.
+    assert path.exists()

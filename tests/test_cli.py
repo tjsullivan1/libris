@@ -226,6 +226,10 @@ def test_search_command_no_results(monkeypatch):
 
 
 def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
+    # Status is "Read" rather than the "Finished" this test used to pass: the
+    # Library defines four statuses and Finished is not one of them (#65). The
+    # assertion here is that overrides reach create_book_note, not that any
+    # string may be written into a Book Note.
     from libris.api import BookCandidate
 
     mock_books = [
@@ -273,7 +277,7 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
             "add",
             "dune",
             "--status",
-            "Finished",
+            "Read",
             "--format",
             "kindle",
             "--rating",
@@ -292,9 +296,9 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert captured["book"] == mock_books[0]
     assert captured["vault_path"] == tmp_path
-    assert captured["status"] == "Finished"
+    assert captured["status"] == "Read"
     assert captured["overrides"] == {
-        "status": "Finished",
+        "status": "Read",
         "format": "kindle",
         "rating": 5,
         "referred_by": "Alice",
@@ -386,3 +390,21 @@ def test_serve_show_token_prints_the_token():
     # Then it is generated, printed, and the daemon does not start
     assert result.exit_code == 0
     assert config.get_server_token() in result.output
+
+
+def test_add_refuses_an_unknown_status_before_searching(monkeypatch):
+    # Given a search that would fail loudly if it ran
+    def _never(*args, **kwargs):
+        raise AssertionError("the API was called despite an invalid status")
+
+    monkeypatch.setattr("libris.cli.GoogleBooksClient.search", _never)
+
+    # When a book is added with a status the Library does not define
+    result = runner.invoke(app, ["add", "Dune", "--status", "finished"])
+
+    # Then it is refused up front, before the network call and before the user
+    # is made to pick a book, and the message says what is allowed
+    assert result.exit_code != 0
+    assert "finished" in result.output
+    assert "To Read" in result.output
+    assert "Traceback" not in result.output

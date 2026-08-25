@@ -25,6 +25,18 @@ BIBLIOGRAPHIC_FIELDS = (
     "series",
 )
 READING_FIELDS = ("status", "priority", "rating", "format", "tags", "referred_by")
+
+# The values these fields may hold, taken from the vault rather than from what
+# the code used to assume (ADR 0005). Measured across all 3,136 notes: status
+# and priority already hold nothing else. `format` is absent on purpose - it
+# holds eleven shapes across two types today and needs a migration before it
+# can be constrained.
+STATUS_VALUES = ("To Read", "Reading", "Read", "Not To Read")
+PRIORITY_VALUES = ("Low", "Medium", "High")
+FIELD_VOCABULARIES = {
+    "status": STATUS_VALUES,
+    "priority": PRIORITY_VALUES,
+}
 DATE_FIELDS = ("date_added", "date_started", "date_finished")
 
 MODELLED_FIELDS = IDENTITY_FIELDS + BIBLIOGRAPHIC_FIELDS + READING_FIELDS + DATE_FIELDS
@@ -41,6 +53,38 @@ _H1 = re.compile(r"^#[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 # A section ends at the next heading or a thematic break. merge.py joins bodies
 # with a "---" divider, and the reader's writing must not be swept into a blurb.
 _SECTION_BREAK = re.compile(r"^(?:#{1,6}[ \t]+\S|-{3,}[ \t]*$)", re.MULTILINE)
+
+
+class InvalidFieldValue(ValueError):
+    """A Book Note field was given a value the Library does not define.
+
+    Subclasses ValueError so callers that already guard against bad input keep
+    working; the distinct type is what lets the CLI report it as a user error
+    rather than a crash.
+    """
+
+
+def validate_field_value(field: str, value: object) -> None:
+    """Check a field value against the vocabulary the Library defines for it.
+
+    Fields with no vocabulary, and values that are simply unset, always pass:
+    absent is not the same as invalid, and 2,251 notes have no priority.
+
+    Args:
+        field: The frontmatter field being written.
+        value: The value proposed for it.
+
+    Raises:
+        InvalidFieldValue: If the field has a vocabulary and the value is not
+            in it.
+    """
+    allowed = FIELD_VOCABULARIES.get(field)
+    if allowed is None or value is None:
+        return
+    if value not in allowed:
+        raise InvalidFieldValue(
+            f"Invalid {field}: {value!r}. Valid values: {', '.join(allowed)}."
+        )
 
 
 def mint_libris_id(date_added: object) -> str:
