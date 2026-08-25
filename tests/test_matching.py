@@ -140,7 +140,9 @@ def test_titles_do_not_match_when_either_normalizes_to_empty():
 
 def test_metadata_score_counts_populated_fields():
     # Given a candidate with three of the counted fields populated
-    candidate = _candidate(isbn="9780441013593", page_count=412, description="A desert.")
+    candidate = _candidate(
+        isbn="9780441013593", page_count=412, description="A desert."
+    )
 
     # When it is scored
     score = metadata_score(candidate)
