@@ -95,6 +95,28 @@ def validate_field_value(field: str, value: object) -> None:
         )
 
 
+def read_superseded_ids(value: object) -> list[str]:
+    """Read a `superseded_ids` value into the list of identities it means.
+
+    Frontmatter arrives from YAML and may hold any shape. This vault writes
+    list-shaped fields as bare strings often enough to matter - 1,341 notes do
+    it with `format` - and a bare string here is especially dangerous, because
+    iterating one yields characters that each look like an identity.
+
+    Args:
+        value: Whatever the frontmatter held.
+
+    Returns:
+        The identities, with blanks dropped. Anything that is neither a string
+        nor a list names no identity at all.
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
 def mint_libris_id(date_added: object) -> str:
     """Mint a Libris ID whose timestamp comes from when the book was added.
 

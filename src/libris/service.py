@@ -159,10 +159,12 @@ def find_by_libris_id(vault_path: Path, libris_id: str) -> BookNote | None:
         in a loop is not. A caller with many to resolve should build an index in
         one pass instead.
     """
-    if not libris_id:
+    wanted = libris_id.strip() if libris_id else ""
+    if not wanted:
+        # Checked after stripping: a whitespace-only id would otherwise read
+        # every note on the Shelf to find nothing.
         return None
 
-    wanted = libris_id.strip()
     superseding: BookNote | None = None
 
     for book_path in list_books(vault_path):

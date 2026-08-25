@@ -278,3 +278,13 @@ def test_a_live_id_wins_over_a_superseded_one(tmp_path):
 
     # Then the note that actually holds the identity wins
     assert found.path == live
+
+
+def test_a_blank_libris_id_does_not_resolve(tmp_path):
+    # Given a Shelf with notes on it
+    create_book_note(_candidate(), tmp_path)
+
+    # When an empty or whitespace-only identity is resolved
+    # Then it misses immediately rather than reading every note to find nothing
+    assert find_by_libris_id(tmp_path, "") is None
+    assert find_by_libris_id(tmp_path, "   ") is None

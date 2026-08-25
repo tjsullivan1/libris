@@ -814,8 +814,10 @@ def test_a_merge_with_no_ids_to_record_adds_no_field(tmp_path):
     # When they are merged
     merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
 
-    # Then nothing is invented
-    assert not merged_fm.get("superseded_ids")
+    # Then nothing is invented. Asserted as absence rather than falsiness: the
+    # field is meant not to exist, and `.get()` cannot tell that apart from a
+    # key present and empty.
+    assert "superseded_ids" not in merged_fm
 
 
 def test_the_written_survivor_holds_the_superseded_id(tmp_path):
@@ -832,3 +834,39 @@ def test_the_written_survivor_holds_the_superseded_id(tmp_path):
     # Then the file itself carries the forwarding address
     note = BookNote.read(primary)
     assert note.superseded_ids == ["LOSER"]
+
+
+def test_a_superseded_id_stored_as_a_bare_string_is_read_as_one_id(tmp_path):
+    # Given a note whose superseded_ids is a bare string rather than a list -
+    # the shape 1,341 notes already use for `format`
+    primary = _note(tmp_path, "Keeper")
+    secondary = _note(tmp_path, "Loser", superseded_ids="EARLIER")
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then it is one identity, not one per character
+    assert merged_fm["superseded_ids"] == ["LOSER", "EARLIER"]
+
+
+def test_a_superseded_id_of_an_unusable_shape_is_ignored(tmp_path):
+    # Given frontmatter holding something that names no identity
+    primary = _note(tmp_path, "Keeper", superseded_ids=42)
+    secondary = _note(tmp_path, "Loser")
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then only the real identity is recorded
+    assert merged_fm["superseded_ids"] == ["LOSER"]
+
+
+def test_reading_superseded_ids_from_a_bare_string(tmp_path):
+    # Given a note carrying the field as a string
+    path = _note(tmp_path, "Solo", superseded_ids="GONE")
+
+    # When the note is read
+    note = BookNote.read(path)
+
+    # Then the reader agrees with the merge helper, because both use one rule
+    assert note.superseded_ids == ["GONE"]

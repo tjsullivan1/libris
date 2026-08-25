@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .markdown import read_frontmatter
-from .note_format import SUPERSEDED_IDS_FIELD
+from .note_format import SUPERSEDED_IDS_FIELD, read_superseded_ids
 
 
 @dataclass
@@ -150,10 +150,13 @@ def _collect_superseded_ids(
     """
     survivor_id = primary_fm.get("libris_id")
 
+    # Read through the shared rule rather than iterating the raw value: a bare
+    # string would otherwise be walked character by character, and every letter
+    # would look like an identity.
     candidates: List[Any] = []
-    candidates.extend(primary_fm.get(SUPERSEDED_IDS_FIELD) or [])
+    candidates.extend(read_superseded_ids(primary_fm.get(SUPERSEDED_IDS_FIELD)))
     candidates.append(secondary_fm.get("libris_id"))
-    candidates.extend(secondary_fm.get(SUPERSEDED_IDS_FIELD) or [])
+    candidates.extend(read_superseded_ids(secondary_fm.get(SUPERSEDED_IDS_FIELD)))
 
     collected: List[str] = []
     for value in candidates:

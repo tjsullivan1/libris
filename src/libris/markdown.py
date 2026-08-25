@@ -16,6 +16,7 @@ from .note_format import (
     SUPERSEDED_IDS_FIELD,
     has_description_callout,
     mint_libris_id,
+    read_superseded_ids,
     render_body,
     render_description_callout,
     validate_field_value,
@@ -104,14 +105,7 @@ class BookNote:
             The superseded identities, or an empty list. A note that has never
             absorbed another does not carry the field at all.
         """
-        value = self.frontmatter.get(SUPERSEDED_IDS_FIELD)
-        if isinstance(value, str):
-            value = [value]
-        if not isinstance(value, list):
-            return []
-        return [
-            item.strip() for item in value if isinstance(item, str) and item.strip()
-        ]
+        return read_superseded_ids(self.frontmatter.get(SUPERSEDED_IDS_FIELD))
 
     @property
     def title(self) -> str | None:
