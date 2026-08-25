@@ -12,7 +12,7 @@ from .config import (
     set_book_vault_path,
     set_config,
 )
-from .importer import SUPPORTED_FORMATS, normalize_for_match, run_import
+from .importer import SUPPORTED_FORMATS, run_import
 from .markdown import (
     BookNote,
     RenameResult,
@@ -24,6 +24,13 @@ from .markdown import (
     rename_book_file,
     update_book_status,
     update_frontmatter_from_book,
+)
+from .matching import (
+    best_match,
+    build_search_query,
+    metadata_score,
+    normalize_for_match,
+    titles_match,
 )
 from .merge import (
     check_auto_merge,
@@ -424,44 +431,14 @@ def cleanup(
             typer.echo(f"  • {name}")
 
 
-def _normalize_for_match(text: str) -> str:
-    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace.
-
-    Delegates to the shared implementation in importer module.
-    """
-    return normalize_for_match(text)
-
-
-def _build_search_query(filename_stem: str) -> str:
-    """Build an effective Google Books search query from a filename stem.
-
-    Handles common filename patterns like:
-      - "Title - Author"
-      - "Title Subtitle - Author"
-
-    Splits on " - " to separate title from author, then uses Google Books
-    query operators (intitle:/inauthor:) for more precise results.
-    If no separator is found, returns the stem as-is.
-    """
-    parts = filename_stem.split(" - ", maxsplit=1)
-    if len(parts) == 2:
-        title_part = parts[0].strip()
-        author_part = parts[1].strip()
-        return f"intitle:{title_part} inauthor:{author_part}"
-    return filename_stem
-
-
-def _titles_match(filename_stem: str, book_title: str) -> bool:
-    """Check if a Google Books title fuzzy-matches the filename stem.
-
-    Returns True if the normalized filename stem is contained within the
-    normalized book title, or vice versa.
-    """
-    norm_file = _normalize_for_match(filename_stem)
-    norm_title = _normalize_for_match(book_title)
-    if not norm_file or not norm_title:
-        return False
-    return norm_file in norm_title or norm_title in norm_file
+# Thin re-exports of the shared matching helpers (#63). The private names are
+# what this module's call sites and tests already use; the implementations live
+# in matching.py because every adapter needs them, not just the CLI.
+_normalize_for_match = normalize_for_match
+_build_search_query = build_search_query
+_titles_match = titles_match
+_metadata_score = metadata_score
+_best_match = best_match
 
 
 def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
@@ -604,36 +581,6 @@ def _needs_enrichment(fm: dict) -> bool:
     earlier enrichment.
     """
     return not any(fm.get(f) for f in _API_SOURCED_FIELDS)
-
-
-# Fields counted when ranking which edition has the most complete metadata.
-_COMPLETENESS_FIELDS = (
-    "isbn",
-    "page_count",
-    "published_date",
-    "google_books_id",
-    "thumbnail",
-    "genres",
-    "description",
-)
-
-
-def _metadata_score(book) -> int:
-    """Count how many metadata fields are non-empty on a BookCandidate."""
-    score = 0
-    for field in _COMPLETENESS_FIELDS:
-        val = getattr(book, field, None)
-        if val:
-            # Lists/strings: only count if non-empty
-            if isinstance(val, (list, str)) and len(val) == 0:
-                continue
-            score += 1
-    return score
-
-
-def _best_match(candidates: list) -> object:
-    """Pick the candidate with the most complete metadata."""
-    return max(candidates, key=_metadata_score)
 
 
 def _build_query_from_frontmatter(fm: dict, file_path: Path) -> str:

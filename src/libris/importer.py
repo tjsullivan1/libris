@@ -15,12 +15,7 @@ from .markdown import (
     list_books,
     update_book_status,
 )
-
-
-def normalize_for_match(text: str) -> str:
-    """Normalize text for fuzzy comparison: lowercase, strip punctuation/extra whitespace."""
-    text = re.sub(r"[^\w\s]", " ", text.lower())
-    return re.sub(r"\s+", " ", text).strip()
+from .matching import normalize_for_match
 
 
 @dataclass
