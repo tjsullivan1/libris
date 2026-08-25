@@ -5,10 +5,9 @@ import socket
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import List, Optional
 
 import httpx
 
@@ -82,16 +81,24 @@ def parse_retry_after(value: object, now: datetime | None = None) -> float | Non
 
 
 @dataclass
-class Book:
+class BookCandidate:
+    """Metadata about a book proposed by an external source.
+
+    A candidate has not been accepted into the Library. It may describe a book
+    already held, a different edition, or the wrong book entirely. Reading state
+    is deliberately absent: a rating is not metadata about the book.
+    """
+
     title: str
-    authors: List[str]
-    isbn: Optional[str]
-    page_count: Optional[int]
-    published_date: Optional[str]
-    google_books_id: str
-    thumbnail: Optional[str]
-    genres: List[str]
-    description: Optional[str]
+    authors: list[str]
+    isbn: str | None = None
+    page_count: int | None = None
+    published_date: str | None = None
+    google_books_id: str = ""
+    thumbnail: str | None = None
+    genres: list[str] = field(default_factory=list)
+    description: str | None = None
+    source: str = "google_books"
 
 
 class GoogleBooksClient:
@@ -162,7 +169,7 @@ class GoogleBooksClient:
         self.on_rate_limit(wait_time, attempt + 1, self.max_retries)
         time.sleep(wait_time)
 
-    def search(self, query: str) -> List[Book]:
+    def search(self, query: str) -> list[BookCandidate]:
         params = {"q": query, "maxResults": 10}
 
         api_key = get_api_key()
@@ -229,7 +236,7 @@ class GoogleBooksClient:
                 if ident.get("type") == "ISBN_10" and not isbn:
                     isbn = ident.get("identifier")
 
-            book = Book(
+            book = BookCandidate(
                 title=volume_info.get("title", "Unknown Title"),
                 authors=volume_info.get("authors", ["Unknown Author"]),
                 isbn=isbn,

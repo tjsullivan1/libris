@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
+    "python-ulid>=4.0.1",
     "pyyaml>=6.0.3",
     "questionary>=2.1.1",
     "titlecase>=2.4",

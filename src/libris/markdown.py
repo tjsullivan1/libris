@@ -10,25 +10,22 @@ from typing import Any, Dict, Literal, Optional
 import yaml
 from titlecase import titlecase
 
-from .api import Book
+from .api import BookCandidate
+from .note_format import (
+    MODELLED_FIELDS,
+    has_description_callout,
+    mint_libris_id,
+    render_body,
+    render_description_callout,
+)
 
+# Values a Book Note starts with when nothing else supplies them.
+_FRONTMATTER_DEFAULTS = {"tags": "Book", "status": "To Read"}
+
+# Derived from the canonical field order so a note written today and a note
+# migrated from years ago cannot disagree about which fields exist.
 DEFAULT_FRONTMATTER = {
-    "title": None,
-    "author": None,
-    "isbn": None,
-    "page_count": None,
-    "published_date": None,
-    "google_books_id": None,
-    "thumbnail": None,
-    "genres": None,
-    "tags": "Book",
-    "format": None,
-    "status": "To Read",
-    "rating": None,
-    "referred_by": None,
-    "date_added": None,
-    "date_started": None,
-    "date_finished": None,
+    name: _FRONTMATTER_DEFAULTS.get(name) for name in MODELLED_FIELDS
 }
 
 # Maps legacy/extraneous field names to their canonical counterparts.
@@ -39,8 +36,106 @@ FIELD_MIGRATIONS = {
     "Date Read": "date_finished",
     "Date Added": "date_added",
     "Status": "status",
-    "Author": "author",
+    "Author": "authors",
+    # Names this code wrote before ADR 0005 settled the canonical vocabulary.
+    "author": "authors",
+    "published_date": "date_published",
+    "thumbnail": "cover_thumbnail",
 }
+
+
+def _normalize_author(name: str) -> str:
+    """Reduce an author name as written to the name itself.
+
+    Args:
+        name: The value as it appears in frontmatter, possibly a wikilink.
+
+    Returns:
+        The plain name, with runs of whitespace collapsed.
+    """
+    unlinked = re.sub(r"^\[\[(.+?)\]\]$", r"\1", name.strip())
+    if "|" in unlinked:
+        unlinked = unlinked.split("|", 1)[1]
+    return re.sub(r"\s+", " ", unlinked).strip()
+
+
+@dataclass
+class BookNote:
+    """A book on the Shelf: the file it lives in, its frontmatter, and its body.
+
+    Frontmatter arrives from YAML and may hold any shape, so the accessors
+    normalise rather than trusting what is on disk. Callers should read fields
+    through them instead of reaching into the dict, which is how this code came
+    to read a key that no note has ever carried.
+    """
+
+    path: Path
+    frontmatter: dict[str, Any]
+    body: str = ""
+
+    @classmethod
+    def read(cls, path: Path) -> "BookNote | None":
+        """Read a Book Note from disk.
+
+        Args:
+            path: Path to the Markdown file.
+
+        Returns:
+            The Book Note, or None if the file has no parseable frontmatter.
+        """
+        frontmatter = read_frontmatter(path)
+        if frontmatter is None:
+            return None
+        return cls(path=path, frontmatter=frontmatter)
+
+    @property
+    def libris_id(self) -> str | None:
+        """The note's stable identity, or None until the vault is migrated."""
+        value = self.frontmatter.get("libris_id")
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def title(self) -> str | None:
+        """The book's title, or None when absent or blank."""
+        value = self.frontmatter.get("title")
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def authors(self) -> list[str]:
+        """The book's authors as a list of plain, non-empty names.
+
+        Accepts the list every note in the vault carries and the bare string that
+        older notes used. Anything else counts as naming no author at all.
+
+        Names are normalised for use rather than taken literally: some notes hold
+        an author as a wikilink to their own note, and some carry stray inner
+        whitespace. Both would otherwise leak into filenames and defeat matching,
+        while the note itself keeps whatever it holds.
+        """
+        value = self.frontmatter.get("authors")
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        names = (_normalize_author(name) for name in value if isinstance(name, str))
+        return [name for name in names if name]
+
+    @property
+    def first_author(self) -> str | None:
+        """The first named author, or None when the note names none."""
+        authors = self.authors
+        return authors[0] if authors else None
+
+    @property
+    def canonical_filename(self) -> str | None:
+        """The 'Title - Author.md' filename this note should have.
+
+        Returns:
+            The filename, or None when the note lacks a title or an author.
+        """
+        if self.title is None or self.first_author is None:
+            return None
+        return sanitize_filename(f"{self.title} - {self.first_author}.md")
 
 
 def sanitize_filename(name: str) -> str:
@@ -70,7 +165,7 @@ def standardize_title(raw: Optional[str]) -> Optional[str]:
 
 
 def create_book_note(
-    book: Book,
+    book: BookCandidate,
     vault_path: Path,
     status: str = "To Read",
     overrides: Dict[str, Any] | None = None,
@@ -78,7 +173,7 @@ def create_book_note(
     """Creates a Markdown note for a book in the specified vault path.
 
     Args:
-        book: The Book dataclass with data from Google Books API.
+        book: The candidate whose metadata seeds the note.
         vault_path: Directory where the note will be written.
         status: Default reading status (overridden if 'status' is in overrides).
         overrides: Optional dict of frontmatter fields to set/override.
@@ -87,18 +182,20 @@ def create_book_note(
     filename = sanitize_filename(f"{book.title} - {', '.join(book.authors[:1])}.md")
     file_path = vault_path / filename
 
+    added = date.today()
     frontmatter = {
         **DEFAULT_FRONTMATTER,
+        "libris_id": mint_libris_id(added),
         "title": book.title,
-        "author": book.authors,
+        "authors": book.authors,
         "isbn": book.isbn,
         "page_count": book.page_count,
-        "published_date": book.published_date,
+        "date_published": book.published_date,
         "google_books_id": book.google_books_id,
-        "thumbnail": book.thumbnail,
+        "cover_thumbnail": book.thumbnail,
         "genres": book.genres,
         "status": status,
-        "date_added": date.today().isoformat(),
+        "date_added": added.isoformat(),
     }
 
     if overrides:
@@ -112,11 +209,8 @@ def create_book_note(
 
     yaml_content = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
 
-    content = f"---\n{yaml_content}---\n\n# {book.title}\n\n## Notes\n\n"
-    if book.description:
-        content += f"### Description\n{book.description}\n"
-
-    file_path.write_text(content, encoding="utf-8")
+    body = render_body(book.title, "", book.description)
+    file_path.write_text(f"---\n{yaml_content}---\n\n{body}", encoding="utf-8")
     return file_path
 
 
@@ -184,14 +278,20 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
             data[field] = default
             updated = True
 
+    # A note that reached us without an identity gets one here, so a book typed
+    # straight into Obsidian is not left unaddressable (ADR 0001, ADR 0011).
+    if not data.get("libris_id"):
+        data["libris_id"] = mint_libris_id(data.get("date_added"))
+        updated = True
+
     # If date_finished is set, status should be "Read"
     if data.get("date_finished") is not None and data.get("status") != "Read":
         data["status"] = "Read"
         updated = True
 
-    # Ensure author is always a list
-    if isinstance(data.get("author"), str):
-        data["author"] = [data["author"]]
+    # Ensure authors is always a list
+    if isinstance(data.get("authors"), str):
+        data["authors"] = [data["authors"]]
         updated = True
 
     # Standardize title casing and strip annotations
@@ -223,15 +323,15 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
     return updated, data
 
 
-# Maps Book dataclass fields to frontmatter field names.
+# Maps BookCandidate fields to frontmatter field names.
 _BOOK_TO_FRONTMATTER = {
     "title": "title",
-    "authors": "author",
+    "authors": "authors",
     "isbn": "isbn",
     "page_count": "page_count",
-    "published_date": "published_date",
+    "published_date": "date_published",
     "google_books_id": "google_books_id",
-    "thumbnail": "thumbnail",
+    "thumbnail": "cover_thumbnail",
     "genres": "genres",
     "description": None,  # handled separately (body, not frontmatter)
 }
@@ -248,22 +348,14 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
     Returns a list of groups where each group contains two or more paths
     that share at least one matching identifier.
     """
-    books = list_books(vault_path)
-    file_data: list[tuple[Path, Dict[str, Any]]] = []
-    for p in books:
-        fm = read_frontmatter(p)
-        if fm is not None:
-            file_data.append((p, fm))
+    notes: list[BookNote] = []
+    for book_path in list_books(vault_path):
+        note = BookNote.read(book_path)
+        if note is not None:
+            notes.append(note)
 
-    def _author_key(fm: Dict[str, Any]) -> tuple[str, ...]:
-        author = fm.get("author")
-        if isinstance(author, list):
-            return tuple(
-                sorted(a.strip().lower() for a in author if isinstance(a, str))
-            )
-        elif isinstance(author, str):
-            return (author.strip().lower(),)
-        return ()
+    def _author_key(note: BookNote) -> tuple[str, ...]:
+        return tuple(sorted(name.lower() for name in note.authors))
 
     # Build groups keyed by each identifier type.
     # key -> set of indices into file_data
@@ -271,23 +363,22 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
     # Title groups need pairwise author comparison (missing author = wildcard)
     title_groups: Dict[str, list[int]] = {}
 
-    for idx, (path, fm) in enumerate(file_data):
-        title = fm.get("title")
-        if title and isinstance(title, str):
-            title_groups.setdefault(title.strip().lower(), []).append(idx)
+    for idx, note in enumerate(notes):
+        if note.title is not None:
+            title_groups.setdefault(note.title.lower(), []).append(idx)
 
-        isbn = fm.get("isbn")
+        isbn = note.frontmatter.get("isbn")
         if isbn:
             key = f"isbn:{str(isbn).strip()}"
             groups_by_key.setdefault(key, set()).add(idx)
 
-        gid = fm.get("google_books_id")
+        gid = note.frontmatter.get("google_books_id")
         if gid and gid not in EXCLUDED_GOOGLE_BOOKS_IDS:
             key = f"gid:{str(gid).strip()}"
             groups_by_key.setdefault(key, set()).add(idx)
 
     # Union-find to merge overlapping groups
-    parent = list(range(len(file_data)))
+    parent = list(range(len(notes)))
 
     def find(x: int) -> int:
         while parent[x] != x:
@@ -309,7 +400,7 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
         has_missing_author = False
 
         for idx in members:
-            author_key = _author_key(file_data[idx][1])
+            author_key = _author_key(notes[idx])
             if author_key:
                 author_buckets.setdefault(author_key, []).append(idx)
             else:
@@ -337,9 +428,9 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
 
     # Collect final groups with 2+ members
     clusters: Dict[int, list[Path]] = {}
-    for idx, (path, _) in enumerate(file_data):
+    for idx, note in enumerate(notes):
         root = find(idx)
-        clusters.setdefault(root, []).append(path)
+        clusters.setdefault(root, []).append(note.path)
 
     return [sorted(group) for group in clusters.values() if len(group) >= 2]
 
@@ -359,8 +450,8 @@ def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def update_frontmatter_from_book(file_path: Path, book: Book) -> bool:
-    """Fill null frontmatter fields with data from a Book. Returns True if changed."""
+def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
+    """Fill null frontmatter fields from a candidate. Returns True if changed."""
     content = file_path.read_text(encoding="utf-8")
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
     if not match:
@@ -399,9 +490,12 @@ def update_frontmatter_from_book(file_path: Path, book: Book) -> bool:
         updated = True
 
     # Add description to body if missing
-    if book.description and "### Description" not in rest_of_content:
+    if book.description and not has_description_callout(rest_of_content):
         rest_of_content = (
-            rest_of_content.rstrip() + f"\n\n### Description\n{book.description}\n"
+            rest_of_content.rstrip()
+            + "\n\n"
+            + render_description_callout(book.description)
+            + "\n"
         )
         updated = True
 
@@ -416,33 +510,8 @@ def update_frontmatter_from_book(file_path: Path, book: Book) -> bool:
 
 def compute_canonical_filename(file_path: Path) -> Optional[str]:
     """Compute the canonical 'Title - Author.md' filename from frontmatter."""
-    fm = read_frontmatter(file_path)
-    if not fm:
-        return None
-    title = fm.get("title")
-    author = fm.get("author")
-    if not title or not isinstance(title, str):
-        return None
-
-    if isinstance(author, list):
-        author_candidates = author
-    elif isinstance(author, str):
-        author_candidates = [author]
-    else:
-        return None
-
-    first_author = next(
-        (
-            candidate.strip()
-            for candidate in author_candidates
-            if isinstance(candidate, str) and candidate.strip()
-        ),
-        None,
-    )
-    if first_author is None:
-        return None
-
-    return sanitize_filename(f"{title} - {first_author}.md")
+    note = BookNote.read(file_path)
+    return note.canonical_filename if note is not None else None
 
 
 def update_wikilinks_in_vault(
@@ -501,30 +570,21 @@ def rename_book_file(
     If frontmatter is provided, it is used directly instead of re-reading
     the file. This avoids redundant I/O when called after ensure_frontmatter_fields.
     """
-    fm = frontmatter if frontmatter is not None else read_frontmatter(file_path)
-    if not fm:
+    note = (
+        BookNote(path=file_path, frontmatter=frontmatter)
+        if frontmatter is not None
+        else BookNote.read(file_path)
+    )
+    if note is None or not note.frontmatter:
         return RenameResult(status="invalid_frontmatter")
 
-    title = fm.get("title")
-    if not isinstance(title, str) or not title.strip():
+    if note.title is None:
         return RenameResult(status="missing_title")
 
-    author = fm.get("author")
-    if isinstance(author, list):
-        author_candidates = author
-    elif isinstance(author, str):
-        author_candidates = [author]
-    else:
+    if note.first_author is None:
         return RenameResult(status="missing_author")
 
-    first_author = next(
-        (c.strip() for c in author_candidates if isinstance(c, str) and c.strip()),
-        None,
-    )
-    if first_author is None:
-        return RenameResult(status="missing_author")
-
-    canonical_name = sanitize_filename(f"{title.strip()} - {first_author}.md")
+    canonical_name = note.canonical_filename
     if canonical_name == file_path.name:
         return RenameResult(status="already_canonical")
 

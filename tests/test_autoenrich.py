@@ -1,7 +1,7 @@
 import yaml
 from typer.testing import CliRunner
 
-from libris.api import Book
+from libris.api import BookCandidate
 from libris.cli import app
 
 runner = CliRunner()
@@ -20,18 +20,18 @@ def _make_book(**overrides):
         description="A novel about the American dream.",
     )
     defaults.update(overrides)
-    return Book(**defaults)
+    return BookCandidate(**defaults)
 
 
 def _write_book(vault, name, fm_overrides=None):
     fm = {
         "title": "The Great Gatsby",
-        "author": ["F. Scott Fitzgerald"],
+        "authors": ["F. Scott Fitzgerald"],
         "isbn": None,
         "page_count": None,
-        "published_date": None,
+        "date_published": None,
         "google_books_id": None,
-        "thumbnail": None,
+        "cover_thumbnail": None,
         "genres": None,
         "tags": "Book",
         "format": None,
@@ -93,7 +93,9 @@ def test_autoenrich_single_match(tmp_path, monkeypatch):
 def test_autoenrich_multiple_results_one_confident(tmp_path, monkeypatch):
     vault = _setup_vault(tmp_path)
     _write_book(
-        vault, "Dune - Frank Herbert.md", {"title": "Dune", "author": ["Frank Herbert"]}
+        vault,
+        "Dune - Frank Herbert.md",
+        {"title": "Dune", "authors": ["Frank Herbert"]},
     )
 
     dune = _make_book(
@@ -126,7 +128,9 @@ def test_autoenrich_multiple_results_one_confident(tmp_path, monkeypatch):
 def test_autoenrich_prefers_most_complete_edition(tmp_path, monkeypatch):
     vault = _setup_vault(tmp_path)
     _write_book(
-        vault, "Dune - Frank Herbert.md", {"title": "Dune", "author": ["Frank Herbert"]}
+        vault,
+        "Dune - Frank Herbert.md",
+        {"title": "Dune", "authors": ["Frank Herbert"]},
     )
 
     sparse = _make_book(
@@ -174,7 +178,7 @@ def test_autoenrich_multiple_no_interactive_logs(tmp_path, monkeypatch):
     _write_book(
         vault,
         "Ambiguous Book.md",
-        {"title": "Ambiguous Book", "author": ["Some Author"]},
+        {"title": "Ambiguous Book", "authors": ["Some Author"]},
     )
 
     book_a = _make_book(title="Ambiguous Book Vol 1", google_books_id="a1")
@@ -200,7 +204,7 @@ def test_autoenrich_multiple_with_interactive(tmp_path, monkeypatch):
     _write_book(
         vault,
         "Ambiguous Book.md",
-        {"title": "Ambiguous Book", "author": ["Some Author"]},
+        {"title": "Ambiguous Book", "authors": ["Some Author"]},
     )
 
     book_a = _make_book(title="Ambiguous Book Vol 1", google_books_id="a1", isbn="111")
@@ -237,7 +241,7 @@ def test_autoenrich_multiple_with_interactive(tmp_path, monkeypatch):
 def test_autoenrich_interactive_skip(tmp_path, monkeypatch):
     vault = _setup_vault(tmp_path)
     book_path = _write_book(
-        vault, "Skip Me.md", {"title": "Skip Me", "author": ["Author"]}
+        vault, "Skip Me.md", {"title": "Skip Me", "authors": ["Author"]}
     )
     original_content = book_path.read_text(encoding="utf-8")
 
@@ -270,7 +274,7 @@ def test_autoenrich_interactive_skip(tmp_path, monkeypatch):
 def test_autoenrich_no_results(tmp_path, monkeypatch):
     vault = _setup_vault(tmp_path)
     _write_book(
-        vault, "Obscure Book.md", {"title": "Obscure Book", "author": ["Nobody"]}
+        vault, "Obscure Book.md", {"title": "Obscure Book", "authors": ["Nobody"]}
     )
 
     monkeypatch.setattr(
@@ -295,13 +299,13 @@ def test_autoenrich_skips_complete_books(tmp_path, monkeypatch):
         "Complete Book.md",
         {
             "title": "Complete Book",
-            "author": ["Author"],
+            "authors": ["Author"],
             "isbn": "123",
             "page_count": 300,
-            "published_date": "2020",
+            "date_published": "2020",
             "google_books_id": "gid1",
             "genres": ["Fiction"],
-            "thumbnail": "http://img.example.com/thumb.jpg",
+            "cover_thumbnail": "http://img.example.com/thumb.jpg",
         },
     )
 
@@ -325,10 +329,10 @@ def test_autoenrich_skips_book_with_google_id_but_missing_fields(tmp_path, monke
         "Partial Book.md",
         {
             "title": "Partial Book",
-            "author": ["Author"],
+            "authors": ["Author"],
             "google_books_id": "gid2",
             "isbn": None,
-            "thumbnail": None,
+            "cover_thumbnail": None,
         },
     )
 
@@ -355,11 +359,11 @@ def test_autoenrich_skips_book_with_empty_google_id_but_thumbnail(
         "1776 - David McCullough.md",
         {
             "title": "1776",
-            "author": ["David McCullough"],
+            "authors": ["David McCullough"],
             "google_books_id": "",
             "isbn": None,
-            "thumbnail": "http://books.google.com/books/content?id=yIIbAQAAMAAJ",
-            "published_date": "2007-10-02",
+            "cover_thumbnail": "http://books.google.com/books/content?id=yIIbAQAAMAAJ",
+            "date_published": "2007-10-02",
             "page_count": 294,
         },
     )
@@ -387,7 +391,7 @@ def test_autoenrich_isbn_fallback(tmp_path, monkeypatch):
         "ISBN Book.md",
         {
             "title": "ISBN Book",
-            "author": ["Author"],
+            "authors": ["Author"],
             "isbn": "9780451524935",
         },
     )
@@ -416,7 +420,7 @@ def test_autoenrich_isbn_fallback(tmp_path, monkeypatch):
 def test_autoenrich_no_isbn_no_fallback(tmp_path, monkeypatch):
     """When ISBN is not in frontmatter, no fallback search occurs."""
     vault = _setup_vault(tmp_path)
-    _write_book(vault, "No ISBN.md", {"title": "No ISBN", "author": ["Author"]})
+    _write_book(vault, "No ISBN.md", {"title": "No ISBN", "authors": ["Author"]})
 
     queries = []
 
@@ -438,7 +442,7 @@ def test_autoenrich_no_isbn_no_fallback(tmp_path, monkeypatch):
 def test_autoenrich_dry_run(tmp_path, monkeypatch):
     vault = _setup_vault(tmp_path)
     book_path = _write_book(
-        vault, "Dry Run Book.md", {"title": "Dry Run Book", "author": ["Author"]}
+        vault, "Dry Run Book.md", {"title": "Dry Run Book", "authors": ["Author"]}
     )
     original_content = book_path.read_text(encoding="utf-8")
 
@@ -454,9 +458,9 @@ def test_autoenrich_dry_run(tmp_path, monkeypatch):
 
 def test_autoenrich_limit(tmp_path, monkeypatch):
     vault = _setup_vault(tmp_path)
-    _write_book(vault, "Book A.md", {"title": "Book A", "author": ["Author"]})
-    _write_book(vault, "Book B.md", {"title": "Book B", "author": ["Author"]})
-    _write_book(vault, "Book C.md", {"title": "Book C", "author": ["Author"]})
+    _write_book(vault, "Book A.md", {"title": "Book A", "authors": ["Author"]})
+    _write_book(vault, "Book B.md", {"title": "Book B", "authors": ["Author"]})
+    _write_book(vault, "Book C.md", {"title": "Book C", "authors": ["Author"]})
 
     monkeypatch.setattr(
         "libris.cli.GoogleBooksClient.search",
@@ -475,7 +479,7 @@ def test_autoenrich_limit(tmp_path, monkeypatch):
 def test_autoenrich_query_from_frontmatter(tmp_path, monkeypatch):
     vault = _setup_vault(tmp_path)
     _write_book(
-        vault, "renamed-file.md", {"title": "The Hobbit", "author": ["J.R.R. Tolkien"]}
+        vault, "renamed-file.md", {"title": "The Hobbit", "authors": ["J.R.R. Tolkien"]}
     )
 
     captured = {}

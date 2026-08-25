@@ -186,7 +186,7 @@ def test_import_detects_duplicates(tmp_path):
         vault,
         "Existing Book - Author A.md",
         title="Existing Book",
-        author=["Author A"],
+        authors=["Author A"],
         status="Read",
         format="Audiobook",
     )
@@ -213,7 +213,7 @@ def test_import_updates_status_on_duplicate(tmp_path):
         vault,
         "My Book - Author A.md",
         title="My Book",
-        author=["Author A"],
+        authors=["Author A"],
         status="To Read",
         format=None,
     )
@@ -239,7 +239,7 @@ def test_import_updates_format_on_duplicate(tmp_path):
         vault,
         "My Book - Author A.md",
         title="My Book",
-        author=["Author A"],
+        authors=["Author A"],
         status="Read",
         format=None,
     )
@@ -264,7 +264,7 @@ def test_import_updates_format_when_field_missing(tmp_path):
     # Create a book note without a format field at all
     existing = vault / "My Book - Author A.md"
     existing.write_text(
-        "---\ntitle: My Book\nauthor:\n- Author A\nstatus: Read\n---\n",
+        "---\ntitle: My Book\nauthors:\n- Author A\nstatus: Read\n---\n",
         encoding="utf-8",
     )
 
@@ -288,7 +288,7 @@ def test_import_updates_both_status_and_format(tmp_path):
         vault,
         "My Book - Author A.md",
         title="My Book",
-        author=["Author A"],
+        authors=["Author A"],
         status="To Read",
         format=None,
     )
@@ -316,7 +316,7 @@ def test_import_skips_up_to_date_duplicate(tmp_path):
         vault,
         "My Book - Author A.md",
         title="My Book",
-        author=["Author A"],
+        authors=["Author A"],
         status="Read",
         format="Audiobook",
     )
@@ -354,7 +354,7 @@ def test_import_case_insensitive_duplicate(tmp_path):
         vault,
         "The Great Book - Jane Smith.md",
         title="The Great Book",
-        author=["Jane Smith"],
+        authors=["Jane Smith"],
         status="Read",
         format="Audiobook",
     )

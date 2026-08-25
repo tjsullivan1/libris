@@ -1,8 +1,9 @@
 import time
+from datetime import date
 from pathlib import Path
 from statistics import median
 
-from libris.api import Book
+from libris.api import BookCandidate
 from libris.markdown import (
     compute_canonical_filename,
     create_book_note,
@@ -14,6 +15,7 @@ from libris.markdown import (
     update_frontmatter_from_book,
     update_wikilinks_in_vault,
 )
+from libris.note_format import mint_libris_id
 
 
 def test_sanitize_filename():
@@ -22,7 +24,7 @@ def test_sanitize_filename():
 
 
 def test_create_book_note(tmp_path):
-    book = Book(
+    book = BookCandidate(
         title="Test Book",
         authors=["Author One"],
         isbn="1234567890",
@@ -40,14 +42,14 @@ def test_create_book_note(tmp_path):
 
     content = file_path.read_text()
     assert "title: Test Book" in content
-    assert "author:\n- Author One" in content
-    assert "### Description" in content
-    assert "A test description" in content
+    assert "authors:\n- Author One" in content
+    assert "> [!abstract]- Description" in content
+    assert "> A test description" in content
 
 
 def test_create_book_note_with_overrides(tmp_path):
     """Test that overrides dict sets frontmatter fields."""
-    book = Book(
+    book = BookCandidate(
         title="Override Book",
         authors=["Author Two"],
         isbn="0987654321",
@@ -78,7 +80,7 @@ def test_create_book_note_with_overrides(tmp_path):
 
 def test_create_book_note_overrides_status(tmp_path):
     """Test that status in overrides takes precedence over the status parameter."""
-    book = Book(
+    book = BookCandidate(
         title="Status Book",
         authors=["Author Three"],
         isbn="1111111111",
@@ -105,7 +107,7 @@ def test_create_book_note_invalid_override_raises(tmp_path):
     """Test that an unknown override key raises ValueError."""
     import pytest
 
-    book = Book(
+    book = BookCandidate(
         title="Bad Override",
         authors=["Author Four"],
         isbn="2222222222",
@@ -206,7 +208,7 @@ def test_ensure_frontmatter_sets_status_read_when_date_finished(tmp_path):
     assert "status: Read" in content
 
 
-def test_ensure_frontmatter_converts_author_string_to_list(tmp_path):
+def test_ensure_frontmatter_migrates_legacy_author_to_authors_list(tmp_path):
     file_path = tmp_path / "string_author.md"
     file_path.write_text(
         "---\ntitle: Test\nauthor: John Doe\ngoogle_books_id: abc\n---\n"
@@ -218,7 +220,26 @@ def test_ensure_frontmatter_converts_author_string_to_list(tmp_path):
     assert updated is True
 
     content = file_path.read_text()
-    assert "author:\n- John Doe" in content
+    assert "authors:\n- John Doe" in content
+
+
+def test_ensuring_frontmatter_mints_a_missing_libris_id(tmp_path):
+    from libris.markdown import ensure_frontmatter_fields
+
+    # Given a note typed straight into Obsidian, with no identity
+    file_path = tmp_path / "typed by hand.md"
+    file_path.write_text(
+        "---\ntitle: Dune\nauthors:\n- Frank Herbert\ndate_added: 2019-03-12\n---\n",
+        encoding="utf-8",
+    )
+
+    # When its frontmatter is ensured
+    updated, data = ensure_frontmatter_fields(file_path)
+
+    # Then it gains an identity, timed from when the book was added
+    assert updated is True
+    assert len(data["libris_id"]) == 26
+    assert data["libris_id"] < mint_libris_id(date(2026, 1, 1))
 
 
 def test_ensure_frontmatter_fields_tricky_spacing(tmp_path):
@@ -315,7 +336,7 @@ def test_update_frontmatter_from_book_fills_nulls(tmp_path):
         "---\ntitle: null\nisbn: null\ngoogle_books_id: null\nstatus: Reading\n---\n"
     )
 
-    book = Book(
+    book = BookCandidate(
         title="Real Title",
         authors=["Author A"],
         isbn="1234567890",
@@ -336,15 +357,17 @@ def test_update_frontmatter_from_book_fills_nulls(tmp_path):
     assert data["status"] == "Reading"
     # description should be added to the body
     content = f.read_text()
-    assert "### Description" in content
+    assert "> [!abstract]- Description" in content
     assert "A description" in content
 
 
 def test_update_frontmatter_from_book_skips_existing_description(tmp_path):
     f = tmp_path / "book.md"
-    f.write_text("---\ntitle: null\n---\n\n### Description\nExisting desc\n")
+    f.write_text(
+        "---\ntitle: null\n---\n\n> [!abstract]- Description\n> Existing desc\n"
+    )
 
-    book = Book(
+    book = BookCandidate(
         title="Title",
         authors=["A"],
         isbn=None,
@@ -358,16 +381,16 @@ def test_update_frontmatter_from_book_skips_existing_description(tmp_path):
 
     update_frontmatter_from_book(f, book)
     content = f.read_text()
-    assert content.count("### Description") == 1
+    assert content.count("[!abstract]- Description") == 1
     assert "Existing desc" in content
     assert "New desc" not in content
 
 
 def test_update_frontmatter_from_book_adds_title_heading_when_missing(tmp_path):
     f = tmp_path / "book.md"
-    f.write_text("---\ntitle: Test Book\nauthor: null\n---\n\n## Notes\n")
+    f.write_text("---\ntitle: Test Book\nauthors: null\n---\n\n## Notes\n")
 
-    book = Book(
+    book = BookCandidate(
         title="Test Book",
         authors=["Author"],
         isbn="123",
@@ -388,12 +411,12 @@ def test_update_frontmatter_from_book_adds_title_heading_when_missing(tmp_path):
 def test_update_frontmatter_from_book_does_not_overwrite(tmp_path):
     f = tmp_path / "book.md"
     f.write_text(
-        "---\ntitle: My Title\nauthor:\n- Original\nisbn: '999'\n"
-        "page_count: 50\npublished_date: '2019'\ngoogle_books_id: existing\n"
-        "thumbnail: http://old.jpg\ngenres:\n- Nonfiction\n---\n"
+        "---\ntitle: My Title\nauthors:\n- Original\nisbn: '999'\n"
+        "page_count: 50\ndate_published: '2019'\ngoogle_books_id: existing\n"
+        "cover_thumbnail: http://old.jpg\ngenres:\n- Nonfiction\n---\n"
     )
 
-    book = Book(
+    book = BookCandidate(
         title="Other Title",
         authors=["Author B"],
         isbn="111",
@@ -535,10 +558,12 @@ def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
     file_path = tmp_path / "good_book.md"
     # Write a file with all fields present and title already standardized
     file_path.write_text(
-        "---\ntitle: The Great Gatsby\nauthor:\n- F. Scott Fitzgerald\nisbn: '123'\n"
-        "page_count: 200\npublished_date: '1925'\ngoogle_books_id: abc\n"
-        "thumbnail: null\ngenres: null\ntags: Book\nformat: null\n"
-        "status: To Read\nrating: null\nreferred_by: null\n"
+        "---\nlibris_id: 01JQ8Z3K7M4X2VB9WCN5PDRT6E\n"
+        "title: The Great Gatsby\nauthors:\n- F. Scott Fitzgerald\nisbn: '123'\n"
+        "page_count: 200\ndate_published: '1925'\ngoogle_books_id: abc\n"
+        "cover_thumbnail: null\ngenres: null\nseries: null\n"
+        "status: To Read\npriority: null\nrating: null\nformat: null\n"
+        "tags: Book\nreferred_by: null\n"
         "date_added: null\ndate_started: null\ndate_finished: null\n---\n"
     )
 
@@ -551,26 +576,26 @@ def test_ensure_frontmatter_no_update_when_title_already_standard(tmp_path):
 
 def test_compute_canonical_filename(tmp_path):
     f = tmp_path / "old name.md"
-    f.write_text("---\ntitle: The Great Gatsby\nauthor:\n- F. Scott Fitzgerald\n---\n")
+    f.write_text("---\ntitle: The Great Gatsby\nauthors:\n- F. Scott Fitzgerald\n---\n")
     result = compute_canonical_filename(f)
     assert result == "The Great Gatsby - F. Scott Fitzgerald.md"
 
 
 def test_compute_canonical_filename_missing_author(tmp_path):
     f = tmp_path / "no_author.md"
-    f.write_text("---\ntitle: Solo Title\nauthor: null\n---\n")
+    f.write_text("---\ntitle: Solo Title\nauthors: null\n---\n")
     assert compute_canonical_filename(f) is None
 
 
 def test_compute_canonical_filename_missing_title(tmp_path):
     f = tmp_path / "no_title.md"
-    f.write_text("---\ntitle: null\nauthor:\n- Someone\n---\n")
+    f.write_text("---\ntitle: null\nauthors:\n- Someone\n---\n")
     assert compute_canonical_filename(f) is None
 
 
 def test_compute_canonical_filename_sanitizes(tmp_path):
     f = tmp_path / "bad.md"
-    f.write_text("---\ntitle: 'Title: With Colon'\nauthor:\n- Author\n---\n")
+    f.write_text("---\ntitle: 'Title: With Colon'\nauthors:\n- Author\n---\n")
     result = compute_canonical_filename(f)
     assert ":" not in result
     assert result == "Title With Colon - Author.md"
@@ -633,7 +658,7 @@ def test_update_wikilinks_excludes_target_file(tmp_path):
 
 def test_rename_book_file(tmp_path):
     f = tmp_path / "wrong name.md"
-    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    f.write_text("---\ntitle: Dune\nauthors:\n- Frank Herbert\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "renamed"
     assert result.new_path.name == "Dune - Frank Herbert.md"
@@ -643,7 +668,7 @@ def test_rename_book_file(tmp_path):
 
 def test_rename_book_file_updates_links(tmp_path):
     book = tmp_path / "wrong name.md"
-    book.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    book.write_text("---\ntitle: Dune\nauthors:\n- Frank Herbert\n---\n")
     note = tmp_path / "reading log.md"
     note.write_text("Currently reading [[wrong name]].\n")
 
@@ -655,7 +680,7 @@ def test_rename_book_file_updates_links(tmp_path):
 
 def test_rename_book_file_collision_skips(tmp_path):
     f = tmp_path / "wrong name.md"
-    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    f.write_text("---\ntitle: Dune\nauthors:\n- Frank Herbert\n---\n")
     collision = tmp_path / "Dune - Frank Herbert.md"
     collision.write_text("---\ntitle: Dune\n---\n")
 
@@ -667,14 +692,14 @@ def test_rename_book_file_collision_skips(tmp_path):
 
 def test_rename_book_file_already_canonical(tmp_path):
     f = tmp_path / "Dune - Frank Herbert.md"
-    f.write_text("---\ntitle: Dune\nauthor:\n- Frank Herbert\n---\n")
+    f.write_text("---\ntitle: Dune\nauthors:\n- Frank Herbert\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "already_canonical"
 
 
 def test_rename_book_file_missing_title(tmp_path):
     f = tmp_path / "some file.md"
-    f.write_text("---\ntitle: null\nauthor:\n- Some Author\n---\n")
+    f.write_text("---\ntitle: null\nauthors:\n- Some Author\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_title"
     assert f.exists()
@@ -682,7 +707,7 @@ def test_rename_book_file_missing_title(tmp_path):
 
 def test_rename_book_file_missing_author(tmp_path):
     f = tmp_path / "some file.md"
-    f.write_text("---\ntitle: Some Title\nauthor: null\n---\n")
+    f.write_text("---\ntitle: Some Title\nauthors: null\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_author"
     assert f.exists()
@@ -690,13 +715,13 @@ def test_rename_book_file_missing_author(tmp_path):
 
 def test_rename_book_file_empty_author_list(tmp_path):
     f = tmp_path / "some file.md"
-    f.write_text("---\ntitle: Some Title\nauthor: []\n---\n")
+    f.write_text("---\ntitle: Some Title\nauthors: []\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_author"
 
 
 def test_rename_book_file_whitespace_title(tmp_path):
     f = tmp_path / "some file.md"
-    f.write_text("---\ntitle: '   '\nauthor:\n- Author\n---\n")
+    f.write_text("---\ntitle: '   '\nauthors:\n- Author\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_title"
