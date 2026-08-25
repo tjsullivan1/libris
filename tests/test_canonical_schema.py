@@ -16,11 +16,13 @@ from libris.importer import _build_vault_index
 from libris.markdown import (
     compute_canonical_filename,
     create_book_note,
+    ensure_frontmatter_fields,
     find_duplicates,
+    read_frontmatter,
     rename_book_file,
     update_book_status,
 )
-from libris.note_format import InvalidFieldValue
+from libris.note_format import InvalidFieldValue, read_formats
 
 # The exact key set present on all 3,137 notes in the vault.
 CANONICAL_FRONTMATTER = {
@@ -353,11 +355,168 @@ def test_updating_to_a_known_status_is_allowed(tmp_path):
     assert "status: Read" in path.read_text(encoding="utf-8")
 
 
-def test_format_is_not_validated_yet(tmp_path):
-    # Given the vault holds format as both string and list, in mixed case
-    # When a note is created with a bare string, as `libris add -f` writes today
+def test_format_is_normalised_rather_than_taken_as_given(tmp_path):
+    # Given a bare string, as `libris add -f` used to write
     path = create_book_note(_candidate(), tmp_path, overrides={"format": "Audiobook"})
 
-    # Then it is accepted. Validating this needs the field's type settled and
-    # 1,341 notes migrated first, which is its own piece of work.
-    assert path.exists()
+    # Then it is stored as the list the Library defines (#69, ADR 0017). This
+    # test used to assert the opposite, pinning the gap until it was closed.
+    assert read_frontmatter(path)["format"] == ["Audiobook"]
+
+
+# --- format is a list from a closed vocabulary (#69, ADR 0017) ---
+#
+# Measured before writing these. The vault holds eleven shapes across two types:
+# 1,341 bare strings (only Audiobook variants, 1,280 from one Audible import),
+# 873 lists (only Physical/Ebook/Audiobook, written by Obsidian), 35 lowercase,
+# 4 empty lists, and 3 genuinely multi-valued notes.
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("Audiobook", ["Audiobook"]),
+        ("audiobook", ["Audiobook"]),
+        ("ebook", ["Ebook"]),
+        (["Physical"], ["Physical"]),
+        (["Physical", "Audiobook"], ["Physical", "Audiobook"]),
+        ([], []),
+        (None, []),
+        (42, []),
+        (["Physical", "", None], ["Physical"]),
+    ],
+)
+def test_every_shape_the_vault_holds_reads_as_a_list(raw, expected):
+    # Given each shape measured in the vault
+    # When it is read
+    # Then it becomes the list of formats it meant
+    assert read_formats(raw) == expected
+
+
+def test_a_multi_format_note_keeps_both(tmp_path):
+    # Given a book owned on paper and listened to - three notes say this
+    path = create_book_note(
+        BookCandidate(title="Changes", authors=["Jim Butcher"]),
+        tmp_path,
+        overrides={"format": ["Physical", "Audiobook"]},
+    )
+
+    # Then nothing is lost
+    assert read_frontmatter(path)["format"] == ["Physical", "Audiobook"]
+
+
+def test_a_bare_string_format_is_stored_as_a_list(tmp_path):
+    # Given a writer that still sends a scalar, as the importer did
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        tmp_path,
+        overrides={"format": "Audiobook"},
+    )
+
+    # Then the note holds the shape the Library defines
+    assert read_frontmatter(path)["format"] == ["Audiobook"]
+
+
+def test_a_lowercase_format_is_corrected(tmp_path):
+    # Given the lowercase the old help text invited - 35 notes carry it
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        tmp_path,
+        overrides={"format": "audiobook"},
+    )
+
+    # Then case is repaired rather than refused; it names a real format
+    assert read_frontmatter(path)["format"] == ["Audiobook"]
+
+
+def test_a_format_outside_the_vocabulary_is_refused(tmp_path):
+    # Given a value no note in the vault holds, and which guessing cannot repair
+    # When it is written
+    # Then it is refused (ADR 0017)
+    with pytest.raises(InvalidFieldValue):
+        create_book_note(
+            BookCandidate(title="Dune", authors=["Frank Herbert"]),
+            tmp_path,
+            overrides={"format": "Kindle"},
+        )
+
+
+def test_one_bad_format_among_good_ones_is_refused(tmp_path):
+    # Given a list where only one entry is wrong
+    with pytest.raises(InvalidFieldValue) as excinfo:
+        create_book_note(
+            BookCandidate(title="Dune", authors=["Frank Herbert"]),
+            tmp_path,
+            overrides={"format": ["Physical", "Kindle"]},
+        )
+
+    # Then the message names the offending value, not the whole list
+    assert "Kindle" in str(excinfo.value)
+
+
+def test_cleanup_repairs_a_format_obsidian_could_have_written(tmp_path):
+    # Given a note edited outside Libris into the old scalar shape
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("format: null", "format: audiobook"), encoding="utf-8")
+
+    # When cleanup runs
+    updated, data = ensure_frontmatter_fields(path)
+
+    # Then shape and case are repaired, because Obsidian is a writer Libris
+    # cannot guard and this is where notes are actually edited (ADR 0017)
+    assert updated is True
+    assert data["format"] == ["Audiobook"]
+
+
+def test_cleanup_leaves_a_conforming_format_alone(tmp_path):
+    # Given a note already in the right shape
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        tmp_path,
+        overrides={"format": ["Physical"]},
+    )
+
+    # When cleanup runs
+    _, data = ensure_frontmatter_fields(path)
+
+    # Then it is unchanged
+    assert data["format"] == ["Physical"]
+
+
+def test_cleanup_turns_an_empty_format_list_into_unset(tmp_path):
+    # Given the four notes in the vault holding an empty list
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("format: null", "format: []"), encoding="utf-8")
+
+    # When cleanup runs
+    _, data = ensure_frontmatter_fields(path)
+
+    # Then it is unset: an empty list and no value say the same thing
+    assert data["format"] is None
+
+
+def test_cleanup_dry_run_reports_without_writing(tmp_path):
+    # Given a note Obsidian left in the old scalar shape
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("format: null", "format: audiobook"), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+
+    # When cleanup is asked what it would do
+    updated, data = ensure_frontmatter_fields(path, dry_run=True)
+
+    # Then it reports the repair it would make
+    assert updated is True
+    assert data["format"] == ["Audiobook"]
+
+    # And the note on disk is untouched, so 1,341 of these can be previewed
+    # before any of them is rewritten
+    assert path.read_text(encoding="utf-8") == before

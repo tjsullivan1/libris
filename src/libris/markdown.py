@@ -16,6 +16,8 @@ from .note_format import (
     SUPERSEDED_IDS_FIELD,
     has_description_callout,
     mint_libris_id,
+    normalize_field_value,
+    read_formats,
     read_superseded_ids,
     render_body,
     render_description_callout,
@@ -223,6 +225,7 @@ def create_book_note(
                     f"Unknown frontmatter field: '{key}'. "
                     f"Valid fields: {', '.join(DEFAULT_FRONTMATTER.keys())}"
                 )
+            value = normalize_field_value(key, value)
             validate_field_value(key, value)
             frontmatter[key] = value
 
@@ -259,12 +262,21 @@ def list_books(vault_path: Path):
     ]
 
 
-def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str, Any]]]:
+def ensure_frontmatter_fields(
+    file_path: Path, dry_run: bool = False
+) -> tuple[bool, Optional[Dict[str, Any]]]:
     """Ensures that all current fields exist in the note's frontmatter.
 
-    Returns a tuple of (updated, frontmatter_dict). The dict is the cleaned
-    frontmatter data (whether or not it was written back), or None if the
-    frontmatter could not be parsed.
+    Args:
+        file_path: The Book Note to repair.
+        dry_run: Report what would change without writing it. This pass is what
+            migrates `format` across the Shelf (ADR 0017), so it can be
+            previewed before it rewrites anything.
+
+    Returns:
+        A tuple of (updated, frontmatter_dict). The dict is the cleaned
+        frontmatter data, whether or not it was written back, or None if the
+        frontmatter could not be parsed.
     """
     content = file_path.read_text(encoding="utf-8")
 
@@ -318,6 +330,15 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
         data["authors"] = [data["authors"]]
         updated = True
 
+    # Repair format's shape and case, the same way authors is repaired above.
+    # Obsidian writes this field too and Libris cannot guard it there, so the
+    # rule is applied on every pass rather than once in a migration (ADR 0017).
+    if "format" in data:
+        formats = read_formats(data["format"]) or None
+        if formats != data["format"]:
+            data["format"] = formats
+            updated = True
+
     # Standardize title casing and strip annotations
     title_val = data.get("title")
     if title_val and isinstance(title_val, str):
@@ -337,7 +358,7 @@ def ensure_frontmatter_fields(file_path: Path) -> tuple[bool, Optional[Dict[str,
         rest_of_content = f"# {title}\n\n{rest_of_content.lstrip()}"
         updated = True
 
-    if updated:
+    if updated and not dry_run:
         # Use dump but ensure we don't add unnecessary trailing newlines or spaces
         new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
         # Ensure there is exactly one newline before and after the rest of the content

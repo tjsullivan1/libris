@@ -279,7 +279,7 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
             "--status",
             "Read",
             "--format",
-            "kindle",
+            "Audiobook",
             "--rating",
             "5",
             "--referred-by",
@@ -299,7 +299,7 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
     assert captured["status"] == "Read"
     assert captured["overrides"] == {
         "status": "Read",
-        "format": "kindle",
+        "format": ["Audiobook"],
         "rating": 5,
         "referred_by": "Alice",
         "tags": "Sci-Fi,Classic",
@@ -407,4 +407,52 @@ def test_add_refuses_an_unknown_status_before_searching(monkeypatch):
     assert result.exit_code != 0
     assert "finished" in result.output
     assert "To Read" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_add_accepts_more_than_one_format(monkeypatch, tmp_path):
+    # Given a book owned on paper and listened to
+    from libris.api import BookCandidate
+
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search",
+        lambda self, q: [BookCandidate(title="Changes", authors=["Jim Butcher"])],
+    )
+
+    class _Selection:
+        def ask(self):
+            return "Changes by Jim Butcher"
+
+    monkeypatch.setattr("libris.cli.questionary.select", lambda *a, **k: _Selection())
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+
+    captured = {}
+
+    def fake_create(book, vault_path, status, overrides):
+        captured["overrides"] = overrides
+        return vault_path / "Changes.md"
+
+    monkeypatch.setattr("libris.cli.create_book_note", fake_create)
+
+    # When both are given
+    result = runner.invoke(app, ["add", "Changes", "-f", "Physical", "-f", "Audiobook"])
+
+    # Then the CLI can express everything the field holds (ADR 0017)
+    assert result.exit_code == 0
+    assert captured["overrides"]["format"] == ["Physical", "Audiobook"]
+
+
+def test_add_refuses_an_unknown_format_before_searching(monkeypatch):
+    # Given a search that would fail loudly if it ran
+    def _never(*args, **kwargs):
+        raise AssertionError("the API was called despite an invalid format")
+
+    monkeypatch.setattr("libris.cli.GoogleBooksClient.search", _never)
+
+    # When a book is added with a format the Library does not define
+    result = runner.invoke(app, ["add", "Dune", "-f", "kindle"])
+
+    # Then it is refused up front, and the message says what is allowed
+    assert result.exit_code != 0
+    assert "Physical" in result.output
     assert "Traceback" not in result.output

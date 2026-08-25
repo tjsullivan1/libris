@@ -86,7 +86,8 @@ def test_parse_audible_json_basic(tmp_path):
     assert books[0].title == "The Great Book"
     assert books[0].authors == ["Jane Smith"]
     assert books[0].status == "Read"
-    assert books[0].format == "Audiobook"
+    # A list since ADR 0017: the reader may have a book in more than one medium.
+    assert books[0].format == ["Audiobook"]
     assert books[0].source_format == "audible-json"
 
     assert books[1].title == "Another Book"
@@ -170,10 +171,10 @@ def test_import_new_books_apply(tmp_path):
         content = f.read_text(encoding="utf-8")
         if "Book One" in content:
             assert "status: To Read" in content
-            assert "format: Audiobook" in content
+            assert "format:\n- Audiobook" in content
         elif "Book Two" in content:
             assert "status: Read" in content
-            assert "format: Audiobook" in content
+            assert "format:\n- Audiobook" in content
 
 
 def test_import_detects_duplicates(tmp_path):
@@ -188,7 +189,7 @@ def test_import_detects_duplicates(tmp_path):
         title="Existing Book",
         authors=["Author A"],
         status="Read",
-        format="Audiobook",
+        format=["Audiobook"],
     )
 
     data = [
@@ -252,7 +253,7 @@ def test_import_updates_format_on_duplicate(tmp_path):
     assert "format" in result.updated_books[0][2]
 
     content = existing.read_text(encoding="utf-8")
-    assert "format: Audiobook" in content
+    assert "format:\n- Audiobook" in content
 
 
 def test_import_updates_format_when_field_missing(tmp_path):
@@ -276,7 +277,7 @@ def test_import_updates_format_when_field_missing(tmp_path):
     assert "format" in result.updated_books[0][2]
 
     content = existing.read_text(encoding="utf-8")
-    assert "format: Audiobook" in content
+    assert "format:\n- Audiobook" in content
 
 
 def test_import_updates_both_status_and_format(tmp_path):
@@ -304,7 +305,7 @@ def test_import_updates_both_status_and_format(tmp_path):
 
     content = existing.read_text(encoding="utf-8")
     assert "status: Read" in content
-    assert "format: Audiobook" in content
+    assert "format:\n- Audiobook" in content
 
 
 def test_import_skips_up_to_date_duplicate(tmp_path):
@@ -318,7 +319,7 @@ def test_import_skips_up_to_date_duplicate(tmp_path):
         title="My Book",
         authors=["Author A"],
         status="Read",
-        format="Audiobook",
+        format=["Audiobook"],
     )
 
     data = [{"title": "My Book", "author": "Author A", "finished": "Yes"}]
@@ -356,7 +357,7 @@ def test_import_case_insensitive_duplicate(tmp_path):
         title="The Great Book",
         authors=["Jane Smith"],
         status="Read",
-        format="Audiobook",
+        format=["Audiobook"],
     )
 
     # Same book with different casing

@@ -5,6 +5,7 @@ from datetime import date
 from libris.markdown import BookNote
 from libris.migrate import (
     leaked_alias_keys,
+    plan_note_format_migration,
     plan_note_migration,
     recover_title,
     reorder_frontmatter,
@@ -292,3 +293,119 @@ def test_a_note_without_frontmatter_is_skipped_not_mangled(tmp_path):
     # Then it is left exactly as it was, and says why
     assert not plan.changed
     assert plan.warnings == ["no parseable frontmatter; skipped"]
+
+
+# --- targeted format migration (#69, ADR 0017) ---
+
+
+def _note_with_format(tmp_path, name, format_block):
+    """Write a Book Note whose frontmatter carries the given format lines."""
+    path = tmp_path / f"{name}.md"
+    path.write_text(
+        "---\n"
+        "libris_id: 01TEST\n"
+        f"title: {name}\n"
+        "authors:\n"
+        "  - Frank Herbert\n"
+        "status: Read\n"
+        f"{format_block}\n"
+        "tags: Book\n"
+        "---\n"
+        "\n"
+        f"# {name}\n"
+        "\n"
+        "## Notes\n"
+        "\n"
+        "Mine, and not to be touched.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_a_bare_string_format_is_planned_as_a_list(tmp_path):
+    # Given the shape the Audible import wrote 1,306 times
+    path = _note_with_format(tmp_path, "Dune", "format: Audiobook")
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then it becomes the list the Library defines, indented the way this vault
+    # already writes lists
+    assert plan.changed is True
+    assert "format:\n  - Audiobook" in plan.migrated
+    assert plan.changes == ["format"]
+
+
+def test_a_lowercase_format_is_planned_as_title_case(tmp_path):
+    # Given the lowercase the old help text invited
+    path = _note_with_format(tmp_path, "Dune", "format: audiobook")
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then case is repaired
+    assert "format:\n  - Audiobook" in plan.migrated
+
+
+def test_an_already_canonical_format_is_left_alone(tmp_path):
+    # Given a note Obsidian wrote correctly - 873 of them
+    path = _note_with_format(tmp_path, "Dune", "format:\n  - Physical")
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then nothing is rewritten, so the run touches only what needs it
+    assert plan.changed is False
+
+
+def test_an_empty_format_list_becomes_unset(tmp_path):
+    # Given one of the four notes holding an empty list
+    path = _note_with_format(tmp_path, "Dune", "format: []")
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then it is unset: an empty list and no value say the same thing
+    assert plan.changed is True
+    assert "format:\n" in plan.migrated
+    assert "- " not in plan.migrated.split("tags:")[0].split("format:")[1]
+
+
+def test_an_unknown_format_is_reported_not_guessed_at(tmp_path):
+    # Given a value the vocabulary does not define
+    path = _note_with_format(tmp_path, "Dune", "format: Kindle")
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then the note is left alone and the reason is reported, because guessing
+    # what it meant is the silent wrongness ADR 0003 refuses
+    assert plan.changed is False
+    assert plan.warnings
+    assert "Kindle" in plan.warnings[0]
+
+
+def test_the_body_is_never_touched(tmp_path):
+    # Given a note with the reader's own writing in it
+    path = _note_with_format(tmp_path, "Dune", "format: Audiobook")
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then only the frontmatter moves
+    assert "Mine, and not to be touched." in plan.migrated
+    assert plan.migrated.split("---", 2)[2] == plan.original.split("---", 2)[2]
+
+
+def test_a_note_without_a_format_field_is_left_alone(tmp_path):
+    # Given a note predating the field
+    path = tmp_path / "Old.md"
+    path.write_text(
+        "---\nlibris_id: 01TEST\ntitle: Old\n---\n\n# Old\n", encoding="utf-8"
+    )
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then nothing is invented
+    assert plan.changed is False

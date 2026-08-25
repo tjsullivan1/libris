@@ -29,7 +29,7 @@ class ImportBook:
 
     candidate: BookCandidate
     status: str  # "Read", "To Read", "Reading"
-    format: str | None = None  # "Audiobook", "Hardcover", "Paperback", "eBook"
+    format: list[str] = field(default_factory=list)  # see note_format.FORMAT_VALUES
     source_format: str = ""
 
     @property
@@ -71,7 +71,7 @@ def parse_audible_json(path: Path) -> List[ImportBook]:
             ImportBook(
                 candidate=BookCandidate(title=title, authors=authors, source="audible"),
                 status=status,
-                format="Audiobook",
+                format=["Audiobook"],
                 source_format="audible-json",
             )
         )

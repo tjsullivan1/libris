@@ -16,13 +16,17 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 from .markdown import BookNote, list_books
 from .note_format import (
+    FORMAT_VALUES,
     LEAKED_HEADINGS,
     MODELLED_FIELDS,
     has_description_callout,
     has_title_heading,
     mint_libris_id,
+    read_formats,
     render_body,
     split_body,
 )
@@ -290,6 +294,87 @@ def plan_migration(vault_path: Path) -> list[NoteMigration]:
         One plan per note, including notes that need no change.
     """
     return [plan_note_migration(path) for path in list_books(vault_path)]
+
+
+def _render_formats(formats: list[str]) -> str:
+    """Render a format value the way the vault already writes lists."""
+    if not formats:
+        return "format:"
+    # Two-space indent, which is how every list in this vault is already
+    # written - anything else rewrites 873 notes to say the same thing.
+    lines = ["format:"]
+    lines.extend(f"  - {name}" for name in formats)
+    return "\n".join(lines)
+
+
+def plan_note_format_migration(path: Path) -> NoteMigration:
+    """Plan the format rewrite for one Book Note (ADR 0017).
+
+    Touches `format` and nothing else. Running the whole `cleanup` pass would
+    also restandardise titles - measured at 41 notes on this Shelf, seven of
+    them lowercasing a word that should not be - and a format migration is no
+    place to decide that.
+
+    Args:
+        path: The Book Note to plan.
+
+    Returns:
+        The plan, unchanged when the note's format is already canonical.
+    """
+    # Read through universal newlines and write plain ones, exactly as
+    # plan_note_migration does. The Shelf is stored CRLF, and the platform adds
+    # that back on write - emitting it here too produced \r\r\n on 1,345 notes.
+    original = path.read_text(encoding="utf-8")
+
+    match = re.match(r"^---\n(.*?)\n---\n(.*)$", original, re.DOTALL)
+    if match is None:
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=["no parseable frontmatter"],
+        )
+
+    frontmatter_text, body = match.group(1), match.group(2)
+    blocks = split_frontmatter_blocks(frontmatter_text)
+    if not any(key == "format" for key, _ in blocks):
+        return NoteMigration(path=path, original=original, migrated=original)
+
+    current = yaml.safe_load(frontmatter_text) or {}
+    formats = read_formats(current.get("format"))
+
+    unknown = [name for name in formats if name not in FORMAT_VALUES]
+    if unknown:
+        # Guessing what an unknown format meant is exactly the silent wrongness
+        # ADR 0003 refuses, so it is reported and left alone.
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=[f"format not in the vocabulary: {', '.join(unknown)}"],
+        )
+
+    rendered = _render_formats(formats)
+    rebuilt = [(key, rendered if key == "format" else raw) for key, raw in blocks]
+    new_frontmatter = "\n".join(raw for _, raw in rebuilt)
+    migrated = f"---\n{new_frontmatter}\n---\n{body}"
+
+    changes = ["format"] if migrated != original else []
+    return NoteMigration(
+        path=path, original=original, migrated=migrated, changes=changes
+    )
+
+
+def plan_format_migration(vault_path: Path) -> list[NoteMigration]:
+    """Plan the format rewrite for every Book Note on the Shelf.
+
+    Args:
+        vault_path: The Shelf to migrate.
+
+    Returns:
+        One plan per note, including notes that need no change.
+    """
+    return [plan_note_format_migration(path) for path in list_books(vault_path)]
 
 
 def apply_migration(plans: list[NoteMigration]) -> int:
