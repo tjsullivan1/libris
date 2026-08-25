@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .markdown import read_frontmatter
+from .note_format import SUPERSEDED_IDS_FIELD, read_superseded_ids
 
 
 @dataclass
@@ -129,6 +130,45 @@ def _resolve_field_value(
     return primary_value, True
 
 
+def _collect_superseded_ids(
+    primary_fm: Dict[str, Any], secondary_fm: Dict[str, Any]
+) -> List[str]:
+    """Gather every identity the surviving note should answer for (ADR 0014).
+
+    A merge destroys the secondary note, and its Libris ID with it unless the
+    survivor records it. The secondary may itself have absorbed others, so the
+    chain carries forward: without that, a second merge silently breaks what the
+    first one preserved.
+
+    Args:
+        primary_fm: Frontmatter of the surviving note.
+        secondary_fm: Frontmatter of the note being merged away.
+
+    Returns:
+        The superseded identities, in the order they were absorbed, without
+        duplicates and never including the survivor's own live identity.
+    """
+    survivor_id = primary_fm.get("libris_id")
+
+    # Read through the shared rule rather than iterating the raw value: a bare
+    # string would otherwise be walked character by character, and every letter
+    # would look like an identity.
+    candidates: List[Any] = []
+    candidates.extend(read_superseded_ids(primary_fm.get(SUPERSEDED_IDS_FIELD)))
+    candidates.append(secondary_fm.get("libris_id"))
+    candidates.extend(read_superseded_ids(secondary_fm.get(SUPERSEDED_IDS_FIELD)))
+
+    collected: List[str] = []
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        identity = value.strip()
+        if not identity or identity == survivor_id or identity in collected:
+            continue
+        collected.append(identity)
+    return collected
+
+
 def merge_two_books(
     primary_path: Path, secondary_path: Path, allow_conflicts: bool = False
 ) -> Tuple[Dict[str, Any], str, List[MergeConflict]]:
@@ -174,6 +214,15 @@ def merge_two_books(
 
         if has_conflict:
             conflicts.append(MergeConflict(field, primary_val, secondary_val))
+
+    # The secondary is about to be deleted, so the survivor takes on the
+    # identities it answered for (ADR 0014). Done outside the field loop because
+    # this is not a value being reconciled: it is the record of what was destroyed.
+    superseded = _collect_superseded_ids(primary_fm, secondary_fm)
+    if superseded:
+        merged_fm[SUPERSEDED_IDS_FIELD] = superseded
+    else:
+        merged_fm.pop(SUPERSEDED_IDS_FIELD, None)
 
     # If there are conflicts and we don't allow them, return early
     if conflicts and not allow_conflicts:

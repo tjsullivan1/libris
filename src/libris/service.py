@@ -136,6 +136,49 @@ def lookup_candidates(
     return ranked
 
 
+def find_by_libris_id(vault_path: Path, libris_id: str) -> BookNote | None:
+    """Resolve a Libris ID to the Book Note that answers for it.
+
+    A note merged away leaves its identity on the survivor (ADR 0014), so an
+    Intent naming an ID that no longer lives anywhere still applies rather than
+    being rejected for a note Libris itself destroyed.
+
+    Args:
+        vault_path: The Shelf to search.
+        libris_id: The identity to resolve.
+
+    Returns:
+        The Book Note holding that identity, the note that superseded it, or
+        None. A live identity always wins over a superseded one.
+
+    Note:
+        Guaranteeing that a live identity wins means the scan cannot stop at the
+        first superseded match, so resolving an identity that is superseded or
+        unknown reads every Book Note: about 14 seconds against the 3,136-note
+        Shelf. Resolving one Intent that way is fine; resolving a queue of them
+        in a loop is not. A caller with many to resolve should build an index in
+        one pass instead.
+    """
+    wanted = libris_id.strip() if libris_id else ""
+    if not wanted:
+        # Checked after stripping: a whitespace-only id would otherwise read
+        # every note on the Shelf to find nothing.
+        return None
+
+    superseding: BookNote | None = None
+
+    for book_path in list_books(vault_path):
+        note = BookNote.read(book_path)
+        if note is None:
+            continue
+        if note.libris_id == wanted:
+            return note
+        if superseding is None and wanted in note.superseded_ids:
+            superseding = note
+
+    return superseding
+
+
 def find_existing(
     vault_path: Path,
     isbn: str | None = None,

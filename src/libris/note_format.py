@@ -39,6 +39,14 @@ FIELD_VOCABULARIES = {
 }
 DATE_FIELDS = ("date_added", "date_started", "date_finished")
 
+# The identities of Book Notes merged into this one (ADR 0014). Deliberately
+# NOT part of MODELLED_FIELDS: it is absent on a note that has never absorbed
+# another, which is all but a handful, and adding it to the canonical shape
+# would write `superseded_ids: null` into every note in the Shelf to say
+# nothing. Both `ensure_frontmatter_fields` and the migration preserve keys
+# they do not model, so a note that carries it keeps it.
+SUPERSEDED_IDS_FIELD = "superseded_ids"
+
 MODELLED_FIELDS = IDENTITY_FIELDS + BIBLIOGRAPHIC_FIELDS + READING_FIELDS + DATE_FIELDS
 
 # Headings the linter mistook for a title, and the values that leaked from them.
@@ -85,6 +93,28 @@ def validate_field_value(field: str, value: object) -> None:
         raise InvalidFieldValue(
             f"Invalid {field}: {value!r}. Valid values: {', '.join(allowed)}."
         )
+
+
+def read_superseded_ids(value: object) -> list[str]:
+    """Read a `superseded_ids` value into the list of identities it means.
+
+    Frontmatter arrives from YAML and may hold any shape. This vault writes
+    list-shaped fields as bare strings often enough to matter - 1,341 notes do
+    it with `format` - and a bare string here is especially dangerous, because
+    iterating one yields characters that each look like an identity.
+
+    Args:
+        value: Whatever the frontmatter held.
+
+    Returns:
+        The identities, with blanks dropped. Anything that is neither a string
+        nor a list names no identity at all.
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 def mint_libris_id(date_added: object) -> str:

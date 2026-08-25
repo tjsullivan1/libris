@@ -13,8 +13,10 @@ from titlecase import titlecase
 from .api import BookCandidate
 from .note_format import (
     MODELLED_FIELDS,
+    SUPERSEDED_IDS_FIELD,
     has_description_callout,
     mint_libris_id,
+    read_superseded_ids,
     render_body,
     render_description_callout,
     validate_field_value,
@@ -94,6 +96,16 @@ class BookNote:
         """The note's stable identity, or None until the vault is migrated."""
         value = self.frontmatter.get("libris_id")
         return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def superseded_ids(self) -> list[str]:
+        """Identities of Book Notes merged into this one (ADR 0014).
+
+        Returns:
+            The superseded identities, or an empty list. A note that has never
+            absorbed another does not carry the field at all.
+        """
+        return read_superseded_ids(self.frontmatter.get(SUPERSEDED_IDS_FIELD))
 
     @property
     def title(self) -> str | None:

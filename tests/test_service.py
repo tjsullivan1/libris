@@ -8,12 +8,16 @@ tests exercise that layer directly, with no HTTP involved.
 import pytest
 
 from libris.api import BookCandidate
-from libris.markdown import create_book_note
+from libris.markdown import (
+    BookNote,  # noqa: F401
+    create_book_note,
+)
 from libris.note_format import InvalidFieldValue
 from libris.service import (
     Outcome,
     add_book,
     build_lookup_query,
+    find_by_libris_id,
     find_existing,
     is_isbn10,
 )
@@ -212,3 +216,75 @@ def test_adding_refuses_an_unknown_field(tmp_path):
     # Then it is refused
     with pytest.raises(ValueError):
         add_book(tmp_path, _candidate(), overrides={"nonsense": "x"})
+
+
+# --- resolution through superseded ids (#64, ADR 0014) ---
+
+
+def test_a_live_libris_id_resolves(tmp_path):
+    # Given a Book Note on the Shelf
+    path = create_book_note(_candidate(), tmp_path)
+    note = BookNote.read(path)
+
+    # When it is looked up by its identity
+    found = find_by_libris_id(tmp_path, note.libris_id)
+
+    # Then it is found
+    assert found is not None
+    assert found.path == path
+
+
+def test_a_superseded_id_resolves_to_the_survivor(tmp_path):
+    # Given a note that absorbed another during a merge
+    path = create_book_note(_candidate(), tmp_path)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace("title:", "superseded_ids:\n- GONE\ntitle:", 1), encoding="utf-8"
+    )
+
+    # When an Intent names the identity that was merged away
+    found = find_by_libris_id(tmp_path, "GONE")
+
+    # Then it resolves to the surviving note rather than missing, so the Intent
+    # applies instead of being rejected for a note Libris itself destroyed
+    assert found is not None
+    assert found.path == path
+
+
+def test_an_unknown_libris_id_does_not_resolve(tmp_path):
+    # Given a Shelf that never held the Book
+    create_book_note(_candidate(), tmp_path)
+
+    # When an unknown identity is looked up
+    # Then a miss is a miss (ADR 0003)
+    assert find_by_libris_id(tmp_path, "01NOPE") is None
+
+
+def test_a_live_id_wins_over_a_superseded_one(tmp_path):
+    # Given one note whose live id is what another note lists as superseded -
+    # possible only through a bad merge, but it must resolve predictably
+    live = create_book_note(_candidate(title="Live"), tmp_path)
+    live_id = BookNote.read(live).libris_id
+
+    other = create_book_note(_candidate(title="Other"), tmp_path)
+    text = other.read_text(encoding="utf-8")
+    other.write_text(
+        text.replace("title:", f"superseded_ids:\n- {live_id}\ntitle:", 1),
+        encoding="utf-8",
+    )
+
+    # When that id is resolved
+    found = find_by_libris_id(tmp_path, live_id)
+
+    # Then the note that actually holds the identity wins
+    assert found.path == live
+
+
+def test_a_blank_libris_id_does_not_resolve(tmp_path):
+    # Given a Shelf with notes on it
+    create_book_note(_candidate(), tmp_path)
+
+    # When an empty or whitespace-only identity is resolved
+    # Then it misses immediately rather than reading every note to find nothing
+    assert find_by_libris_id(tmp_path, "") is None
+    assert find_by_libris_id(tmp_path, "   ") is None
