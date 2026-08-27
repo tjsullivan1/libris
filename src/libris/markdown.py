@@ -11,6 +11,7 @@ import yaml
 from titlecase import titlecase
 
 from .api import BookCandidate
+from .matching import normalize_for_match
 from .note_format import (
     MODELLED_FIELDS,
     SUPERSEDED_IDS_FIELD,
@@ -279,6 +280,64 @@ def list_books(vault_path: Path):
     ]
 
 
+def find_duplicate_candidates(vault_path: Path) -> list[list[BookNote]]:
+    """Find pairs of Book Notes that may describe one Book.
+
+    Matched by title containment rather than by a shared identifier, which is a
+    judgement rather than a fact: measured against the real Shelf, containment
+    conflates 83 pairs, of which roughly nine are different books - "Mercy" and
+    "Long Road to Mercy", "Freakonomics" and "SuperFreakonomics". So these are
+    offered to a person and never merged automatically (ADR 0018).
+
+    Pairs that `find_duplicates` already reports are left out; they are settled,
+    not candidates.
+
+    Args:
+        vault_path: The Shelf to search.
+
+    Returns:
+        Pairs of Book Notes, shorter title first, ordered by author then title.
+    """
+    notes: list[BookNote] = []
+    for book_path in list_books(vault_path):
+        note = BookNote.read(book_path)
+        if note is not None and note.title and note.first_author:
+            notes.append(note)
+
+    settled = set()
+    for group in find_duplicates(vault_path):
+        for a in group:
+            for b in group:
+                if a != b:
+                    settled.add(frozenset((str(a), str(b))))
+
+    by_author: dict[str, list[BookNote]] = {}
+    for note in notes:
+        by_author.setdefault(normalize_for_match(note.first_author), []).append(note)
+
+    seen = set()
+    pairs: list[list[BookNote]] = []
+    for group in by_author.values():
+        for a in group:
+            for b in group:
+                if a.path == b.path:
+                    continue
+                title_a = normalize_for_match(a.title)
+                title_b = normalize_for_match(b.title)
+                if title_a == title_b or title_a not in title_b:
+                    continue
+                key = frozenset((str(a.path), str(b.path)))
+                if key in seen or key in settled:
+                    continue
+                seen.add(key)
+                pairs.append([a, b])
+
+    pairs.sort(
+        key=lambda pair: ((pair[0].first_author or "").lower(), pair[0].title or "")
+    )
+    return pairs
+
+
 def ensure_frontmatter_fields(
     file_path: Path, dry_run: bool = False
 ) -> tuple[bool, Optional[Dict[str, Any]]]:
@@ -427,7 +486,10 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
 
     for idx, note in enumerate(notes):
         if note.title is not None:
-            title_groups.setdefault(note.title.lower(), []).append(idx)
+            # Normalized rather than lowercased: punctuation is not meaning
+            # here, and "Crucial Conversations- Tools" and "Crucial
+            # Conversations: Tools" are one Book (#72).
+            title_groups.setdefault(normalize_for_match(note.title), []).append(idx)
 
         isbn = note.frontmatter.get("isbn")
         if isbn:

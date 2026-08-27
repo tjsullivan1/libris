@@ -4,18 +4,34 @@ Merging destroys a Book Note, so the questions it asks have to be worth stopping
 that wrong in either direction is expensive: a merge that asks nothing loses data quietly, and
 one that asks about everything trains the reader to wave it through.
 
-## A conflict means a modelled field disagrees
+## A conflict means the reader's own value disagrees
 
 `merge_two_books` compared every key in either note. 414 notes carry `date_created` and
 `date_modified`, which Obsidian writes and Libris does not model, and two different files never
 agree on them. So most merges reported a conflict, and the only way past was
 `allow_conflicts=True` - a flag that also suppresses a genuine disagreement about an ISBN.
 
-Noise that trains someone to disable a safety check is worse than no check. Conflicts are now
-reported only for fields in the canonical schema. Fields outside it take the surviving note's
+Noise that trains someone to disable a safety check is worse than no check.
+
+Restricting conflicts to the canonical schema was the first attempt, and measuring it showed the
+cut was in the wrong place: **0 of 83 Duplicate Candidate pairs merged cleanly**. Every pair
+disagreed on `libris_id`, because two notes always hold different ones; on `title`, because a
+containing title is what made them a candidate; and on `isbn`, `page_count`, `date_published` or
+`cover_thumbnail`, because two editions of one work differ. Exactly one pair disagreed about a
+`rating`.
+
+So the question is not whether the Library models a field, but whose fact it is. An ISBN belongs
+to the edition and the surviving note's will do. A Libris ID is not contested at all - the other
+is recorded as superseded (ADR 0014). A rating belongs to the reader, and two different ratings
+means they rated the same book twice; nobody else can say which stands.
+
+A merge therefore stops only for the reader's own fields: status, priority, rating, referred_by,
+the dates read, and the multi-valued format and tags. Everything else takes the surviving note's
 value without comment, and `aliases`, which is genuinely multi-valued, is unioned like the
 others. Obsidian rewrites `date_modified` on the next edit anyway, so nothing is lost that the
 editor will not restore.
+
+Under this rule 82 of the 83 pairs merge unattended and the one real question surfaces.
 
 ## Fields that hold several values are combined, and sameness is judged loosely
 

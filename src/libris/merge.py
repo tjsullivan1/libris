@@ -13,8 +13,8 @@ import yaml
 
 from .markdown import _normalize_author, read_frontmatter, tidy_author
 from .note_format import (
-    MODELLED_FIELDS,
     MULTI_VALUED_FIELDS,
+    READER_FIELDS,
     SUPERSEDED_IDS_FIELD,
     read_superseded_ids,
 )
@@ -119,14 +119,15 @@ def _resolve_field_value(
     if field in MULTI_VALUED_FIELDS:
         return _union_values(field, primary_value, secondary_value), False
 
-    # A field the Library does not model - Obsidian's timestamps, a url - takes
-    # the keeper's value without asking. Two files never agree on a timestamp,
-    # and a merge that reports that as a conflict teaches the reader to pass
-    # --allow-conflicts, which would suppress a real one (ADR 0018).
-    if field not in MODELLED_FIELDS:
+    # Everything else takes the keeper's value without asking, unless the value
+    # is the reader's own. Obsidian's timestamps never agree between two files;
+    # an ISBN, a page count or a cover differs because two editions of one work
+    # differ; and two notes always hold different Libris IDs, which ADR 0014
+    # records as superseded rather than contested. None of those is a question
+    # for a person. A rating is (ADR 0018).
+    if field not in READER_FIELDS:
         return primary_value, False
 
-    # All other fields with different values: conflict
     return primary_value, True
 
 

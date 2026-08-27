@@ -13,6 +13,12 @@ from pathlib import Path
 from .api import BookCandidate, GoogleBooksClient
 from .markdown import BookNote, create_book_note, list_books
 from .matching import best_match, normalize_for_match, titles_match
+from .merge import (
+    delete_secondary_file,
+    get_primary_book,
+    merge_two_books,
+    write_merged_book,
+)
 
 
 class Outcome(Enum):
@@ -331,3 +337,85 @@ def add_book(
         path=path,
         outcome=Outcome.CREATED,
     )
+
+
+@dataclass
+class DecisionOutcome:
+    """What became of one decision from an exported review."""
+
+    status: str  # merged, skipped, conflicted, drifted, undecided
+    detail: str
+
+
+def _resolve_pair(vault_path: Path, first_id: str, second_id: str):
+    """Find the two Book Notes a decision names, following superseded IDs."""
+    first = find_by_libris_id(vault_path, first_id)
+    second = find_by_libris_id(vault_path, second_id)
+    return first, second
+
+
+def apply_decisions(
+    vault_path: Path, decisions: list[dict], allow_conflicts: bool = False
+) -> list[DecisionOutcome]:
+    """Merge the pairs an exported review marked as one Book.
+
+    The file records a judgement made against the Shelf as it was. Rather than
+    trusting it, every pair is resolved against the Shelf as it is now, by
+    Libris ID - which survives a rename and, since ADR 0014, a merge. A pair
+    that no longer resolves has drifted and is reported rather than acted on.
+
+    Args:
+        vault_path: The Shelf to act on.
+        decisions: Decision records from the review export.
+        allow_conflicts: Merge even when a modelled field disagrees. Off by
+            default: the file answered "is this one Book", not "which ISBN is
+            right".
+
+    Returns:
+        One outcome per decision, in the order given.
+    """
+    outcomes: list[DecisionOutcome] = []
+
+    for decision in decisions:
+        verdict = decision.get("decision")
+        shorter = (decision.get("shorter") or {}).get("libris_id")
+        longer = (decision.get("longer") or {}).get("libris_id")
+        label = (decision.get("shorter") or {}).get("title") or "unknown"
+
+        if verdict != "same":
+            outcomes.append(
+                DecisionOutcome("skipped", f"{label}: recorded as two books")
+            )
+            continue
+
+        if not shorter or not longer:
+            outcomes.append(
+                DecisionOutcome("drifted", f"{label}: decision names no Libris ID")
+            )
+            continue
+
+        first, second = _resolve_pair(vault_path, shorter, longer)
+        if first is None or second is None or first.path == second.path:
+            outcomes.append(
+                DecisionOutcome("drifted", f"{label}: no longer two notes on the Shelf")
+            )
+            continue
+
+        primary = get_primary_book(first.path, second.path)
+        secondary = second.path if primary == first.path else first.path
+
+        merged_fm, merged_body, conflicts = merge_two_books(
+            primary, secondary, allow_conflicts=allow_conflicts
+        )
+        if conflicts and not allow_conflicts:
+            fields = ", ".join(sorted({c.field for c in conflicts}))
+            outcomes.append(
+                DecisionOutcome("conflicted", f"{label}: {fields} disagree")
+            )
+            continue
+
+        write_merged_book(primary, merged_fm, merged_body)
+        delete_secondary_file(secondary)
+        outcomes.append(DecisionOutcome("merged", f"{label} -> {primary.name}"))
+
+    return outcomes

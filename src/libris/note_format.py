@@ -43,6 +43,25 @@ FIELD_VOCABULARIES = {
 # list arriving for one of them is the wrong shape rather than a set of values
 # to check one by one - `status: [Read]` must be refused, not accepted - and a
 # merge unions these rather than reporting a conflict and keeping one side.
+# Fields whose value belongs to the reader rather than to the edition. A merge
+# stops only for these: an ISBN or a page count differs because two editions of
+# one work differ, and the surviving note's will do, but two different ratings
+# means the reader rated the same book twice and only they can say which stands
+# (ADR 0018). Measured on the real Shelf: under the old rule, where every
+# modelled field could conflict, 0 of 83 candidate pairs merged cleanly.
+READER_FIELDS = frozenset(
+    {
+        "status",
+        "priority",
+        "rating",
+        "referred_by",
+        "date_started",
+        "date_finished",
+        "format",
+        "tags",
+    }
+)
+
 # `aliases` is Obsidian's, not modelled here, but it genuinely holds several
 # values and a merge should combine them rather than keep one side's.
 MULTI_VALUED_FIELDS = frozenset({"authors", "genres", "tags", "format", "aliases"})
