@@ -29,7 +29,7 @@ class ImportBook:
 
     candidate: BookCandidate
     status: str  # "Read", "To Read", "Reading"
-    format: str | None = None  # "Audiobook", "Hardcover", "Paperback", "eBook"
+    format: list[str] = field(default_factory=list)  # see note_format.FORMAT_VALUES
     source_format: str = ""
 
     @property
@@ -71,7 +71,7 @@ def parse_audible_json(path: Path) -> List[ImportBook]:
             ImportBook(
                 candidate=BookCandidate(title=title, authors=authors, source="audible"),
                 status=status,
-                format="Audiobook",
+                format=["Audiobook"],
                 source_format="audible-json",
             )
         )
@@ -184,43 +184,47 @@ def _check_duplicate(
     return (note.path, fm, updates)
 
 
-def _apply_updates(path: Path, book: ImportBook, updates: List[str]):
-    """Apply field updates to an existing vault note."""
+def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
+    """Apply field updates to an existing vault note.
+
+    Args:
+        path: The Book Note to update.
+        book: The imported book carrying the new values.
+        updates: Which fields to apply.
+
+    Returns:
+        True when the note was updated, False when its frontmatter could not be
+        read - in which case nothing was written to it.
+    """
     if "status" in updates:
         update_book_status(path, book.status)
 
-    if "format" in updates:
-        content = path.read_text(encoding="utf-8")
-        # Parse frontmatter using YAML to properly handle missing fields
-        match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
+    if "format" not in updates:
+        return True
 
-        if match:
-            frontmatter_yaml = match.group(1)
-            rest_of_content = match.group(2)
+    content = path.read_text(encoding="utf-8")
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
+    if match is None:
+        return False
 
-            try:
-                data = yaml.safe_load(frontmatter_yaml)
-                if isinstance(data, dict):
-                    # Update the format field
-                    data["format"] = book.format
-                    # Write back the updated frontmatter
-                    new_frontmatter = yaml.dump(
-                        data, sort_keys=False, allow_unicode=True
-                    ).strip()
-                    # Preserve content structure: remove only leading newlines
-                    content_part = rest_of_content.lstrip("\n")
-                    new_content = f"---\n{new_frontmatter}\n---\n{content_part}"
-                    path.write_text(new_content, encoding="utf-8")
-            except yaml.YAMLError:
-                # Fallback to regex replacement if YAML parsing fails
-                pattern = r"(format:\s*)(.*)"
-                new_content = re.sub(pattern, f"\\1{book.format}", content)
-                if new_content == content:
-                    # format field might be null — replace the null value
-                    new_content = content.replace(
-                        "format: null", f"format: {book.format}"
-                    )
-                path.write_text(new_content, encoding="utf-8")
+    frontmatter_yaml, rest_of_content = match.group(1), match.group(2)
+    try:
+        data = yaml.safe_load(frontmatter_yaml)
+    except yaml.YAMLError:
+        # Deliberately no regex fallback. format is a list (ADR 0017), so a
+        # line-level substitution would write a Python repr and strand any
+        # existing block items below it, turning a note we could not parse into
+        # one nobody can. It is left alone instead.
+        return False
+
+    if not isinstance(data, dict):
+        return False
+
+    data["format"] = book.format
+    new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+    content_part = rest_of_content.lstrip("\n")
+    path.write_text(f"---\n{new_frontmatter}\n---\n{content_part}", encoding="utf-8")
+    return True
 
 
 def run_import(
@@ -259,7 +263,8 @@ def run_import(
             if updates:
                 result.updated_books.append((book, dup_path, updates))
                 if apply:
-                    _apply_updates(dup_path, book, updates)
+                    if not _apply_updates(dup_path, book, updates):
+                        result.skipped_books.append(book)
             else:
                 result.skipped_books.append(book)
 

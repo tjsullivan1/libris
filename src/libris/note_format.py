@@ -28,15 +28,21 @@ READING_FIELDS = ("status", "priority", "rating", "format", "tags", "referred_by
 
 # The values these fields may hold, taken from the vault rather than from what
 # the code used to assume (ADR 0005). Measured across all 3,136 notes: status
-# and priority already hold nothing else. `format` is absent on purpose - it
-# holds eleven shapes across two types today and needs a migration before it
-# can be constrained.
+# and priority already held nothing else. `format` held eleven shapes across
+# two types and joined them once ADR 0017 settled what it is.
 STATUS_VALUES = ("To Read", "Reading", "Read", "Not To Read")
 PRIORITY_VALUES = ("Low", "Medium", "High")
+FORMAT_VALUES = ("Physical", "Ebook", "Audiobook")
 FIELD_VOCABULARIES = {
     "status": STATUS_VALUES,
     "priority": PRIORITY_VALUES,
+    "format": FORMAT_VALUES,
 }
+
+# Fields that hold several values at once. Everything else is a scalar, and a
+# list arriving for one of them is the wrong shape rather than a set of values
+# to check one by one - `status: [Read]` must be refused, not accepted.
+MULTI_VALUED_FIELDS = frozenset({"format"})
 DATE_FIELDS = ("date_added", "date_started", "date_finished")
 
 # The identities of Book Notes merged into this one (ADR 0014). Deliberately
@@ -89,10 +95,24 @@ def validate_field_value(field: str, value: object) -> None:
     allowed = FIELD_VOCABULARIES.get(field)
     if allowed is None or value is None:
         return
-    if value not in allowed:
-        raise InvalidFieldValue(
-            f"Invalid {field}: {value!r}. Valid values: {', '.join(allowed)}."
-        )
+
+    if isinstance(value, list):
+        if field not in MULTI_VALUED_FIELDS:
+            raise InvalidFieldValue(
+                f"Invalid {field}: {value!r} is a list, but {field} holds a "
+                f"single value. Valid values: {', '.join(allowed)}."
+            )
+        # A multi-valued field is checked entry by entry, so the message names
+        # the value that is wrong rather than the whole list.
+        proposed = list(value)
+    else:
+        proposed = [value]
+
+    for item in proposed:
+        if item not in allowed:
+            raise InvalidFieldValue(
+                f"Invalid {field}: {item!r}. Valid values: {', '.join(allowed)}."
+            )
 
 
 def read_superseded_ids(value: object) -> list[str]:
@@ -115,6 +135,56 @@ def read_superseded_ids(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def read_formats(value: object) -> list[str]:
+    """Read a `format` value into the list of media it means (ADR 0017).
+
+    The Shelf holds this field in two shapes, written by two different tools:
+    Libris wrote a bare string, Obsidian's property editor writes a list. Both
+    read the same way here, and case is repaired, because "audiobook" names a
+    real format and refusing it would only punish the reader for the help text
+    Libris used to print.
+
+    Args:
+        value: Whatever the frontmatter or a caller held.
+
+    Returns:
+        The formats named, title-cased and without blanks. Anything that is
+        neither a string nor a list names no format at all.
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+
+    formats: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        name = item.strip().title()
+        if name and name not in formats:
+            formats.append(name)
+    return formats
+
+
+def normalize_field_value(field: str, value: object) -> object:
+    """Put a value into the shape the Library stores it in.
+
+    Shape and case are repaired; meaning is not guessed at. A value that names
+    nothing the Library defines is left alone for validation to refuse.
+
+    Args:
+        field: The frontmatter field being written.
+        value: The value proposed for it.
+
+    Returns:
+        The normalized value, or the original for fields with no shape rule.
+    """
+    if field != "format":
+        return value
+    formats = read_formats(value)
+    return formats or None
 
 
 def mint_libris_id(date_added: object) -> str:

@@ -1,5 +1,6 @@
 import ipaddress
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -41,8 +42,25 @@ from .merge import (
     merge_two_books,
     write_merged_book,
 )
-from .migrate import apply_migration, plan_migration
-from .note_format import InvalidFieldValue, validate_field_value
+from .migrate import apply_migration, plan_format_migration, plan_migration
+from .note_format import (
+    InvalidFieldValue,
+    normalize_field_value,
+    validate_field_value,
+)
+
+# Windows consoles and redirected output default to cp1252, which cannot encode
+# 39 of this Shelf's filenames - they carry U+FFFD where an accent was lost. A
+# command that dies while printing a book's name is never the right answer, so
+# output is UTF-8 and unencodable characters are replaced rather than fatal.
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        try:
+            _reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # a stream that cannot be reconfigured
+            pass
+
 
 app = typer.Typer()
 
@@ -168,11 +186,12 @@ def search(
 def add(
     query: str = typer.Argument(..., help="Title, author, or ISBN to search for"),
     status: str = typer.Option("To Read", "--status", "-s", help="Reading status"),
-    medium: str | None = typer.Option(
+    medium: list[str] = typer.Option(
         None,
         "--format",
         "-f",
-        help="Reading format (e.g., paperback, kindle, audiobook)",
+        help="Format you have this book in; repeat for more than one "
+        "(Physical, Ebook, Audiobook)",
     ),
     rating: int | None = typer.Option(
         None, "--rating", "-r", help="Rating (1-5)", min=1, max=5
@@ -193,6 +212,10 @@ def add(
     # network round trip and a book picker.
     try:
         validate_field_value("status", status)
+        if medium:
+            validate_field_value(
+                "format", normalize_field_value("format", list(medium))
+            )
     except InvalidFieldValue as exc:
         typer.echo(str(exc))
         raise typer.Exit(code=1) from None
@@ -220,8 +243,8 @@ def add(
 
     # Build overrides from CLI options
     overrides = {"status": status}
-    if medium is not None:
-        overrides["format"] = medium
+    if medium:
+        overrides["format"] = list(medium)
     if rating is not None:
         overrides["rating"] = rating
     if referred_by is not None:
@@ -343,6 +366,9 @@ def cleanup(
     limit: int = typer.Option(
         0, "--limit", "-n", help="Stop after N files that needed action (0 = unlimited)"
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would change without writing anything"
+    ),
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
     vault_path = get_vault_path()
@@ -351,6 +377,16 @@ def cleanup(
     if not books:
         typer.echo("No books found in vault.")
         return
+
+    if dry_run and (rename or auto_enrich):
+        # Renaming rewrites wikilinks and enrichment writes frontmatter, and
+        # neither has a preview mode. A flag that says it writes nothing has to
+        # mean it, so the combination is refused rather than half-honoured.
+        typer.echo(
+            "--dry-run covers frontmatter only. It cannot preview --rename or "
+            "--auto-enrich, which write as they go."
+        )
+        raise typer.Exit(code=1)
 
     vault_root = get_obsidian_vault_root() or vault_path if rename else None
 
@@ -369,7 +405,7 @@ def cleanup(
 
         file_had_action = False
 
-        updated, fm = ensure_frontmatter_fields(book_file)
+        updated, fm = ensure_frontmatter_fields(book_file, dry_run=dry_run)
         if updated:
             updated_count += 1
             file_had_action = True
@@ -987,6 +1023,11 @@ def migrate(
     out: str | None = typer.Option(
         None, "--out", help="Write the full diff to this file for review"
     ),
+    formats: bool = typer.Option(
+        False,
+        "--formats",
+        help="Migrate only the format field, leaving every other field alone",
+    ),
 ):
     """Migrate the Shelf to the canonical Book Note shape.
 
@@ -999,7 +1040,7 @@ def migrate(
         raise typer.Exit(code=1)
 
     typer.echo(f"Planning migration for {vault_path}...")
-    plans = plan_migration(vault_path)
+    plans = plan_format_migration(vault_path) if formats else plan_migration(vault_path)
     changing = [plan for plan in plans if plan.changed]
 
     change_counts: dict[str, int] = {}

@@ -63,7 +63,7 @@ def test_create_book_note_with_overrides(tmp_path):
 
     # Given overrides for format, rating, and referred_by
     overrides = {
-        "format": "kindle",
+        "format": "Audiobook",
         "rating": 4,
         "referred_by": "A Friend",
     }
@@ -73,7 +73,7 @@ def test_create_book_note_with_overrides(tmp_path):
 
     # Then the overrides appear in frontmatter
     content = file_path.read_text()
-    assert "format: kindle" in content
+    assert "format:\n- Audiobook" in content
     assert "rating: 4" in content
     assert "referred_by: A Friend" in content
 
@@ -313,7 +313,7 @@ rating: 5
     assert "Type Read" not in content
     assert "Rating out of 5" not in content
     # Existing canonical values should be preserved (not overwritten)
-    assert "format: Audiobook" in content
+    assert "format:\n- Audiobook" in content
     assert "rating: 5" in content
 
 

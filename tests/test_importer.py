@@ -4,9 +4,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from libris.api import BookCandidate
 from libris.cli import app
 from libris.config import set_config
 from libris.importer import (
+    ImportBook,
+    _apply_updates,
     normalize_for_match,
     parse_audible_json,
     run_import,
@@ -86,7 +89,8 @@ def test_parse_audible_json_basic(tmp_path):
     assert books[0].title == "The Great Book"
     assert books[0].authors == ["Jane Smith"]
     assert books[0].status == "Read"
-    assert books[0].format == "Audiobook"
+    # A list since ADR 0017: the reader may have a book in more than one medium.
+    assert books[0].format == ["Audiobook"]
     assert books[0].source_format == "audible-json"
 
     assert books[1].title == "Another Book"
@@ -170,10 +174,10 @@ def test_import_new_books_apply(tmp_path):
         content = f.read_text(encoding="utf-8")
         if "Book One" in content:
             assert "status: To Read" in content
-            assert "format: Audiobook" in content
+            assert "format:\n- Audiobook" in content
         elif "Book Two" in content:
             assert "status: Read" in content
-            assert "format: Audiobook" in content
+            assert "format:\n- Audiobook" in content
 
 
 def test_import_detects_duplicates(tmp_path):
@@ -188,7 +192,7 @@ def test_import_detects_duplicates(tmp_path):
         title="Existing Book",
         authors=["Author A"],
         status="Read",
-        format="Audiobook",
+        format=["Audiobook"],
     )
 
     data = [
@@ -252,7 +256,7 @@ def test_import_updates_format_on_duplicate(tmp_path):
     assert "format" in result.updated_books[0][2]
 
     content = existing.read_text(encoding="utf-8")
-    assert "format: Audiobook" in content
+    assert "format:\n- Audiobook" in content
 
 
 def test_import_updates_format_when_field_missing(tmp_path):
@@ -276,7 +280,7 @@ def test_import_updates_format_when_field_missing(tmp_path):
     assert "format" in result.updated_books[0][2]
 
     content = existing.read_text(encoding="utf-8")
-    assert "format: Audiobook" in content
+    assert "format:\n- Audiobook" in content
 
 
 def test_import_updates_both_status_and_format(tmp_path):
@@ -304,7 +308,7 @@ def test_import_updates_both_status_and_format(tmp_path):
 
     content = existing.read_text(encoding="utf-8")
     assert "status: Read" in content
-    assert "format: Audiobook" in content
+    assert "format:\n- Audiobook" in content
 
 
 def test_import_skips_up_to_date_duplicate(tmp_path):
@@ -318,7 +322,7 @@ def test_import_skips_up_to_date_duplicate(tmp_path):
         title="My Book",
         authors=["Author A"],
         status="Read",
-        format="Audiobook",
+        format=["Audiobook"],
     )
 
     data = [{"title": "My Book", "author": "Author A", "finished": "Yes"}]
@@ -356,7 +360,7 @@ def test_import_case_insensitive_duplicate(tmp_path):
         title="The Great Book",
         authors=["Jane Smith"],
         status="Read",
-        format="Audiobook",
+        format=["Audiobook"],
     )
 
     # Same book with different casing
@@ -440,3 +444,25 @@ def test_cli_import_unknown_format(tmp_path):
     result = runner.invoke(app, ["import", str(csv_file)])
     assert result.exit_code == 1
     assert "Cannot detect format" in result.output
+
+
+def test_apply_updates_leaves_unparseable_frontmatter_alone(tmp_path):
+    # Given a note whose frontmatter is not valid YAML
+    path = tmp_path / "Broken.md"
+    original = "---\ntitle: [unclosed\nformat: null\n---\n\n# Broken\n"
+    path.write_text(original, encoding="utf-8")
+
+    book = ImportBook(
+        candidate=BookCandidate(title="Broken", authors=["Someone"]),
+        status="Read",
+        format=["Audiobook"],
+    )
+
+    # When an import tries to update its format
+    applied = _apply_updates(path, book, ["format"])
+
+    # Then nothing is written: a line-level substitution would write a Python
+    # repr and strand existing block items, turning a note we cannot parse into
+    # one nobody can
+    assert applied is False
+    assert path.read_text(encoding="utf-8") == original
