@@ -965,3 +965,109 @@ def test_a_scalar_field_still_conflicts(tmp_path):
     # editions, not one value with two parts
     assert [c.field for c in conflicts] == ["isbn"]
     assert merged_fm["isbn"] == "978-0-441-01359-3"
+
+
+# --- what a merge asks a person (ADR 0018) ---
+
+
+def test_an_unmodelled_field_does_not_conflict(tmp_path):
+    # Given Obsidian's own timestamps, which two different files never share.
+    # 414 notes carry these.
+    primary = _write_book(
+        tmp_path, "A.md", title="Dune", date_modified='"2026-08-01T10:00:00"'
+    )
+    secondary = _write_book(
+        tmp_path, "B.md", title="Dune", date_modified='"2026-08-02T11:00:00"'
+    )
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then nothing is asked: the keeper's value stands. Otherwise every merge
+    # prompts, and --allow-conflicts becomes routine on a bulk run - which
+    # would suppress the conflicts that matter too
+    assert conflicts == []
+    assert merged_fm["date_modified"] == "2026-08-01T10:00:00"
+
+
+def test_a_modelled_field_still_conflicts(tmp_path):
+    # Given two notes disagreeing about something the Library models
+    primary = _write_book(tmp_path, "A.md", title="Dune", isbn="978-0-441-01359-3")
+    secondary = _write_book(tmp_path, "B.md", title="Dune", isbn="978-0-441-17271-9")
+
+    # When they are merged
+    _, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then it is still reported
+    assert [c.field for c in conflicts] == ["isbn"]
+
+
+def test_aliases_are_unioned(tmp_path):
+    # Given aliases, which Obsidian writes and the Library does not model, but
+    # which genuinely holds several values
+    primary = _write_book(tmp_path, "A.md", title="Dune", aliases=["Dune 1965"])
+    secondary = _write_book(tmp_path, "B.md", title="Dune", aliases=["Herbert Dune"])
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then both survive rather than the keeper's silently winning
+    assert merged_fm["aliases"] == ["Dune 1965", "Herbert Dune"]
+    assert conflicts == []
+
+
+def test_one_author_spelled_two_ways_is_not_doubled(tmp_path):
+    # Given the whitespace dirt on 185 notes
+    primary = _write_book(tmp_path, "A.md", title="10% Happier", authors=["Dan Harris"])
+    secondary = _write_book(
+        tmp_path, "B.md", title="10% Happier", authors=["Dan   Harris"]
+    )
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then one person appears once
+    assert merged_fm["authors"] == ["Dan Harris"]
+
+
+def test_a_wikilinked_author_matches_the_plain_spelling(tmp_path):
+    # Given one note linking the author and the other naming them plainly
+    primary = _write_book(
+        tmp_path, "A.md", title="A Calendar of Wisdom", authors=['"[[Leo Tolstoy]]"']
+    )
+    secondary = _write_book(
+        tmp_path, "B.md", title="A Calendar of Wisdom", authors=["Leo Tolstoy"]
+    )
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then they are one person, and the keeper's link survives: in Obsidian a
+    # wikilink is the edge to that author's note (ADR 0018)
+    assert merged_fm["authors"] == ["[[Leo Tolstoy]]"]
+
+
+def test_whitespace_is_collapsed_on_write(tmp_path):
+    # Given a keeper whose own author value carries the dirt
+    primary = _write_book(tmp_path, "A.md", title="Dune", authors=["Frank   Herbert"])
+    secondary = _write_book(tmp_path, "B.md", title="Dune", authors=["Brian Herbert"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then the value written is tidied, but no further: comparing loosely and
+    # writing conservatively is the whole rule
+    assert merged_fm["authors"] == ["Frank Herbert", "Brian Herbert"]
+
+
+def test_genres_still_dedupe_on_the_exact_string(tmp_path):
+    # Given case drift in genres, which is a vocabulary question and not a
+    # merge one
+    primary = _write_book(tmp_path, "A.md", title="Dune", genres=["Science Fiction"])
+    secondary = _write_book(tmp_path, "B.md", title="Dune", genres=["science fiction"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then both are kept; merging does not quietly pick a spelling
+    assert merged_fm["genres"] == ["Science Fiction", "science fiction"]

@@ -11,8 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from .markdown import read_frontmatter
+from .markdown import _normalize_author, read_frontmatter, tidy_author
 from .note_format import (
+    MODELLED_FIELDS,
     MULTI_VALUED_FIELDS,
     SUPERSEDED_IDS_FIELD,
     read_superseded_ids,
@@ -116,25 +117,57 @@ def _resolve_field_value(
     # every note carries "authors", so author lists were reported as conflicts
     # and the secondary's were dropped (#72). `format` was never here at all.
     if field in MULTI_VALUED_FIELDS:
-        primary_list = (
-            primary_value if isinstance(primary_value, list) else [primary_value]
-        )
-        secondary_list = (
-            secondary_value if isinstance(secondary_value, list) else [secondary_value]
-        )
+        return _union_values(field, primary_value, secondary_value), False
 
-        # Merge and deduplicate
-        merged = []
-        seen = set()
-        for item in primary_list + secondary_list:
-            if item and str(item) not in seen:
-                merged.append(item)
-                seen.add(str(item))
-
-        return (merged if merged else primary_value), False
+    # A field the Library does not model - Obsidian's timestamps, a url - takes
+    # the keeper's value without asking. Two files never agree on a timestamp,
+    # and a merge that reports that as a conflict teaches the reader to pass
+    # --allow-conflicts, which would suppress a real one (ADR 0018).
+    if field not in MODELLED_FIELDS:
+        return primary_value, False
 
     # All other fields with different values: conflict
     return primary_value, True
+
+
+def _union_values(field: str, primary_value: Any, secondary_value: Any) -> List[Any]:
+    """Combine two multi-valued fields, keeping every distinct value once.
+
+    Authors are compared on their fully normalized name, so one person spelled
+    `Dan   Harris` in one note and `[[Dan Harris]]` in the other survives once
+    rather than twice. What is written is only whitespace-collapsed, because
+    unwrapping the wikilink would delete a graph edge (ADR 0018).
+
+    Args:
+        field: The field being combined.
+        primary_value: The keeper's value, which may be a bare string.
+        secondary_value: The value from the note being merged away.
+
+    Returns:
+        The combined values, keeper's first.
+    """
+    primary_list = primary_value if isinstance(primary_value, list) else [primary_value]
+    secondary_list = (
+        secondary_value if isinstance(secondary_value, list) else [secondary_value]
+    )
+
+    merged: List[Any] = []
+    seen = set()
+    for item in list(primary_list) + list(secondary_list):
+        if not item:
+            continue
+        if field == "authors" and isinstance(item, str):
+            written = tidy_author(item)
+            identity = _normalize_author(item)
+        else:
+            written = item
+            identity = str(item)
+        if identity in seen:
+            continue
+        merged.append(written)
+        seen.add(identity)
+
+    return merged if merged else primary_value
 
 
 def _collect_superseded_ids(

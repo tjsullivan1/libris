@@ -43,7 +43,9 @@ FIELD_VOCABULARIES = {
 # list arriving for one of them is the wrong shape rather than a set of values
 # to check one by one - `status: [Read]` must be refused, not accepted - and a
 # merge unions these rather than reporting a conflict and keeping one side.
-MULTI_VALUED_FIELDS = frozenset({"authors", "genres", "tags", "format"})
+# `aliases` is Obsidian's, not modelled here, but it genuinely holds several
+# values and a merge should combine them rather than keep one side's.
+MULTI_VALUED_FIELDS = frozenset({"authors", "genres", "tags", "format", "aliases"})
 DATE_FIELDS = ("date_added", "date_started", "date_finished")
 
 # The identities of Book Notes merged into this one (ADR 0014). Deliberately

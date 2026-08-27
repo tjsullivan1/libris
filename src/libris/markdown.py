@@ -64,6 +64,23 @@ def _normalize_author(name: str) -> str:
     return re.sub(r"\s+", " ", unlinked).strip()
 
 
+def tidy_author(name: str) -> str:
+    """Collapse whitespace in an author value, leaving a wikilink intact.
+
+    Narrower than `_normalize_author` on purpose. That one is for deciding
+    whether two spellings mean the same person; this is for deciding what to
+    write, and unwrapping a wikilink would delete the edge to an author's note
+    (ADR 0018).
+
+    Args:
+        name: The value as it appears in frontmatter.
+
+    Returns:
+        The value with runs of whitespace collapsed.
+    """
+    return re.sub(r"\s+", " ", name).strip()
+
+
 @dataclass
 class BookNote:
     """A book on the Shelf: the file it lives in, its frontmatter, and its body.
