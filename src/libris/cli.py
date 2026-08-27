@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import re
 import sys
 import time
@@ -21,6 +22,7 @@ from .markdown import (
     RenameResult,
     create_book_note,
     ensure_frontmatter_fields,
+    find_duplicate_candidates,
     find_duplicates,
     list_books,
     read_frontmatter,
@@ -48,6 +50,7 @@ from .note_format import (
     normalize_field_value,
     validate_field_value,
 )
+from .service import apply_decisions
 
 # Windows consoles and redirected output default to cp1252, which cannot encode
 # 39 of this Shelf's filenames - they carry U+FFFD where an accent was lost. A
@@ -808,13 +811,13 @@ def enrich(
 def duplicates():
     """Find and report duplicate books in the vault."""
     vault_path = get_vault_path()
+
     groups = find_duplicates(vault_path)
 
     if not groups:
         typer.echo("No duplicates found.")
-        return
-
-    typer.echo(f"Found {len(groups)} group(s) of duplicates:\n")
+    else:
+        typer.echo(f"Found {len(groups)} group(s) of duplicates:\n")
     for i, group in enumerate(groups, 1):
         typer.echo(f"Group {i}:")
         for path in group:
@@ -830,6 +833,19 @@ def duplicates():
             typer.echo(f"  - {path.name}{detail_str}")
         typer.echo()
 
+    candidates = find_duplicate_candidates(vault_path)
+    if candidates:
+        typer.echo(f"\n{len(candidates)} duplicate candidate(s) need a person:")
+        typer.echo(
+            "  One title contains the other, which is a judgement rather than a "
+            "fact.\n  Nothing here is merged without an answer."
+        )
+        for first, second in candidates:
+            typer.echo(f"\n  {first.title}")
+            typer.echo(f"  {second.title}")
+            typer.echo(f"    {first.path.name}")
+            typer.echo(f"    {second.path.name}")
+
 
 @app.command()
 def merge(
@@ -838,6 +854,21 @@ def merge(
         "--auto",
         help="Auto-merge duplicates when ISBN and Google ID match (no conflicts)",
     ),
+    decisions: str | None = typer.Option(
+        None,
+        "--decisions",
+        help="Apply an exported duplicate review (JSON) instead of prompting",
+    ),
+    allow_conflicts: bool = typer.Option(
+        False,
+        "--allow-conflicts",
+        help="With --decisions, merge even when the reader's own values disagree",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="With --decisions, report what would happen and write nothing",
+    ),
 ):
     """Merge duplicate books in the vault.
 
@@ -845,6 +876,10 @@ def merge(
     With --auto: Automatically merge books when ISBN + Google ID match and no metadata conflicts exist.
     """
     vault_path = get_vault_path()
+
+    if decisions is not None:
+        _merge_from_decisions(vault_path, Path(decisions), allow_conflicts, dry_run)
+        return
     groups = find_duplicates(vault_path)
 
     if not groups:
@@ -941,6 +976,61 @@ def merge(
                 continue
 
     typer.echo(f"\nMerge complete: {total_merged} duplicate(s) merged")
+
+
+_DECISION_LABELS = {
+    "merged": "Merged",
+    "would_merge": "Would merge",
+    "skipped": "Left alone",
+    "conflicted": "Needs you",
+    "drifted": "Moved on",
+}
+
+
+def _merge_from_decisions(
+    vault_path: Path, path: Path, allow_conflicts: bool, dry_run: bool = False
+) -> None:
+    """Apply a duplicate review exported from the review page."""
+    if not path.exists():
+        typer.echo(f"No such decisions file: {path}")
+        raise typer.Exit(code=1)
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        typer.echo(f"Could not read {path.name}: {exc}")
+        raise typer.Exit(code=1) from None
+
+    records = payload.get("decisions") if isinstance(payload, dict) else payload
+    if not isinstance(records, list):
+        typer.echo(f"{path.name} holds no decisions.")
+        raise typer.Exit(code=1)
+
+    verb = "Planning" if dry_run else "Applying"
+    typer.echo(f"{verb} {len(records)} decision(s) for {vault_path}...")
+    outcomes = apply_decisions(
+        vault_path, records, allow_conflicts=allow_conflicts, dry_run=dry_run
+    )
+
+    counts: dict[str, int] = {}
+    for outcome in outcomes:
+        counts[outcome.status] = counts.get(outcome.status, 0) + 1
+        if outcome.status != "skipped":
+            typer.echo(f"  {_DECISION_LABELS[outcome.status]}: {outcome.detail}")
+
+    typer.echo("")
+    for status in ("merged", "would_merge", "conflicted", "drifted", "skipped"):
+        if counts.get(status):
+            typer.echo(f"  {_DECISION_LABELS[status]}: {counts[status]}")
+
+    if dry_run and counts.get("would_merge"):
+        typer.echo("\nDry run. Nothing written. Re-run without --dry-run to merge.")
+
+    if counts.get("conflicted"):
+        typer.echo(
+            "\nA pair that needs you disagrees about something only you can settle -"
+            "\na rating, a status, when you read it. Merge those with `libris merge`."
+        )
 
 
 @app.command(name="import")

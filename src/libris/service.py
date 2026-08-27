@@ -355,7 +355,10 @@ def _resolve_pair(vault_path: Path, first_id: str, second_id: str):
 
 
 def apply_decisions(
-    vault_path: Path, decisions: list[dict], allow_conflicts: bool = False
+    vault_path: Path,
+    decisions: list[dict],
+    allow_conflicts: bool = False,
+    dry_run: bool = False,
 ) -> list[DecisionOutcome]:
     """Merge the pairs an exported review marked as one Book.
 
@@ -367,9 +370,11 @@ def apply_decisions(
     Args:
         vault_path: The Shelf to act on.
         decisions: Decision records from the review export.
-        allow_conflicts: Merge even when a modelled field disagrees. Off by
-            default: the file answered "is this one Book", not "which ISBN is
-            right".
+        allow_conflicts: Merge even when one of the reader's own values
+            disagrees. Off by default: the file answered "is this one Book",
+            not "which rating is yours".
+        dry_run: Report what would happen without writing or deleting anything.
+            This deletes Book Notes, so it can be previewed first.
 
     Returns:
         One outcome per decision, in the order given.
@@ -411,6 +416,12 @@ def apply_decisions(
             fields = ", ".join(sorted({c.field for c in conflicts}))
             outcomes.append(
                 DecisionOutcome("conflicted", f"{label}: {fields} disagree")
+            )
+            continue
+
+        if dry_run:
+            outcomes.append(
+                DecisionOutcome("would_merge", f"{label} -> {primary.name}")
             )
             continue
 
