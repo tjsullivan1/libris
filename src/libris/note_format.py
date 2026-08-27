@@ -39,10 +39,11 @@ FIELD_VOCABULARIES = {
     "format": FORMAT_VALUES,
 }
 
-# Fields that hold several values at once. Everything else is a scalar, and a
+# Fields that hold several values at once. Everything else is a scalar, so a
 # list arriving for one of them is the wrong shape rather than a set of values
-# to check one by one - `status: [Read]` must be refused, not accepted.
-MULTI_VALUED_FIELDS = frozenset({"format"})
+# to check one by one - `status: [Read]` must be refused, not accepted - and a
+# merge unions these rather than reporting a conflict and keeping one side.
+MULTI_VALUED_FIELDS = frozenset({"authors", "genres", "tags", "format"})
 DATE_FIELDS = ("date_added", "date_started", "date_finished")
 
 # The identities of Book Notes merged into this one (ADR 0014). Deliberately

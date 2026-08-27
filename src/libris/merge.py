@@ -12,7 +12,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .markdown import read_frontmatter
-from .note_format import SUPERSEDED_IDS_FIELD, read_superseded_ids
+from .note_format import (
+    MULTI_VALUED_FIELDS,
+    SUPERSEDED_IDS_FIELD,
+    read_superseded_ids,
+)
 
 
 @dataclass
@@ -107,8 +111,11 @@ def _resolve_field_value(
             return "Read", False  # "Read" beats everything
         return primary_value, False  # Use primary as default
 
-    # For list fields (author, genres, tags): merge unique items
-    if field in ["author", "genres", "tags"]:
+    # Fields that hold several values are combined rather than contested. The
+    # set is named once in note_format: this list used to say "author" while
+    # every note carries "authors", so author lists were reported as conflicts
+    # and the secondary's were dropped (#72). `format` was never here at all.
+    if field in MULTI_VALUED_FIELDS:
         primary_list = (
             primary_value if isinstance(primary_value, list) else [primary_value]
         )
