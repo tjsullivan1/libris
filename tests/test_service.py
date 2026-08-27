@@ -14,6 +14,7 @@ from libris.markdown import (
 )
 from libris.note_format import InvalidFieldValue
 from libris.service import (
+    DecisionStatus,
     Outcome,
     add_book,
     apply_decisions,
@@ -317,7 +318,7 @@ def test_a_pair_marked_one_book_is_merged(tmp_path):
     outcomes = apply_decisions(tmp_path, [_decision(first, second)])
 
     # Then they become one note
-    assert [o.status for o in outcomes] == ["merged"]
+    assert [o.status for o in outcomes] == [DecisionStatus.MERGED]
     assert len(list(tmp_path.glob("*.md"))) == 1
 
 
@@ -329,7 +330,7 @@ def test_a_pair_marked_two_books_is_left_alone(tmp_path):
     outcomes = apply_decisions(tmp_path, [_decision(first, second, "different")])
 
     # Then nothing is merged
-    assert [o.status for o in outcomes] == ["skipped"]
+    assert [o.status for o in outcomes] == [DecisionStatus.SKIPPED]
     assert len(list(tmp_path.glob("*.md"))) == 2
 
 
@@ -343,7 +344,7 @@ def test_a_decision_naming_a_vanished_note_is_reported(tmp_path):
 
     # Then it is reported rather than acted on: the file describes the Shelf as
     # it was, and the Shelf is what is true
-    assert [o.status for o in outcomes] == ["drifted"]
+    assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
     assert first.path.exists()
 
 
@@ -359,7 +360,7 @@ def test_a_decision_still_applies_after_one_note_was_merged_away(tmp_path):
 
     # Then it resolves through superseded_ids rather than reporting drift
     # (ADR 0014)
-    assert [o.status for o in outcomes] == ["merged"]
+    assert [o.status for o in outcomes] == [DecisionStatus.MERGED]
 
 
 def test_a_conflicting_pair_is_reported_not_merged(tmp_path):
@@ -379,5 +380,5 @@ def test_a_conflicting_pair_is_reported_not_merged(tmp_path):
 
     # Then it stops: the review answered "is this one Book", not "which rating is
     # yours"
-    assert [o.status for o in outcomes] == ["conflicted"]
+    assert [o.status for o in outcomes] == [DecisionStatus.CONFLICTED]
     assert len(list(tmp_path.glob("*.md"))) == 2

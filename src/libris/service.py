@@ -339,19 +339,55 @@ def add_book(
     )
 
 
-@dataclass
-class DecisionOutcome:
+class DecisionStatus(Enum):
     """What became of one decision from an exported review."""
 
-    status: str  # merged, skipped, conflicted, drifted, undecided
+    MERGED = "merged"
+    WOULD_MERGE = "would_merge"
+    SKIPPED = "skipped"
+    CONFLICTED = "conflicted"
+    DRIFTED = "drifted"
+
+
+@dataclass
+class DecisionOutcome:
+    """The result of applying one decision, and a line explaining it."""
+
+    status: DecisionStatus
     detail: str
 
 
-def _resolve_pair(vault_path: Path, first_id: str, second_id: str):
-    """Find the two Book Notes a decision names, following superseded IDs."""
-    first = find_by_libris_id(vault_path, first_id)
-    second = find_by_libris_id(vault_path, second_id)
-    return first, second
+def build_id_index(vault_path: Path) -> dict[str, BookNote]:
+    """Map every Libris ID the Shelf answers for to the note that answers.
+
+    Includes superseded IDs, so an identity merged away still resolves
+    (ADR 0014). A live identity always wins over a superseded one.
+
+    Reading the whole Shelf once and looking up in a dict is the difference
+    between a bulk run finishing and not: resolving 83 decisions one
+    `find_by_libris_id` at a time did not complete inside ten minutes, because
+    each miss reads every note.
+
+    Args:
+        vault_path: The Shelf to index.
+
+    Returns:
+        A mapping from Libris ID to Book Note.
+    """
+    index: dict[str, BookNote] = {}
+    live: dict[str, BookNote] = {}
+
+    for book_path in list_books(vault_path):
+        note = BookNote.read(book_path)
+        if note is None:
+            continue
+        for superseded in note.superseded_ids:
+            index.setdefault(superseded, note)
+        if note.libris_id:
+            live[note.libris_id] = note
+
+    index.update(live)
+    return index
 
 
 def apply_decisions(
@@ -380,6 +416,7 @@ def apply_decisions(
         One outcome per decision, in the order given.
     """
     outcomes: list[DecisionOutcome] = []
+    index = build_id_index(vault_path)
 
     for decision in decisions:
         verdict = decision.get("decision")
@@ -389,20 +426,28 @@ def apply_decisions(
 
         if verdict != "same":
             outcomes.append(
-                DecisionOutcome("skipped", f"{label}: recorded as two books")
+                DecisionOutcome(
+                    DecisionStatus.SKIPPED, f"{label}: recorded as two books"
+                )
             )
             continue
 
         if not shorter or not longer:
             outcomes.append(
-                DecisionOutcome("drifted", f"{label}: decision names no Libris ID")
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED, f"{label}: decision names no Libris ID"
+                )
             )
             continue
 
-        first, second = _resolve_pair(vault_path, shorter, longer)
+        first = index.get(shorter.strip())
+        second = index.get(longer.strip())
         if first is None or second is None or first.path == second.path:
             outcomes.append(
-                DecisionOutcome("drifted", f"{label}: no longer two notes on the Shelf")
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: no longer two notes on the Shelf",
+                )
             )
             continue
 
@@ -415,18 +460,33 @@ def apply_decisions(
         if conflicts and not allow_conflicts:
             fields = ", ".join(sorted({c.field for c in conflicts}))
             outcomes.append(
-                DecisionOutcome("conflicted", f"{label}: {fields} disagree")
+                DecisionOutcome(
+                    DecisionStatus.CONFLICTED, f"{label}: {fields} disagree"
+                )
             )
             continue
 
         if dry_run:
             outcomes.append(
-                DecisionOutcome("would_merge", f"{label} -> {primary.name}")
+                DecisionOutcome(
+                    DecisionStatus.WOULD_MERGE, f"{label} -> {primary.name}"
+                )
             )
             continue
 
         write_merged_book(primary, merged_fm, merged_body)
         delete_secondary_file(secondary)
-        outcomes.append(DecisionOutcome("merged", f"{label} -> {primary.name}"))
+
+        # The Shelf just changed, so the index has to change with it: the
+        # survivor now answers for the identities the deleted note held.
+        survivor = BookNote.read(primary)
+        if survivor is not None:
+            for key, note in list(index.items()):
+                if note.path in (primary, secondary):
+                    index[key] = survivor
+
+        outcomes.append(
+            DecisionOutcome(DecisionStatus.MERGED, f"{label} -> {primary.name}")
+        )
 
     return outcomes

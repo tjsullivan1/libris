@@ -1,4 +1,4 @@
-# Merging asks a person only what only a person can answer
+# A merge asks only what a person can settle
 
 Merging destroys a Book Note, so the questions it asks have to be worth stopping for. Getting
 that wrong in either direction is expensive: a merge that asks nothing loses data quietly, and

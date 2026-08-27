@@ -1014,9 +1014,10 @@ def _merge_from_decisions(
 
     counts: dict[str, int] = {}
     for outcome in outcomes:
-        counts[outcome.status] = counts.get(outcome.status, 0) + 1
-        if outcome.status != "skipped":
-            typer.echo(f"  {_DECISION_LABELS[outcome.status]}: {outcome.detail}")
+        status = outcome.status.value
+        counts[status] = counts.get(status, 0) + 1
+        if status != "skipped":
+            typer.echo(f"  {_DECISION_LABELS[status]}: {outcome.detail}")
 
     typer.echo("")
     for status in ("merged", "would_merge", "conflicted", "drifted", "skipped"):
