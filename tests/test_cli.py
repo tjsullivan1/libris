@@ -456,3 +456,20 @@ def test_add_refuses_an_unknown_format_before_searching(monkeypatch):
     assert result.exit_code != 0
     assert "Physical" in result.output
     assert "Traceback" not in result.output
+
+
+def test_cleanup_dry_run_refuses_to_combine_with_rename(tmp_path, monkeypatch):
+    # Given a dry run asked to also rename files
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    (tmp_path / "Dune - Frank Herbert.md").write_text(
+        "---\ntitle: Dune\nauthors:\n  - Frank Herbert\n---\n\n# Dune\n",
+        encoding="utf-8",
+    )
+
+    # When cleanup runs
+    result = runner.invoke(app, ["cleanup", "--dry-run", "--rename"])
+
+    # Then it refuses, because renaming rewrites wikilinks and has no preview:
+    # a flag that says it writes nothing has to mean it
+    assert result.exit_code != 0
+    assert "--rename" in result.output

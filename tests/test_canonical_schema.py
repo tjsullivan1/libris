@@ -520,3 +520,24 @@ def test_cleanup_dry_run_reports_without_writing(tmp_path):
     # And the note on disk is untouched, so 1,341 of these can be previewed
     # before any of them is rewritten
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_list_is_refused_for_a_single_valued_field(tmp_path):
+    # Given status arriving as a list, which a browser client could send
+    # When it is written
+    # Then the shape is refused rather than the entries being checked one by
+    # one and the list written into frontmatter
+    with pytest.raises(InvalidFieldValue) as excinfo:
+        create_book_note(_candidate(), tmp_path, overrides={"status": ["Read"]})
+
+    assert "single value" in str(excinfo.value)
+
+
+def test_a_list_is_still_accepted_for_format(tmp_path):
+    # Given the one field that does hold several values
+    path = create_book_note(
+        _candidate(), tmp_path, overrides={"format": ["Physical", "Audiobook"]}
+    )
+
+    # Then it is written
+    assert read_frontmatter(path)["format"] == ["Physical", "Audiobook"]

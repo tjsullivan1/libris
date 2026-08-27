@@ -409,3 +409,33 @@ def test_a_note_without_a_format_field_is_left_alone(tmp_path):
 
     # Then nothing is invented
     assert plan.changed is False
+
+
+def test_a_note_with_unparseable_frontmatter_is_reported_not_fatal(tmp_path):
+    # Given a note whose frontmatter is not valid YAML
+    path = tmp_path / "Broken.md"
+    path.write_text(
+        "---\ntitle: [unclosed\nformat: Audiobook\n---\n\n# Broken\n",
+        encoding="utf-8",
+    )
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then it is reported and left alone, so one bad note cannot abort a run
+    # across the whole Shelf
+    assert plan.changed is False
+    assert plan.warnings
+
+
+def test_frontmatter_that_is_not_a_mapping_is_reported(tmp_path):
+    # Given frontmatter that parses but is a list rather than a mapping
+    path = tmp_path / "Odd.md"
+    path.write_text("---\n- format: Audiobook\n---\n\n# Odd\n", encoding="utf-8")
+
+    # When the migration is planned
+    plan = plan_note_format_migration(path)
+
+    # Then it is reported rather than raising an AttributeError mid-run
+    assert plan.changed is False
+    assert plan.warnings

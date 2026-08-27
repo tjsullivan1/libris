@@ -38,6 +38,11 @@ FIELD_VOCABULARIES = {
     "priority": PRIORITY_VALUES,
     "format": FORMAT_VALUES,
 }
+
+# Fields that hold several values at once. Everything else is a scalar, and a
+# list arriving for one of them is the wrong shape rather than a set of values
+# to check one by one - `status: [Read]` must be refused, not accepted.
+MULTI_VALUED_FIELDS = frozenset({"format"})
 DATE_FIELDS = ("date_added", "date_started", "date_finished")
 
 # The identities of Book Notes merged into this one (ADR 0014). Deliberately
@@ -91,9 +96,18 @@ def validate_field_value(field: str, value: object) -> None:
     if allowed is None or value is None:
         return
 
-    # A multi-valued field is checked entry by entry, so the message names the
-    # value that is wrong rather than the whole list.
-    proposed = value if isinstance(value, list) else [value]
+    if isinstance(value, list):
+        if field not in MULTI_VALUED_FIELDS:
+            raise InvalidFieldValue(
+                f"Invalid {field}: {value!r} is a list, but {field} holds a "
+                f"single value. Valid values: {', '.join(allowed)}."
+            )
+        # A multi-valued field is checked entry by entry, so the message names
+        # the value that is wrong rather than the whole list.
+        proposed = list(value)
+    else:
+        proposed = [value]
+
     for item in proposed:
         if item not in allowed:
             raise InvalidFieldValue(

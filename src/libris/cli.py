@@ -378,6 +378,16 @@ def cleanup(
         typer.echo("No books found in vault.")
         return
 
+    if dry_run and (rename or auto_enrich):
+        # Renaming rewrites wikilinks and enrichment writes frontmatter, and
+        # neither has a preview mode. A flag that says it writes nothing has to
+        # mean it, so the combination is refused rather than half-honoured.
+        typer.echo(
+            "--dry-run covers frontmatter only. It cannot preview --rename or "
+            "--auto-enrich, which write as they go."
+        )
+        raise typer.Exit(code=1)
+
     vault_root = get_obsidian_vault_root() or vault_path if rename else None
 
     updated_count = 0

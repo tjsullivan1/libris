@@ -336,11 +336,33 @@ def plan_note_format_migration(path: Path) -> NoteMigration:
         )
 
     frontmatter_text, body = match.group(1), match.group(2)
+
+    # Parsed before anything else: one unparseable note must not abort a
+    # 3,136-note run, so it is reported and left alone, the same way
+    # plan_note_migration treats a note it cannot read.
+    try:
+        current = yaml.safe_load(frontmatter_text)
+    except yaml.YAMLError as exc:
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=[f"frontmatter is not valid YAML: {type(exc).__name__}"],
+        )
+    if not isinstance(current, dict):
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=["frontmatter is not a mapping"],
+        )
+
     blocks = split_frontmatter_blocks(frontmatter_text)
-    if not any(key == "format" for key, _ in blocks):
+    if "format" not in current or not any(key == "format" for key, _ in blocks):
+        # Nothing to migrate, or the key exists only in a shape this cannot
+        # rewrite safely.
         return NoteMigration(path=path, original=original, migrated=original)
 
-    current = yaml.safe_load(frontmatter_text) or {}
     formats = read_formats(current.get("format"))
 
     unknown = [name for name in formats if name not in FORMAT_VALUES]

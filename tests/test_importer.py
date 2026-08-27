@@ -4,9 +4,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from libris.api import BookCandidate
 from libris.cli import app
 from libris.config import set_config
 from libris.importer import (
+    ImportBook,
+    _apply_updates,
     normalize_for_match,
     parse_audible_json,
     run_import,
@@ -441,3 +444,25 @@ def test_cli_import_unknown_format(tmp_path):
     result = runner.invoke(app, ["import", str(csv_file)])
     assert result.exit_code == 1
     assert "Cannot detect format" in result.output
+
+
+def test_apply_updates_leaves_unparseable_frontmatter_alone(tmp_path):
+    # Given a note whose frontmatter is not valid YAML
+    path = tmp_path / "Broken.md"
+    original = "---\ntitle: [unclosed\nformat: null\n---\n\n# Broken\n"
+    path.write_text(original, encoding="utf-8")
+
+    book = ImportBook(
+        candidate=BookCandidate(title="Broken", authors=["Someone"]),
+        status="Read",
+        format=["Audiobook"],
+    )
+
+    # When an import tries to update its format
+    applied = _apply_updates(path, book, ["format"])
+
+    # Then nothing is written: a line-level substitution would write a Python
+    # repr and strand existing block items, turning a note we cannot parse into
+    # one nobody can
+    assert applied is False
+    assert path.read_text(encoding="utf-8") == original
