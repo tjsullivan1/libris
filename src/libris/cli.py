@@ -8,6 +8,7 @@ from pathlib import Path
 import questionary
 import typer
 
+from . import installed_version
 from .api import GoogleBooksClient
 from .config import (
     ensure_server_token,
@@ -66,6 +67,27 @@ for _stream in (sys.stdout, sys.stderr):
 
 
 app = typer.Typer()
+
+
+def _show_version(value: bool) -> None:
+    """Print the installed version and stop, before any command runs."""
+    if value:
+        typer.echo(installed_version())
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_show_version,
+        is_eager=True,
+        help="Print the installed version and exit.",
+    ),
+) -> None:
+    """Track the books you have read, are reading, or mean to read."""
+
 
 _RENAME_SKIP_MESSAGES = {
     "missing_title": "missing title in frontmatter",

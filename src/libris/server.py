@@ -10,8 +10,6 @@ module fails on a core install. cli.py imports it lazily and says so.
 """
 
 import secrets
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
 from typing import Any
 
 import httpx
@@ -20,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import config, service
+from . import config, installed_version, service
 from .api import BookCandidate, GoogleBooksClient
 
 DEFAULT_HOST = "127.0.0.1"
@@ -138,10 +136,7 @@ class WriteResponse(BaseModel):
 
 def libris_version() -> str:
     """Get the installed libris version, or "unknown" if it cannot be read."""
-    try:
-        return package_version("libris")
-    except PackageNotFoundError:
-        return "unknown"
+    return installed_version()
 
 
 def create_app() -> FastAPI:

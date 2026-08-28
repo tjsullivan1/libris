@@ -1,5 +1,6 @@
 import sys
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -473,3 +474,35 @@ def test_cleanup_dry_run_refuses_to_combine_with_rename(tmp_path, monkeypatch):
     # a flag that says it writes nothing has to mean it
     assert result.exit_code != 0
     assert "--rename" in result.output
+
+
+def test_version_flag_reports_the_installed_version():
+    # Given a build whose version is the only way to tell it from another
+    from libris import installed_version
+
+    # When the version is asked for
+    result = runner.invoke(app, ["--version"])
+
+    # Then it is printed and nothing else runs
+    assert result.exit_code == 0
+    assert result.output.strip() == installed_version()
+
+
+def test_version_is_not_unknown_in_a_normal_install():
+    # Given libris installed as a distribution, as it is under test
+    from libris import installed_version
+
+    # Then the version is readable. "unknown" means the metadata is missing,
+    # which is exactly when a stale install goes unnoticed
+    assert installed_version() != "unknown"
+
+
+def test_the_server_reports_the_same_version():
+    # Given the daemon's /health, which also reports a version
+    pytest.importorskip("fastapi")
+    from libris import installed_version
+    from libris.server import libris_version
+
+    # Then it is the same one: two definitions of a version is how two builds
+    # come to disagree about which they are
+    assert libris_version() == installed_version()
