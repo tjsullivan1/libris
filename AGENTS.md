@@ -43,10 +43,21 @@ uv run ruff format .          # Format
 uv run ruff format --check .  # Format check (CI mode)
 ```
 
+`libris` on your PATH is a `uv tool` snapshot, not the working tree. It goes stale silently:
+after landing a change, `uv tool install . --force` from the repo root refreshes it, and
+`uv cache clean libris` first if a newly added flag is still missing. Check the installed file
+rather than the install output, which says "Installed" either way:
+
+```bash
+uv run libris --help            # the working tree, always current
+uv tool install . --force       # refresh the global command
+```
+
 ## Workflow
 
 - **Branching:** Always create a feature branch from `main`. Never commit directly to `main`.
 - **Pre-commit:** Run `uv run ruff check --fix .` (auto-fix lint issues, including import sorting), `uv run ruff format .`, and `uv run pytest` before every commit. Fix any remaining failures. All three are needed: CI lints and checks formatting as separate steps, so a commit that ran only `ruff check` still fails `ruff format --check .`.
+- **Versioning:** Bump `version` in `pyproject.toml` in any PR that changes behaviour a user can see, matching the change's conventional-commit type: `feat:` bumps the minor, `fix:` the patch. This is not bookkeeping. `uv` keys its build cache on the version, so shipping two different builds as the same version means `uv tool install . --force` reports success and installs the older one - which happened, and cost a debugging session before anyone thought to compare the installed file's timestamp.
 - **Commit messages:** Use [Conventional Commits](https://www.conventionalcommits.org/):
   - `feat: add book export command`
   - `fix: handle missing ISBN in frontmatter`
