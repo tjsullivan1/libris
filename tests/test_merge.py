@@ -46,7 +46,7 @@ class TestMergeTwoBooks:
             tmp_path,
             "A.md",
             title="Test Book",
-            author=["Alice"],
+            authors=["Alice"],
             isbn="123-456",
             google_books_id="gb1",
             status="To Read",
@@ -55,7 +55,7 @@ class TestMergeTwoBooks:
             tmp_path,
             "B.md",
             title="Test Book",
-            author=["Alice"],
+            authors=["Alice"],
             isbn="123-456",
             google_books_id="gb1",
             status="To Read",
@@ -142,14 +142,19 @@ class TestMergeTwoBooks:
         assert merged_fm["page_count"] == 300
 
     def test_metadata_conflict_different_authors(self, tmp_path):
-        """Different non-null author lists should trigger conflict."""
+        """Different non-null author lists should be unioned, not contested.
+
+        Uses `authors`, the field every note carries. This test named the
+        legacy `author` key, so it asserted union behaviour on a field the
+        merge never sees (#72).
+        """
         path1 = _write_book(
             tmp_path,
             "A.md",
             title="Book",
             isbn="123",
             google_books_id="gb1",
-            author=["Alice"],
+            authors=["Alice"],
         )
         path2 = _write_book(
             tmp_path,
@@ -157,15 +162,15 @@ class TestMergeTwoBooks:
             title="Book",
             isbn="123",
             google_books_id="gb1",
-            author=["Bob"],
+            authors=["Bob"],
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
 
         # Should have conflict in author field
         conflict_fields = [c.field for c in conflicts]
-        assert "author" not in conflict_fields  # Authors should be merged as lists
-        assert len(merged_fm["author"]) == 2
+        assert "authors" not in conflict_fields  # Authors should be merged as lists
+        assert len(merged_fm["authors"]) == 2
 
     def test_metadata_conflict_different_page_count(self, tmp_path):
         """Different page counts should trigger conflict."""
@@ -176,6 +181,7 @@ class TestMergeTwoBooks:
             isbn="123",
             google_books_id="gb1",
             page_count=300,
+            rating=5,
         )
         path2 = _write_book(
             tmp_path,
@@ -184,13 +190,14 @@ class TestMergeTwoBooks:
             isbn="123",
             google_books_id="gb1",
             page_count=250,
+            rating=3,
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
 
         # page_count conflict should be detected
         conflict_fields = [c.field for c in conflicts]
-        assert "page_count" in conflict_fields
+        assert "rating" in conflict_fields
 
     def test_conflicts_prevent_merge_when_not_allowed(self, tmp_path):
         """With allow_conflicts=False, conflicts should be returned."""
@@ -201,6 +208,7 @@ class TestMergeTwoBooks:
             isbn="123",
             google_books_id="gb1",
             page_count=300,
+            rating=5,
         )
         path2 = _write_book(
             tmp_path,
@@ -209,6 +217,7 @@ class TestMergeTwoBooks:
             isbn="123",
             google_books_id="gb1",
             page_count=250,
+            rating=3,
         )
 
         merged_fm, merged_body, conflicts = merge_two_books(
@@ -227,6 +236,7 @@ class TestMergeTwoBooks:
             isbn="123",
             google_books_id="gb1",
             page_count=300,
+            rating=5,
         )
         path2 = _write_book(
             tmp_path,
@@ -235,6 +245,7 @@ class TestMergeTwoBooks:
             isbn="123",
             google_books_id="gb1",
             page_count=250,
+            rating=3,
         )
 
         merged_fm, merged_body, conflicts = merge_two_books(
@@ -242,7 +253,7 @@ class TestMergeTwoBooks:
         )
 
         # Merge should proceed
-        assert merged_fm["page_count"] == 300  # Primary wins
+        assert merged_fm["rating"] == 5  # Primary wins
         assert len(conflicts) > 0  # But conflicts are still recorded
 
     def test_merge_author_lists(self, tmp_path):
@@ -253,7 +264,7 @@ class TestMergeTwoBooks:
             title="Book",
             isbn="123",
             google_books_id="gb1",
-            author=["Alice", "Charlie"],
+            authors=["Alice", "Charlie"],
         )
         path2 = _write_book(
             tmp_path,
@@ -261,16 +272,16 @@ class TestMergeTwoBooks:
             title="Book",
             isbn="123",
             google_books_id="gb1",
-            author=["Bob", "Alice"],  # Alice appears in both
+            authors=["Bob", "Alice"],  # Alice appears in both
         )
 
         merged_fm, _, conflicts = merge_two_books(path1, path2)
 
         assert len(conflicts) == 0
-        assert len(merged_fm["author"]) == 3
-        assert "Alice" in merged_fm["author"]
-        assert "Bob" in merged_fm["author"]
-        assert "Charlie" in merged_fm["author"]
+        assert len(merged_fm["authors"]) == 3
+        assert "Alice" in merged_fm["authors"]
+        assert "Bob" in merged_fm["authors"]
+        assert "Charlie" in merged_fm["authors"]
 
     def test_merge_body_content(self, tmp_path):
         """Body content from both files should be merged."""
@@ -395,6 +406,7 @@ class TestCheckAutoMerge:
             isbn="123",
             google_books_id="gb1",
             page_count=300,
+            rating=5,
         )
         path2 = _write_book(
             tmp_path,
@@ -403,6 +415,7 @@ class TestCheckAutoMerge:
             isbn="123",
             google_books_id="gb1",
             page_count=250,
+            rating=3,
         )
 
         can_merge, reason, merge_result = check_auto_merge(path1, path2)
@@ -692,6 +705,7 @@ class TestMergeCLI:
             isbn="123",
             google_books_id="gb1",
             page_count=300,
+            rating=5,
         )
         _write_book(
             vault,
@@ -700,6 +714,7 @@ class TestMergeCLI:
             isbn="123",
             google_books_id="gb1",
             page_count=250,
+            rating=3,
         )
         set_config("vault_path", str(vault))
 
@@ -870,3 +885,203 @@ def test_reading_superseded_ids_from_a_bare_string(tmp_path):
 
     # Then the reader agrees with the merge helper, because both use one rule
     assert note.superseded_ids == ["GONE"]
+
+
+# --- fields that hold several values are unioned, not conflicted (#72) ---
+#
+# _resolve_field_value unioned list fields, but the list it checked named
+# "author" while the canonical field is "authors" (ADR 0005) - the same drift
+# #62 undid. So merging two notes with different author lists reported a
+# conflict and silently kept the primary's. `format` had never been in the set
+# at all, and since ADR 0017 it holds a list on 2,210 notes.
+
+
+def test_merging_unions_author_lists(tmp_path):
+    # Given two notes for one Book crediting different authors
+    primary = _write_book(
+        tmp_path, "A.md", title="The Gap and the Gain", authors=["Dan Sullivan"]
+    )
+    secondary = _write_book(
+        tmp_path, "B.md", title="The Gap and the Gain", authors=["Benjamin Hardy"]
+    )
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then both survive, rather than the secondary's being reported as a
+    # conflict and dropped
+    assert merged_fm["authors"] == ["Dan Sullivan", "Benjamin Hardy"]
+    assert not [c for c in conflicts if c.field == "authors"]
+
+
+def test_merging_unions_formats(tmp_path):
+    # Given the same Book held on paper in one note and as audio in the other
+    primary = _write_book(tmp_path, "A.md", title="Changes", format=["Physical"])
+    secondary = _write_book(tmp_path, "B.md", title="Changes", format=["Audiobook"])
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then the reader still owns it in both media
+    assert merged_fm["format"] == ["Physical", "Audiobook"]
+    assert not [c for c in conflicts if c.field == "format"]
+
+
+def test_merging_does_not_duplicate_a_shared_value(tmp_path):
+    # Given both notes recording the same format
+    primary = _write_book(tmp_path, "A.md", title="Dune", format=["Audiobook"])
+    secondary = _write_book(tmp_path, "B.md", title="Dune", format=["Audiobook"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then it appears once
+    assert merged_fm["format"] == ["Audiobook"]
+
+
+def test_merging_unions_a_bare_string_with_a_list(tmp_path):
+    # Given tags, which this vault still holds as both shapes
+    primary = _write_book(tmp_path, "A.md", title="Dune", tags="Book")
+    secondary = _write_book(tmp_path, "B.md", title="Dune", tags=["Book", "SF"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then the shapes combine without losing either
+    assert merged_fm["tags"] == ["Book", "SF"]
+
+
+def test_merging_still_unions_genres(tmp_path):
+    # Given the field that already worked, so the fix does not regress it
+    primary = _write_book(tmp_path, "A.md", title="Dune", genres=["Science Fiction"])
+    secondary = _write_book(tmp_path, "B.md", title="Dune", genres=["Classics"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then both are kept
+    assert merged_fm["genres"] == ["Science Fiction", "Classics"]
+
+
+def test_a_reader_field_still_conflicts(tmp_path):
+    # Given two notes disagreeing about a single-valued field
+    primary = _write_book(tmp_path, "A.md", title="Dune", rating=5)
+    secondary = _write_book(tmp_path, "B.md", title="Dune", rating=3)
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then it is reported: a rating is the reader's own, and two different ones
+    # means they rated the same book twice (ADR 0018)
+    assert [c.field for c in conflicts] == ["rating"]
+    assert merged_fm["rating"] == 5
+
+
+# --- what a merge asks a person (ADR 0018) ---
+
+
+def test_an_unmodelled_field_does_not_conflict(tmp_path):
+    # Given Obsidian's own timestamps, which two different files never share.
+    # 414 notes carry these.
+    primary = _write_book(
+        tmp_path, "A.md", title="Dune", date_modified='"2026-08-01T10:00:00"'
+    )
+    secondary = _write_book(
+        tmp_path, "B.md", title="Dune", date_modified='"2026-08-02T11:00:00"'
+    )
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then nothing is asked: the keeper's value stands. Otherwise every merge
+    # prompts, and --allow-conflicts becomes routine on a bulk run - which
+    # would suppress the conflicts that matter too
+    assert conflicts == []
+    assert merged_fm["date_modified"] == "2026-08-01T10:00:00"
+
+
+def test_edition_metadata_does_not_conflict(tmp_path):
+    # Given two notes describing different editions of one work, which is what
+    # every Duplicate Candidate pair is
+    primary = _write_book(tmp_path, "A.md", title="Dune", isbn="978-0-441-01359-3")
+    secondary = _write_book(tmp_path, "B.md", title="Dune", isbn="978-0-441-17271-9")
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then nothing is asked: an ISBN belongs to the edition, and the keeper's
+    # will do. Measured: under the old rule 0 of 83 candidate pairs merged
+    # cleanly, so the feature was inert
+    assert conflicts == []
+    assert merged_fm["isbn"] == "978-0-441-01359-3"
+
+
+def test_aliases_are_unioned(tmp_path):
+    # Given aliases, which Obsidian writes and the Library does not model, but
+    # which genuinely holds several values
+    primary = _write_book(tmp_path, "A.md", title="Dune", aliases=["Dune 1965"])
+    secondary = _write_book(tmp_path, "B.md", title="Dune", aliases=["Herbert Dune"])
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then both survive rather than the keeper's silently winning
+    assert merged_fm["aliases"] == ["Dune 1965", "Herbert Dune"]
+    assert conflicts == []
+
+
+def test_one_author_spelled_two_ways_is_not_doubled(tmp_path):
+    # Given the whitespace dirt on 185 notes
+    primary = _write_book(tmp_path, "A.md", title="10% Happier", authors=["Dan Harris"])
+    secondary = _write_book(
+        tmp_path, "B.md", title="10% Happier", authors=["Dan   Harris"]
+    )
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then one person appears once
+    assert merged_fm["authors"] == ["Dan Harris"]
+
+
+def test_a_wikilinked_author_matches_the_plain_spelling(tmp_path):
+    # Given one note linking the author and the other naming them plainly
+    primary = _write_book(
+        tmp_path, "A.md", title="A Calendar of Wisdom", authors=['"[[Leo Tolstoy]]"']
+    )
+    secondary = _write_book(
+        tmp_path, "B.md", title="A Calendar of Wisdom", authors=["Leo Tolstoy"]
+    )
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then they are one person, and the keeper's link survives: in Obsidian a
+    # wikilink is the edge to that author's note (ADR 0018)
+    assert merged_fm["authors"] == ["[[Leo Tolstoy]]"]
+
+
+def test_whitespace_is_collapsed_on_write(tmp_path):
+    # Given a keeper whose own author value carries the dirt
+    primary = _write_book(tmp_path, "A.md", title="Dune", authors=["Frank   Herbert"])
+    secondary = _write_book(tmp_path, "B.md", title="Dune", authors=["Brian Herbert"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then the value written is tidied, but no further: comparing loosely and
+    # writing conservatively is the whole rule
+    assert merged_fm["authors"] == ["Frank Herbert", "Brian Herbert"]
+
+
+def test_genres_still_dedupe_on_the_exact_string(tmp_path):
+    # Given case drift in genres, which is a vocabulary question and not a
+    # merge one
+    primary = _write_book(tmp_path, "A.md", title="Dune", genres=["Science Fiction"])
+    secondary = _write_book(tmp_path, "B.md", title="Dune", genres=["science fiction"])
+
+    # When they are merged
+    merged_fm, _, _ = merge_two_books(primary, secondary, allow_conflicts=True)
+
+    # Then both are kept; merging does not quietly pick a spelling
+    assert merged_fm["genres"] == ["Science Fiction", "science fiction"]

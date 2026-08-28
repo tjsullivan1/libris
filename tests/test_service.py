@@ -14,8 +14,10 @@ from libris.markdown import (
 )
 from libris.note_format import InvalidFieldValue
 from libris.service import (
+    DecisionStatus,
     Outcome,
     add_book,
+    apply_decisions,
     build_lookup_query,
     find_by_libris_id,
     find_existing,
@@ -288,3 +290,95 @@ def test_a_blank_libris_id_does_not_resolve(tmp_path):
     # Then it misses immediately rather than reading every note to find nothing
     assert find_by_libris_id(tmp_path, "") is None
     assert find_by_libris_id(tmp_path, "   ") is None
+
+
+# --- applying an exported review (#72, ADR 0018) ---
+
+
+def _pair(tmp_path):
+    """Two notes for one Book, differing by a subtitle."""
+    a = create_book_note(_candidate(title="The Brass Verdict"), tmp_path)
+    b = create_book_note(_candidate(title="The Brass Verdict: A Novel"), tmp_path)
+    return BookNote.read(a), BookNote.read(b)
+
+
+def _decision(first, second, verdict="same"):
+    return {
+        "decision": verdict,
+        "shorter": {"title": first.title, "libris_id": first.libris_id},
+        "longer": {"title": second.title, "libris_id": second.libris_id},
+    }
+
+
+def test_a_pair_marked_one_book_is_merged(tmp_path):
+    # Given two notes a person judged to be one Book
+    first, second = _pair(tmp_path)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then they become one note
+    assert [o.status for o in outcomes] == [DecisionStatus.MERGED]
+    assert len(list(tmp_path.glob("*.md"))) == 1
+
+
+def test_a_pair_marked_two_books_is_left_alone(tmp_path):
+    # Given a pair a person judged to be different books
+    first, second = _pair(tmp_path)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second, "different")])
+
+    # Then nothing is merged
+    assert [o.status for o in outcomes] == [DecisionStatus.SKIPPED]
+    assert len(list(tmp_path.glob("*.md"))) == 2
+
+
+def test_a_decision_naming_a_vanished_note_is_reported(tmp_path):
+    # Given a decision recorded against a Shelf that has since changed
+    first, second = _pair(tmp_path)
+    second.path.unlink()
+
+    # When it is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then it is reported rather than acted on: the file describes the Shelf as
+    # it was, and the Shelf is what is true
+    assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
+    assert first.path.exists()
+
+
+def test_a_decision_still_applies_after_one_note_was_merged_away(tmp_path):
+    # Given a note that has since absorbed another, so its id is superseded
+    first, second = _pair(tmp_path)
+    third = create_book_note(_candidate(title="The Brass Verdict: Deluxe"), tmp_path)
+    third_note = BookNote.read(third)
+    apply_decisions(tmp_path, [_decision(first, third_note)])
+
+    # When a decision naming the merged-away id is applied
+    outcomes = apply_decisions(tmp_path, [_decision(third_note, second)])
+
+    # Then it resolves through superseded_ids rather than reporting drift
+    # (ADR 0014)
+    assert [o.status for o in outcomes] == [DecisionStatus.MERGED]
+
+
+def test_a_conflicting_pair_is_reported_not_merged(tmp_path):
+    # Given two notes that disagree about the reader's own value
+    first, second = _pair(tmp_path)
+    second.path.write_text(
+        second.path.read_text(encoding="utf-8").replace("rating:", "rating: 3"),
+        encoding="utf-8",
+    )
+    first.path.write_text(
+        first.path.read_text(encoding="utf-8").replace("rating:", "rating: 5"),
+        encoding="utf-8",
+    )
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then it stops: the review answered "is this one Book", not "which rating is
+    # yours"
+    assert [o.status for o in outcomes] == [DecisionStatus.CONFLICTED]
+    assert len(list(tmp_path.glob("*.md"))) == 2

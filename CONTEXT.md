@@ -48,6 +48,12 @@ A Libris ID that identified a Book Note which has since merged into another. It 
 reused and never dangles: it resolves to the surviving note.
 _Avoid_: dead id, old id, tombstone
 
+**Duplicate Candidate**:
+Two Book Notes that may describe one Book, matched by title rather than by a shared identifier.
+A candidate is offered to a person to confirm and never merged on its own, because titles are
+compared loosely and a wrong answer merges two different Books.
+_Avoid_: possible duplicate, near duplicate
+
 **Matching**:
 Deciding whether two Book Notes describe the same book — the judgement behind duplicate
 detection and import de-duplication. Deliberately separate from identity, and allowed to be

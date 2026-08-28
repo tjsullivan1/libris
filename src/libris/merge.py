@@ -11,8 +11,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from .markdown import read_frontmatter
-from .note_format import SUPERSEDED_IDS_FIELD, read_superseded_ids
+from .markdown import _normalize_author, read_frontmatter, tidy_author
+from .note_format import (
+    MULTI_VALUED_FIELDS,
+    READER_FIELDS,
+    SUPERSEDED_IDS_FIELD,
+    read_superseded_ids,
+)
 
 
 @dataclass
@@ -107,27 +112,63 @@ def _resolve_field_value(
             return "Read", False  # "Read" beats everything
         return primary_value, False  # Use primary as default
 
-    # For list fields (author, genres, tags): merge unique items
-    if field in ["author", "genres", "tags"]:
-        primary_list = (
-            primary_value if isinstance(primary_value, list) else [primary_value]
-        )
-        secondary_list = (
-            secondary_value if isinstance(secondary_value, list) else [secondary_value]
-        )
+    # Fields that hold several values are combined rather than contested. The
+    # set is named once in note_format: this list used to say "author" while
+    # every note carries "authors", so author lists were reported as conflicts
+    # and the secondary's were dropped (#72). `format` was never here at all.
+    if field in MULTI_VALUED_FIELDS:
+        return _union_values(field, primary_value, secondary_value), False
 
-        # Merge and deduplicate
-        merged = []
-        seen = set()
-        for item in primary_list + secondary_list:
-            if item and str(item) not in seen:
-                merged.append(item)
-                seen.add(str(item))
+    # Everything else takes the keeper's value without asking, unless the value
+    # is the reader's own. Obsidian's timestamps never agree between two files;
+    # an ISBN, a page count or a cover differs because two editions of one work
+    # differ; and two notes always hold different Libris IDs, which ADR 0014
+    # records as superseded rather than contested. None of those is a question
+    # for a person. A rating is (ADR 0018).
+    if field not in READER_FIELDS:
+        return primary_value, False
 
-        return (merged if merged else primary_value), False
-
-    # All other fields with different values: conflict
     return primary_value, True
+
+
+def _union_values(field: str, primary_value: Any, secondary_value: Any) -> List[Any]:
+    """Combine two multi-valued fields, keeping every distinct value once.
+
+    Authors are compared on their fully normalized name, so one person spelled
+    `Dan   Harris` in one note and `[[Dan Harris]]` in the other survives once
+    rather than twice. What is written is only whitespace-collapsed, because
+    unwrapping the wikilink would delete a graph edge (ADR 0018).
+
+    Args:
+        field: The field being combined.
+        primary_value: The keeper's value, which may be a bare string.
+        secondary_value: The value from the note being merged away.
+
+    Returns:
+        The combined values, keeper's first.
+    """
+    primary_list = primary_value if isinstance(primary_value, list) else [primary_value]
+    secondary_list = (
+        secondary_value if isinstance(secondary_value, list) else [secondary_value]
+    )
+
+    merged: List[Any] = []
+    seen = set()
+    for item in list(primary_list) + list(secondary_list):
+        if not item:
+            continue
+        if field == "authors" and isinstance(item, str):
+            written = tidy_author(item)
+            identity = _normalize_author(item)
+        else:
+            written = item
+            identity = str(item)
+        if identity in seen:
+            continue
+        merged.append(written)
+        seen.add(identity)
+
+    return merged if merged else primary_value
 
 
 def _collect_superseded_ids(
