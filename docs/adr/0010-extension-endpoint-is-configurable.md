@@ -23,3 +23,8 @@ Responses therefore state which guarantee was given, so a Surface can say "added
 This makes the deferred question of what happens to an Intent that cannot apply urgent
 rather than theoretical: a duplicate caught at apply time is now the common case, and it
 needs a path back to the person who clicked the button.
+
+Narrowed by ADR 0020: "a base URL and a credential" was two fields where three are needed. The
+paths and the browser permission model survive a move to the remote; the credential does not,
+because the daemon takes a bearer token and the Container App takes Entra (ADR 0004). A client
+stores the base URL, the auth mode, and the credential.
