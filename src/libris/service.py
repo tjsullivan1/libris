@@ -6,7 +6,8 @@ module knows about HTTP, and it raises rather than returning status codes: the
 adapter decides what a failure looks like on the wire.
 """
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -34,11 +35,20 @@ class Outcome(Enum):
 
 @dataclass
 class AddResult:
-    """The answer to a write: identity first, path only for display (ADR 0016)."""
+    """The answer to a write: identity first, path only for display (ADR 0016).
+
+    Carries the title and authors of the note it points at, because they are
+    what a Surface shows a person. A path is not something to show on a device
+    that holds no Shelf (ADR 0019), and on an already-held Book the note's title
+    can differ from the candidate's - matching on ISBN or Google Books ID says
+    nothing about the two titles agreeing.
+    """
 
     libris_id: str | None
     path: Path
     outcome: Outcome
+    title: str | None = None
+    authors: list[str] = field(default_factory=list)
 
 
 def is_isbn10(value: str) -> bool:
@@ -68,6 +78,31 @@ def is_isbn10(value: str) -> bool:
             return False
         total += digit * (10 - position)
     return total % 11 == 0
+
+
+# Amazon states the ASIN in the product URL itself, in one of two shapes. A
+# scraper that cannot read the page - or reads a layout it does not know - still
+# has this.
+_AMAZON_ASIN = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?#]|$)")
+
+
+def asin_from_source_url(source_url: str | None) -> str | None:
+    """Read the ASIN out of an Amazon product URL.
+
+    The source URL is used for this and nothing else: it is never written to a
+    Book Note, because no modelled field records where a capture came from and
+    adding one would write a null into every note on the Shelf to say nothing.
+
+    Args:
+        source_url: The page the scrape came from, if any.
+
+    Returns:
+        The ASIN the URL names, or None if it names none.
+    """
+    if not source_url:
+        return None
+    found = _AMAZON_ASIN.search(source_url)
+    return found.group(1) if found else None
 
 
 def build_lookup_query(
@@ -109,6 +144,7 @@ def lookup_candidates(
     asin: str | None = None,
     title: str | None = None,
     authors: list[str] | None = None,
+    source_url: str | None = None,
     client: GoogleBooksClient | None = None,
 ) -> list[BookCandidate]:
     """Find Book Candidates for what a page yielded, best described first.
@@ -118,6 +154,8 @@ def lookup_candidates(
         asin: An Amazon identifier.
         title: The title as scraped.
         authors: The authors as scraped.
+        source_url: The page the scrape came from. Read for an ASIN when the
+            scraper found none, and never persisted.
         client: The Google Books client to search with.
 
     Returns:
@@ -125,7 +163,12 @@ def lookup_candidates(
         A picker needs an order; it does not need a decision made for it, which
         is why this ranks rather than choosing (ADR 0003).
     """
-    query = build_lookup_query(isbn=isbn, asin=asin, title=title, authors=authors)
+    query = build_lookup_query(
+        isbn=isbn,
+        asin=asin or asin_from_source_url(source_url),
+        title=title,
+        authors=authors,
+    )
     if query is None:
         return []
 
@@ -328,6 +371,8 @@ def add_book(
             libris_id=existing.libris_id,
             path=existing.path,
             outcome=Outcome.ALREADY_PRESENT,
+            title=existing.title,
+            authors=existing.authors,
         )
 
     path = create_book_note(candidate, vault_path, overrides=overrides or None)
@@ -336,6 +381,10 @@ def add_book(
         libris_id=note.libris_id if note else None,
         path=path,
         outcome=Outcome.CREATED,
+        # The candidate is what was just written, so it answers for a note that
+        # cannot be read back rather than leaving the Surface with only a path.
+        title=note.title if note else candidate.title,
+        authors=note.authors if note else candidate.authors,
     )
 
 

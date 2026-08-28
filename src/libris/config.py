@@ -58,6 +58,22 @@ def get_vault_path() -> Path:
     return Path(path_str).expanduser().resolve()
 
 
+def is_vault_configured() -> bool:
+    """Check whether a Shelf has actually been configured.
+
+    `get_vault_path` falls back to the working directory when nothing is set
+    (see #82), so "the path it returns exists" says nothing about whether a
+    person chose it. The daemon needs the difference: it refuses to start
+    without a Shelf, and `/health` reports it so a Surface can tell "running"
+    from "usable" (ADR 0019).
+
+    Returns:
+        True when a vault path is set under either the current or legacy key.
+    """
+    config = get_config()
+    return bool(config.get(BOOK_VAULT_KEY) or config.get(LEGACY_VAULT_KEY))
+
+
 def get_api_key() -> Optional[str]:
     config = get_config()
     return config.get("google_books_api_key")

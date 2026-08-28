@@ -506,3 +506,38 @@ def test_the_server_reports_the_same_version():
     # Then it is the same one: two definitions of a version is how two builds
     # come to disagree about which they are
     assert libris_version() == installed_version()
+
+
+def test_the_status_prompt_offers_what_the_library_defines(monkeypatch, tmp_path):
+    # Given a Shelf holding one book
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+    from libris.note_format import STATUS_VALUES
+
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+
+    offered = []
+
+    class _Selection:
+        def __init__(self, choices):
+            self._choices = choices
+
+        def ask(self):
+            offered.append(self._choices)
+            return self._choices[0]
+
+    monkeypatch.setattr(
+        "libris.cli.questionary.select",
+        lambda _message, choices, **kwargs: _Selection(choices),
+    )
+
+    # When someone updates a book's status
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+
+    # Then the prompt offers exactly the four values a status may hold. It used
+    # to offer "Finished", which no note has ever held and which validation now
+    # rejects, and to omit "Not To Read" entirely.
+    assert offered[-1] == list(STATUS_VALUES)
+    assert "Finished" not in offered[-1]
