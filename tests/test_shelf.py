@@ -6,6 +6,7 @@ every note. Nothing caught it because every other test uses a vault holding one
 or two notes - so these tests count parses rather than trusting a stopwatch.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -223,3 +224,88 @@ def test_a_large_shelf_is_read_once_and_then_left_alone(tmp_path, counted_reads)
 
     # Then the Shelf was parsed once, not four times over
     assert len(counted_reads) == 300
+
+
+def test_notes_come_back_in_the_order_the_directory_lists_them(tmp_path):
+    # Given a Shelf that has been read, then churned
+    for title in ("Aaa", "Bbb", "Ccc"):
+        _shelve(tmp_path, title)
+    index = shelf.index_for(tmp_path)
+    index.notes()
+    (tmp_path / "Aaa - Frank Herbert.md").unlink()
+    _shelve(tmp_path, "Aaa")
+
+    # When it is read again
+    names = [n.path.name for n in index.notes()]
+
+    # Then the order follows the directory listing, not the order things
+    # happened to be parsed. find_existing returns the first match and the Shelf
+    # holds real duplicate groups, so which note answers is behaviour rather
+    # than an accident. Compared against a real listing rather than a sorted
+    # one: scandir order is alphabetical on NTFS and arbitrary on ext4, and CI
+    # runs the latter.
+    with os.scandir(tmp_path) as scan:
+        listed = [e.name for e in scan if e.name.endswith(".md")]
+    assert names == listed
+
+
+def test_a_file_locked_mid_write_keeps_its_last_known_content(tmp_path, monkeypatch):
+    # Given a Book Note already indexed
+    path = _shelve(tmp_path, "Dune")
+    index = shelf.index_for(tmp_path)
+    assert [n.title for n in index.notes()] == ["Dune"]
+
+    # When the file changes and is unreadable at the moment we go to read it,
+    # which is ordinary on a vault Obsidian and a sync client also write to
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("status: To Read", "status: Read"),
+        encoding="utf-8",
+    )
+
+    def _locked(_path):
+        raise PermissionError(32, "The process cannot access the file")
+
+    monkeypatch.setattr(BookNote, "read", staticmethod(_locked))
+
+    # Then the Book is still reported, from what was last parsed. Reporting it
+    # absent would let a duplicate check write a second note for a book already
+    # held, which nothing afterwards surfaces.
+    assert [n.title for n in index.notes()] == ["Dune"]
+
+
+def test_a_file_that_becomes_readable_again_is_re_read(tmp_path, monkeypatch):
+    # Given a note whose edit could not be read
+    path = _shelve(tmp_path, "Dune")
+    index = shelf.index_for(tmp_path)
+    index.notes()
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("status: To Read", "status: Read"),
+        encoding="utf-8",
+    )
+    original = BookNote.read
+    monkeypatch.setattr(
+        BookNote, "read", staticmethod(lambda _p: (_ for _ in ()).throw(OSError()))
+    )
+    index.notes()
+
+    # When the lock clears
+    monkeypatch.setattr(BookNote, "read", staticmethod(original))
+
+    # Then the edit is picked up. A failed read must not be remembered the way
+    # an unparseable one is: the fingerprint never changes again, so caching it
+    # would hide that note's contents for the life of the daemon.
+    assert index.notes()[0].frontmatter.get("status") == "Read"
+
+
+def test_a_note_deleted_between_the_listing_and_the_read_is_dropped(tmp_path):
+    # Given a Shelf holding two books, neither yet indexed
+    _shelve(tmp_path, "Dune")
+    doomed = _shelve(tmp_path, "Piranesi", author="Susanna Clarke")
+    index = shelf.index_for(tmp_path)
+
+    # When one is deleted before it was ever parsed - so there is nothing
+    # remembered to fall back on
+    doomed.unlink()
+
+    # Then the answer holds what survives, rather than raising
+    assert [n.title for n in index.notes()] == ["Dune"]

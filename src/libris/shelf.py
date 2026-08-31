@@ -29,9 +29,24 @@ from .markdown import BookNote
 Fingerprint = tuple[int, int]
 
 
-def _fingerprint(entry: os.DirEntry) -> Fingerprint:
-    """Describe a file precisely enough to notice it changing."""
-    info = entry.stat()
+def _describe(entry: os.DirEntry) -> Fingerprint | None:
+    """Describe a file precisely enough to notice it changing.
+
+    Args:
+        entry: A directory entry from the Shelf.
+
+    Returns:
+        The fingerprint, or None if this is not a readable file. `stat` and
+        `is_file` both reach the filesystem and can fail on an entry that is
+        being written or removed while the Shelf is listed, which is ordinary
+        on a vault that Obsidian and a sync client also write to.
+    """
+    try:
+        if not entry.is_file():
+            return None
+        info = entry.stat()
+    except OSError:
+        return None
     return (info.st_mtime_ns, info.st_size)
 
 
@@ -55,13 +70,18 @@ class ShelfIndex:
         """Every Book Note on the Shelf, as it stands right now.
 
         Returns:
-            The notes, in the order the filesystem reports them. Reparsed only
+            The notes, in the order the directory listed them. Reparsed only
             where a file appeared, changed or went away since the last call.
         """
         seen: set[str] = set()
+        found: list[BookNote] = []
 
         try:
-            entries = list(os.scandir(self.vault_path))
+            # Closed deterministically rather than left to exhaustion: if the
+            # listing raises partway, the directory handle would otherwise be
+            # held until the collector got to it.
+            with os.scandir(self.vault_path) as scan:
+                listing = [(entry.name, entry.path, _describe(entry)) for entry in scan]
         except FileNotFoundError:
             # A Shelf that has gone away holds no books, which is the truthful
             # answer and lets the caller report a miss rather than crash.
@@ -70,27 +90,42 @@ class ShelfIndex:
             self._unparseable.clear()
             return []
 
-        for entry in entries:
-            if not entry.name.endswith(".md") or not entry.is_file():
+        for name, path, fingerprint in listing:
+            if fingerprint is None or not name.endswith(".md"):
                 continue
-            seen.add(entry.name)
+            seen.add(name)
 
-            fingerprint = _fingerprint(entry)
-            if self._fingerprints.get(entry.name) == fingerprint:
+            cached = self._notes.get(name)
+            if cached is not None and self._fingerprints.get(name) == fingerprint:
+                found.append(cached)
                 continue
-            if self._unparseable.get(entry.name) == fingerprint:
+            if self._unparseable.get(name) == fingerprint:
                 continue
 
-            note = BookNote.read(Path(entry.path))
+            try:
+                note = BookNote.read(Path(path))
+            except OSError:
+                # The file moved, vanished or was locked between the listing and
+                # the read - Obsidian saving, a sync client, or Libris itself.
+                # The last parse stands rather than the Book being reported
+                # absent: a duplicate check that misses writes a second note and
+                # nothing ever surfaces it, where a momentarily stale title
+                # harms nobody. The fingerprint is left alone, so the next call
+                # tries again rather than trusting what it could not read.
+                if cached is not None:
+                    found.append(cached)
+                continue
+
             if note is None:
-                self._unparseable[entry.name] = fingerprint
-                self._notes.pop(entry.name, None)
-                self._fingerprints.pop(entry.name, None)
+                self._unparseable[name] = fingerprint
+                self._notes.pop(name, None)
+                self._fingerprints.pop(name, None)
                 continue
 
-            self._notes[entry.name] = note
-            self._fingerprints[entry.name] = fingerprint
-            self._unparseable.pop(entry.name, None)
+            self._notes[name] = note
+            self._fingerprints[name] = fingerprint
+            self._unparseable.pop(name, None)
+            found.append(note)
 
         for gone in self._notes.keys() - seen:
             del self._notes[gone]
@@ -98,7 +133,7 @@ class ShelfIndex:
         for gone in self._unparseable.keys() - seen:
             del self._unparseable[gone]
 
-        return list(self._notes.values())
+        return found
 
 
 _INDEXES: dict[Path, ShelfIndex] = {}
