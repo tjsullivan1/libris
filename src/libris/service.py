@@ -275,11 +275,6 @@ def find_existing(
             and normalize_for_match(note.first_author) == wanted_author
         ):
             return note
-            if (
-                note.first_author
-                and normalize_for_match(note.first_author) == wanted_author
-            ):
-                return note
     return None
 
 
