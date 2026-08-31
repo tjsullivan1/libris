@@ -1,10 +1,5 @@
 import { DaemonError, fields, health } from "./lib/client.js";
-import {
-  hasPermissionFor,
-  readSettings,
-  requestPermissionFor,
-  writeSettings,
-} from "./lib/settings.js";
+import { readSettings, requestPermissionFor, writeSettings } from "./lib/settings.js";
 
 const el = (id) => document.getElementById(id);
 
@@ -32,9 +27,12 @@ async function saveAndTest() {
     return;
   }
 
-  // Must happen inside the click: Chrome refuses a permission request that is
-  // not tied to a user gesture, and awaiting anything first loses the gesture.
-  if (!(await hasPermissionFor(baseUrl)) && !(await requestPermissionFor(baseUrl))) {
+  // Requested unconditionally, with nothing awaited before it. Chrome ties a
+  // permission request to a user gesture, and an intervening await spends the
+  // one this click carried. Asking for an origin that is already granted costs
+  // nothing and shows no prompt, so the check it replaces was only a way to
+  // lose the gesture before the request that needed it.
+  if (!(await requestPermissionFor(baseUrl))) {
     say(`Libris can't reach ${baseUrl} without that permission.`, "bad");
     return;
   }

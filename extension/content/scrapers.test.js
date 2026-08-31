@@ -151,3 +151,32 @@ describe("isBookish", () => {
     expect(isBookish(null)).toBe(false);
   });
 });
+
+describe("survives injection", () => {
+  /**
+   * Rebuild a scraper the way Chrome does.
+   *
+   * `chrome.scripting.executeScript({ func })` stringifies the function and
+   * evaluates it in the page, where nothing from this module exists. Importing
+   * a scraper directly, as every test above does, cannot notice a reference to
+   * module scope - it resolves fine in the test and throws in the browser.
+   */
+  function asInjected(scraper) {
+    return new Function(`return (${scraper.toString()})`)();
+  }
+
+  it.each([
+    ["scrapeAmazon", scrapeAmazon, "amazon-book.html", "https://www.amazon.com/dp/0441013597"],
+    ["scrapeGoodreads", scrapeGoodreads, "goodreads-book.html", "https://www.goodreads.com/book/show/44767458-dune"],
+    ["scrapeGeneric", scrapeGeneric, "generic-book.html", "https://bookshop.org/p/books/piranesi/1234"],
+  ])("%s reaches nothing outside itself", (_name, scraper, page, url) => {
+    // Given the scraper as the page will receive it
+    const injected = asInjected(scraper);
+
+    // When it runs with no module around it
+    const scrape = injected(fixture(page), url);
+
+    // Then it works, rather than throwing on an identifier left behind
+    expect(scrape.title).toBeTruthy();
+  });
+});

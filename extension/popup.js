@@ -54,18 +54,23 @@ function renderCandidates(candidates) {
   list.replaceChildren();
   for (const candidate of candidates) {
     const item = document.createElement("li");
-    item.className = "pick";
+    // A real button rather than a clickable <li>: it takes focus and answers
+    // Enter and Space without any of that being written here.
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "pick";
     if (candidate.thumbnail) {
       const image = document.createElement("img");
       image.src = candidate.thumbnail;
       image.alt = "";
-      item.append(image);
+      pick.append(image);
     }
     const text = document.createElement("div");
     const year = (candidate.published_date || "").slice(0, 4);
     text.textContent = `${describe(candidate)}${year ? ` (${year})` : ""}`;
-    item.append(text);
-    item.addEventListener("click", () => choose(candidate));
+    pick.append(text);
+    pick.addEventListener("click", () => choose(candidate));
+    item.append(pick);
     list.append(item);
   }
   show("candidates");

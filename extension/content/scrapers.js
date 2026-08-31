@@ -4,20 +4,20 @@
 // which serialises the function and runs it there - so a scraper may reference
 // globals like `document`, but never anything else in this module. That is why
 // the small helpers below are repeated inside each one rather than shared: a
-// call out to module scope would arrive in the page as a missing identifier.
+// call out to module scope would arrive in the page as a missing identifier -
+// including a regular expression hoisted to the top of the file, which is how
+// this was got wrong the first time. `survives injection` in the tests rebuilds
+// each scraper the way Chrome does and is what keeps the rule honest.
 //
 // The defaults are what makes them testable: injection calls them with no
 // arguments and they read the page, while a test passes a document and a URL.
-
-const AMAZON_ASIN = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:[/?#]|$)/;
-const GOODREADS_ID = /\/book\/show\/(\d+)/;
 
 /** Amazon: the ASIN is in the URL, and print editions state an ISBN. */
 export function scrapeAmazon(doc = document, url = location.href) {
   const clean = (value) => (value || "").replace(/\s+/g, " ").trim() || null;
   const textOf = (selector) => clean(doc.querySelector(selector)?.textContent);
 
-  const asin = AMAZON_ASIN.exec(url)?.[1] || null;
+  const asin = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:[/?#]|$)/.exec(url)?.[1] || null;
 
   // The detail block is a list of "label : value" rows rather than a table with
   // usable selectors, so the label is what identifies the row.
@@ -88,7 +88,7 @@ export function scrapeGoodreads(doc = document, url = location.href) {
     title,
     authors,
     source_url: url,
-    goodreads_id: GOODREADS_ID.exec(url)?.[1] || null,
+    goodreads_id: /\/book\/show\/(\d+)/.exec(url)?.[1] || null,
   };
 }
 
