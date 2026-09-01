@@ -9,6 +9,7 @@ Optional: the web stack installs only with `libris[server]`, so importing this
 module fails on a core install. cli.py imports it lazily and says so.
 """
 
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from typing import Any
@@ -156,7 +157,6 @@ async def _warm_index(app: FastAPI):
     """
     vault_path = config.get_vault_path()
     count = len(shelf.index_for(vault_path).notes())
-    import logging
     logging.getLogger(__name__).info("Indexed %d Book Notes", count)
     yield
 
