@@ -14,10 +14,10 @@ import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
-from libris import config  # noqa: E402
+from libris import config, shelf  # noqa: E402
 from libris.api import BookCandidate  # noqa: E402
 from libris.cli import app as cli_app  # noqa: E402
-from libris.markdown import create_book_note  # noqa: E402
+from libris.markdown import BookNote, create_book_note  # noqa: E402
 from libris.server import create_app  # noqa: E402
 
 runner = CliRunner()
@@ -626,3 +626,41 @@ def test_an_exact_match_still_answers_directly(token, tmp_path):
     # Then it is answered, not offered as a maybe
     assert response.status_code == 200
     assert response.json()["libris_id"]
+
+
+# --- startup ---
+
+
+def test_the_shelf_is_read_before_the_daemon_accepts_requests(
+    token, tmp_path, monkeypatch
+):
+    # Given a Shelf holding a book, and no index yet
+    config.set_book_vault_path(tmp_path)
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path)
+    shelf.forget_indexes()
+
+    parsed = []
+    original = BookNote.read
+
+    def _counted(path):
+        parsed.append(path)
+        return original(path)
+
+    monkeypatch.setattr(BookNote, "read", staticmethod(_counted))
+
+    # When the daemon starts, and is then asked about a book it holds
+    with TestClient(create_app()) as client:
+        assert parsed, "the Shelf should be read during startup, not on demand"
+        parsed.clear()
+
+        response = client.get(
+            "/api/v1/books",
+            params={"title": "Dune", "authors": ["Frank Herbert"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    # Then the question itself parsed nothing. Reading this Shelf costs about
+    # seven seconds at its real size, and the daemon binds late so that lands on
+    # startup rather than on somebody waiting in a browser popup (#85).
+    assert response.status_code == 200
+    assert parsed == []

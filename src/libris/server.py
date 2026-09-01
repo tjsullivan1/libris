@@ -9,7 +9,9 @@ Optional: the web stack installs only with `libris[server]`, so importing this
 module fails on a core install. cli.py imports it lazily and says so.
 """
 
+import logging
 import secrets
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -18,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import config, installed_version, service
+from . import config, installed_version, service, shelf
 from .api import BookCandidate, GoogleBooksClient
 
 DEFAULT_HOST = "127.0.0.1"
@@ -139,6 +141,26 @@ def libris_version() -> str:
     return installed_version()
 
 
+@asynccontextmanager
+async def _warm_index(_app: FastAPI):
+    """Read the Shelf before accepting requests.
+
+    The index makes every query after the first cost nothing, but the first
+    still pays for the whole Shelf - about seven seconds for 3,061 notes. Left
+    to happen on demand, that cost lands on somebody waiting in a browser
+    popup, which is the one moment it is least welcome.
+
+    So the daemon binds late instead. Started from a scheduled task at logon
+    (#55) nobody is waiting; started by hand it is one wait rather than a
+    surprise later. A Surface that connects during it sees no daemon at all,
+    which is a state the popup already reports plainly.
+    """
+    vault_path = config.get_vault_path()
+    count = len(shelf.index_for(vault_path).notes())
+    logging.getLogger(__name__).info("Indexed %d Book Notes", count)
+    yield
+
+
 def create_app() -> FastAPI:
     """Build the daemon's ASGI app.
 
@@ -148,7 +170,7 @@ def create_app() -> FastAPI:
     Returns:
         The configured FastAPI application.
     """
-    app = FastAPI(title="Libris", version=libris_version())
+    app = FastAPI(title="Libris", version=libris_version(), lifespan=_warm_index)
 
     @app.middleware("http")
     async def require_token(request: Request, call_next):
