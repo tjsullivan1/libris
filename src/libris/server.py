@@ -142,7 +142,7 @@ def libris_version() -> str:
 
 
 @asynccontextmanager
-async def _warm_index(app: FastAPI):
+async def _warm_index(_app: FastAPI):
     """Read the Shelf before accepting requests.
 
     The index makes every query after the first cost nothing, but the first
