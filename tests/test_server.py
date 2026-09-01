@@ -216,9 +216,10 @@ def test_health_reports_that_no_shelf_is_configured(client):
     # When the popup checks the connection
     body = client.get("/health").json()
 
-    # Then it can tell running from usable, rather than trusting a path that
-    # get_vault_path invented from the working directory (#82)
+    # Then it can tell running from usable, and is given no path at all rather
+    # than one get_vault_path invented from the working directory (#82)
     assert body["vault_configured"] is False
+    assert body["vault_path"] is None
 
 
 def test_health_reports_a_configured_shelf(token, configured_shelf):

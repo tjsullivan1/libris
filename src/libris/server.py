@@ -36,15 +36,14 @@ UNAUTHENTICATED_PATHS = frozenset({"/health"})
 class Health(BaseModel):
     """What the extension popup shows to say which Library it reached.
 
-    `vault_configured` is the difference between running and usable. Without a
-    configured Shelf `get_vault_path` falls back to the working directory (#82),
-    so a daemon started by a scheduled task would otherwise report a healthy
-    path nobody chose.
+    `vault_configured` is the difference between running and usable, and
+    `vault_path` is null rather than a guess when no Shelf is set (#82): a
+    daemon started by a scheduled task must not report a path nobody chose.
     """
 
     status: str
     version: str
-    vault_path: str
+    vault_path: str | None
     vault_configured: bool
 
 
@@ -268,11 +267,15 @@ def create_app() -> FastAPI:
     @app.get("/health", response_model=Health)
     async def health() -> Health:
         """Report that the daemon is up and which Shelf it is serving."""
+        # Health is the one endpoint that must answer while unconfigured -
+        # it is how the popup tells "not running" from "running but unusable"
+        # (ADR 0019) - so it reports the absence instead of raising on it.
+        configured = config.is_vault_configured()
         return Health(
             status="ok",
             version=libris_version(),
-            vault_path=str(config.get_vault_path()),
-            vault_configured=config.is_vault_configured(),
+            vault_path=str(config.get_vault_path()) if configured else None,
+            vault_configured=configured,
         )
 
     router = APIRouter(prefix="/api/v1")

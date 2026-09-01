@@ -35,6 +35,36 @@ def test_config_vault_path(tmp_path):
     assert "API key: *********-key" in result.output
 
 
+def test_config_reports_an_unset_vault_rather_than_guessing(tmp_path, monkeypatch):
+    # Given no configured Shelf, and a working directory that is not one
+    monkeypatch.chdir(tmp_path)
+
+    # When a person runs `libris config` to find out what is set
+    result = runner.invoke(app, ["config"])
+
+    # Then it says nothing is, instead of naming the directory it was run from
+    assert result.exit_code == 0
+    assert "Current vault path: Not set" in result.output
+    assert str(tmp_path) not in result.output
+
+
+def test_a_command_refuses_to_treat_the_working_directory_as_the_shelf(
+    tmp_path, monkeypatch
+):
+    # Given no configured Shelf, and a working directory holding a stray note
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Not A Book Note.md").write_text("# Not a Book Note", encoding="utf-8")
+
+    # When a command that reads the Shelf runs
+    result = runner.invoke(app, ["list"])
+
+    # Then it stops and says how to configure one, rather than reporting
+    # whatever happened to be in the directory it was launched from (#82)
+    assert result.exit_code == 1
+    assert "No Shelf is configured" in result.output
+    assert "libris config --vault" in result.output
+
+
 def test_config_vault_path_writes_legacy_and_new_keys(tmp_path):
     from libris.config import get_config_file
 
