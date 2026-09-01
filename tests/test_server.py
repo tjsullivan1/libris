@@ -14,10 +14,10 @@ import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
-from libris import config  # noqa: E402
+from libris import config, shelf  # noqa: E402
 from libris.api import BookCandidate  # noqa: E402
 from libris.cli import app as cli_app  # noqa: E402
-from libris.markdown import create_book_note  # noqa: E402
+from libris.markdown import BookNote, create_book_note  # noqa: E402
 from libris.note_format import (  # noqa: E402
     FORMAT_VALUES,
     PRIORITY_VALUES,
@@ -41,7 +41,7 @@ def client(token) -> TestClient:
 
 
 @pytest.fixture
-def shelf(tmp_path):
+def configured_shelf(tmp_path):
     """A configured Shelf. `libris serve` refuses to start without one."""
     config.set_book_vault_path(tmp_path)
     return tmp_path
@@ -221,14 +221,14 @@ def test_health_reports_that_no_shelf_is_configured(client):
     assert body["vault_configured"] is False
 
 
-def test_health_reports_a_configured_shelf(token, shelf):
+def test_health_reports_a_configured_shelf(token, configured_shelf):
     # Given a configured Shelf
     # When the popup checks the connection
     body = TestClient(create_app()).get("/health").json()
 
     # Then it is told the daemon is usable, not merely up
     assert body["vault_configured"] is True
-    assert body["vault_path"] == str(shelf)
+    assert body["vault_path"] == str(configured_shelf)
 
 
 # --- binding ---
@@ -247,7 +247,7 @@ def test_serve_refuses_a_non_loopback_host(monkeypatch):
     assert started == []
 
 
-def test_serve_binds_loopback_by_default(monkeypatch, shelf):
+def test_serve_binds_loopback_by_default(monkeypatch, configured_shelf):
     # Given a daemon started with no host argument
     started = []
     monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
@@ -260,7 +260,7 @@ def test_serve_binds_loopback_by_default(monkeypatch, shelf):
     assert started == [{"host": "127.0.0.1", "port": 8787, "reload": False}]
 
 
-def test_serve_accepts_any_loopback_address(monkeypatch, shelf):
+def test_serve_accepts_any_loopback_address(monkeypatch, configured_shelf):
     # Given a loopback address that is not 127.0.0.1
     started = []
     monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
@@ -274,7 +274,7 @@ def test_serve_accepts_any_loopback_address(monkeypatch, shelf):
     assert started == [{"host": "127.0.0.2", "port": 8787, "reload": False}]
 
 
-def test_serve_accepts_ipv6_loopback(monkeypatch, shelf):
+def test_serve_accepts_ipv6_loopback(monkeypatch, configured_shelf):
     # Given the IPv6 loopback address
     started = []
     monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
@@ -314,7 +314,9 @@ def test_serve_refuses_an_unresolvable_hostname(monkeypatch):
     assert started == []
 
 
-def test_serve_allows_a_routable_address_when_explicitly_permitted(monkeypatch, shelf):
+def test_serve_allows_a_routable_address_when_explicitly_permitted(
+    monkeypatch, configured_shelf
+):
     # Given an operator who means it
     started = []
     monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
@@ -827,3 +829,41 @@ def test_an_already_held_book_answers_with_the_title_it_is_held_under(token, tmp
     # echoing back what the person tried to add
     assert body["outcome"] == "already_present"
     assert body["book"]["title"] == "Dune (Dune Chronicles #1)"
+
+
+# --- startup ---
+
+
+def test_the_shelf_is_read_before_the_daemon_accepts_requests(
+    token, tmp_path, monkeypatch
+):
+    # Given a Shelf holding a book, and no index yet
+    config.set_book_vault_path(tmp_path)
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path)
+    shelf.forget_indexes()
+
+    parsed = []
+    original = BookNote.read
+
+    def _counted(path):
+        parsed.append(path)
+        return original(path)
+
+    monkeypatch.setattr(BookNote, "read", staticmethod(_counted))
+
+    # When the daemon starts, and is then asked about a book it holds
+    with TestClient(create_app()) as client:
+        assert parsed, "the Shelf should be read during startup, not on demand"
+        parsed.clear()
+
+        response = client.get(
+            "/api/v1/books",
+            params={"title": "Dune", "authors": ["Frank Herbert"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    # Then the question itself parsed nothing. Reading this Shelf costs about
+    # seven seconds at its real size, and the daemon binds late so that lands on
+    # startup rather than on somebody waiting in a browser popup (#85).
+    assert response.status_code == 200
+    assert parsed == []
