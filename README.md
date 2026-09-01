@@ -149,6 +149,97 @@ libris import library.json --apply --limit 50
 Currently supported import formats:
 - `audible-json` — Audible library JSON export (auto-detected for `.json` files)
 
+## Browser extension
+
+Clip the book on an Amazon or Goodreads page straight into your Library. The extension talks to a
+small daemon on your own machine, so the duplicate check runs against the live vault and a book
+you add is a file that exists by the time the popup says so.
+
+### 1. Install the daemon
+
+The web stack is optional, so it ships as an extra:
+
+```bash
+uv sync --extra server            # in this repo
+uv tool install 'libris[server]'  # anywhere else
+```
+
+Then start it and take note of the token:
+
+```bash
+libris serve
+libris serve --show-token
+```
+
+It binds `127.0.0.1` only, and refuses any other interface unless you pass `--allow-remote`. A
+bearer token is the only thing guarding your vault, so that refusal is deliberate.
+
+### 2. Load the extension
+
+1. Open `edge://extensions` (or `chrome://extensions`)
+2. Turn on **Developer mode**
+3. **Load unpacked**, and choose the `extension/` directory
+
+There is no build step. The extension is plain JavaScript with no dependencies, so what you load
+is what is in the repository.
+
+### 3. Connect it
+
+Open the extension's options page, paste the token from `libris serve --show-token`, and press
+**Save and test**. The default server URL is `http://127.0.0.1:8787`.
+
+If you change the URL — a different port, or a remote Libris later — the browser will ask for
+permission for that address the first time. That prompt is expected: the extension ships with
+permission for the default daemon only, and asks for anything else when you point it there.
+
+### Using it
+
+Open a book page and click the Libris icon. The extension reads the page, asks Google Books, and
+shows you the matches. Pick one, set the status, format and rating, and add it.
+
+- **Amazon** and **Goodreads** have scrapers that read identifiers directly.
+- **Anywhere else** falls back to Open Graph and JSON-LD metadata, so most bookshop sites work.
+- If a book is already in your vault, you are told before you fill anything in, and nothing is
+  overwritten.
+- If your vault holds something with a similar title, it is shown to you rather than guessed at.
+  Confirming that it is the same book skips the write; nothing is merged.
+- If Google Books finds nothing, you can correct the title and search again, or add the book
+  unenriched and let `libris autoenrich` fill it in later.
+
+The extension only reads a page when you click its icon. It holds no permission for Amazon,
+Goodreads, or anywhere else, which is also why it cannot tell you a page is a book page before
+you click.
+
+### Keeping the daemon running
+
+The extension needs the daemon up. On Windows, register it to start at logon:
+
+```powershell
+.\contrib\Register-LibrisDaemon.ps1
+```
+
+That creates a scheduled task, starts it, checks that the daemon actually answers, and prints
+the token. `-Remove` undoes it, and `-Port` matches a non-default port.
+
+On macOS a `launchd` user agent in `~/Library/LaunchAgents` does the same job, and on Linux a
+user-level `systemd` unit with `WantedBy=default.target`. Both need the absolute path to
+`libris` and the argument `serve`. Files for them are deliberately not shipped: nobody here can
+run them, and an untested plist that is subtly wrong is worse than a paragraph telling you what
+it needs to contain.
+
+### Troubleshooting
+
+The popup names the problem rather than reporting a generic failure:
+
+| What you see | What it means |
+| --- | --- |
+| Grant access to … on the options page | The server URL is not one the browser has let the extension reach. Press **Save and test** in options and accept the prompt. |
+| Libris isn't answering | The daemon is not running, or the URL points somewhere else. Start it with `libris serve`. |
+| No Shelf is configured | The daemon is up but has no vault. Run `libris config --vault <path>`. |
+| That token doesn't match | The daemon is up and reachable, but the token is stale. Run `libris serve --show-token` and paste it again. |
+| Google Books couldn't be reached | The lookup failed upstream. Nothing was written; try again. |
+| This doesn't look like a book page | The page yielded no title and no identifier. This is not a lookup failure — you are probably not on a book's page. |
+
 ## Schema
 Books are saved as Markdown files with the following frontmatter:
 - `title`

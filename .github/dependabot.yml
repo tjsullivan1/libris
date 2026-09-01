@@ -5,3 +5,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # The only dependency ecosystem here Dependabot can actually watch: it does
+  # not update uv.lock, so the Python dependencies are covered elsewhere.
+  - package-ecosystem: "npm"
+    directory: "/extension"
+    schedule:
+      interval: "weekly"

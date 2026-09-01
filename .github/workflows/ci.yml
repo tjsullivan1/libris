@@ -80,3 +80,31 @@ jobs:
           trap 'rm -f "$runtime_requirements"' EXIT
           uv export --no-hashes --frozen --no-dev --all-extras > "$runtime_requirements"
           uv tool run pip-audit --skip-editable -r "$runtime_requirements"
+
+  # The extension ships no build step and no runtime dependencies, so this job
+  # exists only to check it. Without it the extension would be the one part of
+  # the repo with no automated checks at all.
+  extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check linting
+        run: npm run lint
+
+      # Amazon and Goodreads will change their markup, and the failure is
+      # silent: the scraper returns nothing and the popup blames the lookup.
+      - name: Run scraper tests
+        run: npm test

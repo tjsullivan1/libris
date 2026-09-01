@@ -54,10 +54,17 @@ A candidate is offered to a person to confirm and never merged on its own, becau
 compared loosely and a wrong answer merges two different Books.
 _Avoid_: possible duplicate, near duplicate
 
+**Near Match**:
+A Book Note the Library may already hold for the Book a Surface is about to add. Offered to a
+person, never acted on alone: confirming one prevents a write and merges nothing, which is what
+separates it from a Duplicate Candidate.
+_Avoid_: similar note, fuzzy match
+
 **Matching**:
-Deciding whether two Book Notes describe the same book — the judgement behind duplicate
-detection and import de-duplication. Deliberately separate from identity, and allowed to be
-fuzzy because it is not a key.
+Deciding whether two descriptions of a book — two Book Notes, or a Book Candidate and a Book
+Note — refer to the same Book. The judgement behind duplicate detection, import de-duplication
+and the capture-time check. Deliberately separate from identity, and allowed to be fuzzy
+because it is not a key.
 _Avoid_: dedupe key, book key
 
 ### Surfaces

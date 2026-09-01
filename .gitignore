@@ -19,5 +19,6 @@ wheels/
 
 # claude worktrees 
 .claude/worktrees
-# Node, for the extension test and lint tooling only.
+# Node, for the extension test and lint tooling only. The extension itself
+# ships no dependencies and needs no build step.
 node_modules/

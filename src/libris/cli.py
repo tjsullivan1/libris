@@ -14,6 +14,7 @@ from .config import (
     ensure_server_token,
     get_obsidian_vault_root,
     get_vault_path,
+    is_vault_configured,
     set_book_vault_path,
     set_config,
 )
@@ -47,6 +48,7 @@ from .merge import (
 )
 from .migrate import apply_migration, plan_format_migration, plan_migration
 from .note_format import (
+    STATUS_VALUES,
     InvalidFieldValue,
     normalize_field_value,
     validate_field_value,
@@ -127,9 +129,10 @@ def status():
 
     selected_file = vault_path / selected_file_name
 
-    new_status = questionary.select(
-        "New status:", choices=["To Read", "Reading", "Finished"]
-    ).ask()
+    # Offered from the Library's own vocabulary rather than a list kept here.
+    # This prompt used to offer "Finished", which no note has ever held, and
+    # omit "Not To Read"; since validation landed, choosing it raised.
+    new_status = questionary.select("New status:", choices=list(STATUS_VALUES)).ask()
 
     if not new_status:
         return
@@ -1273,6 +1276,15 @@ def serve(
         typer.echo("Install it with: uv sync --extra server")
         typer.echo("or, outside this repo: pip install 'libris[server]'")
         raise typer.Exit(1) from None
+
+    if not is_vault_configured():
+        # get_vault_path falls back to the working directory (#82), so without
+        # this the daemon would serve whatever directory it was started in -
+        # and #55 starts it from a scheduled task, where nobody picked that
+        # directory at all.
+        typer.echo("No Shelf is configured, so the daemon has nothing to serve.")
+        typer.echo("Set one with: libris config --vault <path>")
+        raise typer.Exit(1)
 
     ensure_server_token()
     typer.echo(f"Libris daemon listening on http://{host}:{port}")

@@ -22,6 +22,8 @@ from pydantic import BaseModel
 
 from . import config, installed_version, service, shelf
 from .api import BookCandidate, GoogleBooksClient
+from .markdown import BookNote
+from .note_format import FIELD_VOCABULARIES, MULTI_VALUED_FIELDS
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -32,11 +34,18 @@ UNAUTHENTICATED_PATHS = frozenset({"/health"})
 
 
 class Health(BaseModel):
-    """What the extension popup shows to say which Library it reached."""
+    """What the extension popup shows to say which Library it reached.
+
+    `vault_configured` is the difference between running and usable. Without a
+    configured Shelf `get_vault_path` falls back to the working directory (#82),
+    so a daemon started by a scheduled task would otherwise report a healthy
+    path nobody chose.
+    """
 
     status: str
     version: str
     vault_path: str
+    vault_configured: bool
 
 
 # How long a single request may spend talking to Google Books. The client
@@ -111,13 +120,55 @@ class LookupResponse(BaseModel):
     candidates: list[CandidateModel]
 
 
-class ExistingBook(BaseModel):
-    """A Book Note already on the Shelf."""
+class BookRef(BaseModel):
+    """How a Book Note is named on the wire.
+
+    One shape for every place a response points at a note - the answer to a
+    lookup, the Near Matches beside a miss, and the result of a write. ADR 0020
+    makes shape the thing adapters share, so a fourth place needing these
+    fields should reuse this rather than arrange them again.
+    """
 
     libris_id: str | None
     path: str
     title: str | None
     authors: list[str]
+
+    @classmethod
+    def of(cls, note: BookNote) -> "BookRef":
+        """Build the wire form of a Book Note."""
+        return cls(
+            libris_id=note.libris_id,
+            path=str(note.path),
+            title=note.title,
+            authors=note.authors,
+        )
+
+
+class BookLookup(BaseModel):
+    """Whether the Library holds a Book, and what it nearly holds.
+
+    A miss answers 200 rather than 404 (ADR 0021): a search that matched
+    nothing succeeded, and the extension points at a base URL a person types,
+    where a real 404 means the URL is wrong.
+    """
+
+    found: bool
+    book: BookRef | None = None
+    near_matches: list[BookRef] = []
+
+
+class FieldSpec(BaseModel):
+    """What a Surface needs to render a control for one field."""
+
+    values: list[str]
+    multi: bool
+
+
+class FieldVocabularies(BaseModel):
+    """The values the Library defines, so no client restates them (ADR 0022)."""
+
+    fields: dict[str, FieldSpec]
 
 
 class CreateRequest(BaseModel):
@@ -128,10 +179,9 @@ class CreateRequest(BaseModel):
 
 
 class WriteResponse(BaseModel):
-    """The answer to a write: identity, what happened, and what backs it."""
+    """The answer to a write: which note, what happened, and what backs it."""
 
-    libris_id: str | None
-    path: str
+    book: BookRef
     outcome: str
     guarantee: str
 
@@ -139,6 +189,13 @@ class WriteResponse(BaseModel):
 def libris_version() -> str:
     """Get the installed libris version, or "unknown" if it cannot be read."""
     return installed_version()
+
+
+# uvicorn configures its own loggers and leaves the root logger alone, so a
+# module logger emits nothing an operator will ever see: the line explaining why
+# `libris serve` pauses for seven seconds would be written and dropped. This is
+# the logger uvicorn writes its own startup lines to.
+_STARTUP_LOG = logging.getLogger("uvicorn.error")
 
 
 @asynccontextmanager
@@ -157,7 +214,7 @@ async def _warm_index(_app: FastAPI):
     """
     vault_path = config.get_vault_path()
     count = len(shelf.index_for(vault_path).notes())
-    logging.getLogger(__name__).info("Indexed %d Book Notes", count)
+    _STARTUP_LOG.info("Indexed %d Book Notes from %s", count, vault_path)
     yield
 
 
@@ -215,6 +272,7 @@ def create_app() -> FastAPI:
             status="ok",
             version=libris_version(),
             vault_path=str(config.get_vault_path()),
+            vault_configured=config.is_vault_configured(),
         )
 
     router = APIRouter(prefix="/api/v1")
@@ -228,6 +286,7 @@ def create_app() -> FastAPI:
                 asin=request.asin,
                 title=request.title,
                 authors=request.authors,
+                source_url=request.source_url,
                 client=GoogleBooksClient(
                     timeout=UPSTREAM_MAX_WAIT_SECONDS / 3,
                     max_retries=1,
@@ -241,13 +300,13 @@ def create_app() -> FastAPI:
 
         return LookupResponse(candidates=[CandidateModel.of(c) for c in candidates])
 
-    @router.get("/books", response_model=ExistingBook)
+    @router.get("/books", response_model=BookLookup)
     async def get_book(
         isbn: str | None = None,
         google_books_id: str | None = None,
         title: str | None = None,
         authors: list[str] = Query(default=[]),
-    ) -> ExistingBook:
+    ) -> BookLookup:
         """Report whether the Library already holds a Book."""
         vault_path = config.get_vault_path()
         note = service.find_existing(
@@ -257,34 +316,21 @@ def create_app() -> FastAPI:
             title=title,
             authors=authors,
         )
-        if note is None:
-            # A miss is a miss (ADR 0003), so this is still a 404. Notes that
-            # might be the same Book ride along, because a scraped title often
-            # lacks the subtitle the note carries - and deciding that for the
-            # caller is exactly what would say "already held" about a Book that
-            # is not. The person in the popup settles it.
-            similar = service.find_similar(vault_path, title=title, authors=authors)
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "message": "Not in your Library.",
-                    "similar": [
-                        {
-                            "libris_id": n.libris_id,
-                            "path": str(n.path),
-                            "title": n.title,
-                            "authors": n.authors,
-                        }
-                        for n in similar
-                    ],
-                },
-            )
+        if note is not None:
+            return BookLookup(found=True, book=BookRef.of(note))
 
-        return ExistingBook(
-            libris_id=note.libris_id,
-            path=str(note.path),
-            title=note.title,
-            authors=note.authors,
+        # A miss is a miss (ADR 0003) and says so in the body rather than in
+        # the status: a search that matched nothing succeeded (ADR 0021).
+        # Near Matches ride along, because a scraped title often lacks the
+        # subtitle the note carries - and deciding that here is exactly what
+        # would report "already held" about a Book that is not. The person in
+        # the popup settles it.
+        return BookLookup(
+            found=False,
+            near_matches=[
+                BookRef.of(n)
+                for n in service.find_similar(vault_path, title=title, authors=authors)
+            ],
         )
 
     @router.post("/books", response_model=WriteResponse, status_code=201)
@@ -306,10 +352,31 @@ def create_app() -> FastAPI:
             response.status_code = 200
 
         return WriteResponse(
-            libris_id=result.libris_id,
-            path=str(result.path),
+            book=BookRef(
+                libris_id=result.libris_id,
+                path=str(result.path),
+                title=result.title,
+                authors=result.authors,
+            ),
             outcome=result.outcome.value,
             guarantee=GUARANTEE,
+        )
+
+    @router.get("/fields", response_model=FieldVocabularies)
+    async def fields() -> FieldVocabularies:
+        """Report the values the Library defines for each field (ADR 0022).
+
+        Served rather than restated by each client, because ADR 0005 makes the
+        vault's own vocabulary canonical and ADR 0020 builds clients that can be
+        pointed at a second Library. `multi` travels too: without it a Surface
+        would still have to know from somewhere that a Format is several values
+        and a Status is one.
+        """
+        return FieldVocabularies(
+            fields={
+                name: FieldSpec(values=list(values), multi=name in MULTI_VALUED_FIELDS)
+                for name, values in FIELD_VOCABULARIES.items()
+            }
         )
 
     app.include_router(router)

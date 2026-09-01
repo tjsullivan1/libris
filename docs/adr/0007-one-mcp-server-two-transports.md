@@ -15,3 +15,8 @@ and quicker to cold-start.
 Terraform provisions it, not Bicep. Beyond preference, the `azuread` provider makes the
 Entra application registration a first-class resource, which Bicep cannot do without a
 preview Graph extension. The bootstrap step that would otherwise sit outside IaC disappears.
+
+Narrowed by ADR 0020: the tool definitions do not change between the transports, but their
+answers do. A tool that writes reports a different Duplicate Guarantee and a different outcome
+vocabulary over Streamable HTTP than over stdio, because only the local transport reaches the
+live Shelf.

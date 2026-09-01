@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Libris options</title>
+<link rel="stylesheet" href="popup.css">
+<body class="options">
+  <h1>Libris</h1>
+
+  <label>Server URL
+    <input id="base-url" type="text" placeholder="http://127.0.0.1:8787">
+  </label>
+  <p class="hint">
+    The local daemon by default. Any other address needs a one-off permission,
+    which the button below asks for.
+  </p>
+
+  <label>Token
+    <input id="credential" type="password" autocomplete="off">
+  </label>
+  <p class="hint">Run <code>libris serve --show-token</code> to see it.</p>
+
+  <div class="actions">
+    <button id="save" class="primary">Save and test</button>
+  </div>
+
+  <p id="message" class="message" hidden></p>
+
+  <script type="module" src="options.js"></script>
+</body>

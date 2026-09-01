@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Libris</title>
+<link rel="stylesheet" href="popup.css">
+<body>
+  <header>
+    <strong>Libris</strong>
+    <a id="open-options" href="#">Options</a>
+  </header>
+
+  <p id="message" class="message" hidden></p>
+
+  <section id="held" hidden>
+    <h2>Already in your Library</h2>
+    <p class="book" id="held-book"></p>
+  </section>
+
+  <section id="near-matches" hidden>
+    <h2>You may already have this</h2>
+    <p class="hint">Libris didn't find an exact match, but these look close.</p>
+    <ul id="near-matches-list"></ul>
+    <div class="actions">
+      <button id="near-match-same">That's the same book</button>
+      <button id="near-match-different" class="primary">No, add it</button>
+    </div>
+  </section>
+
+  <section id="retry" hidden>
+    <h2>Not found on Google Books</h2>
+    <p class="hint">Check what the page gave us, then search again.</p>
+    <label>Title <input id="retry-title" type="text"></label>
+    <label>Authors <input id="retry-authors" type="text" placeholder="comma separated"></label>
+    <div class="actions">
+      <button id="retry-search" class="primary">Search again</button>
+      <button id="retry-bare">Add without enrichment</button>
+    </div>
+  </section>
+
+  <section id="candidates" hidden>
+    <h2>Which one is it?</h2>
+    <ul id="candidate-list"></ul>
+  </section>
+
+  <section id="details" hidden>
+    <h2>Add to your Library</h2>
+    <p class="book" id="chosen"></p>
+    <div id="field-controls"></div>
+    <div class="actions">
+      <button id="add" class="primary">Add</button>
+    </div>
+  </section>
+
+  <script type="module" src="popup.js"></script>
+</body>

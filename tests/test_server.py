@@ -18,6 +18,11 @@ from libris import config, shelf  # noqa: E402
 from libris.api import BookCandidate  # noqa: E402
 from libris.cli import app as cli_app  # noqa: E402
 from libris.markdown import BookNote, create_book_note  # noqa: E402
+from libris.note_format import (  # noqa: E402
+    FORMAT_VALUES,
+    PRIORITY_VALUES,
+    STATUS_VALUES,
+)
 from libris.server import create_app  # noqa: E402
 
 runner = CliRunner()
@@ -33,6 +38,13 @@ def token() -> str:
 def client(token) -> TestClient:
     """A client for an app built after the token exists."""
     return TestClient(create_app())
+
+
+@pytest.fixture
+def configured_shelf(tmp_path):
+    """A configured Shelf. `libris serve` refuses to start without one."""
+    config.set_book_vault_path(tmp_path)
+    return tmp_path
 
 
 # --- health ---
@@ -199,6 +211,26 @@ def test_no_origin_is_allowed_when_none_are_configured(token):
     assert response.headers.get("access-control-allow-origin") is None
 
 
+def test_health_reports_that_no_shelf_is_configured(client):
+    # Given a daemon started before anyone set a vault path
+    # When the popup checks the connection
+    body = client.get("/health").json()
+
+    # Then it can tell running from usable, rather than trusting a path that
+    # get_vault_path invented from the working directory (#82)
+    assert body["vault_configured"] is False
+
+
+def test_health_reports_a_configured_shelf(token, configured_shelf):
+    # Given a configured Shelf
+    # When the popup checks the connection
+    body = TestClient(create_app()).get("/health").json()
+
+    # Then it is told the daemon is usable, not merely up
+    assert body["vault_configured"] is True
+    assert body["vault_path"] == str(configured_shelf)
+
+
 # --- binding ---
 def test_serve_refuses_a_non_loopback_host(monkeypatch):
     # Given a daemon asked to bind a public interface
@@ -215,7 +247,7 @@ def test_serve_refuses_a_non_loopback_host(monkeypatch):
     assert started == []
 
 
-def test_serve_binds_loopback_by_default(monkeypatch):
+def test_serve_binds_loopback_by_default(monkeypatch, configured_shelf):
     # Given a daemon started with no host argument
     started = []
     monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
@@ -228,7 +260,7 @@ def test_serve_binds_loopback_by_default(monkeypatch):
     assert started == [{"host": "127.0.0.1", "port": 8787, "reload": False}]
 
 
-def test_serve_accepts_any_loopback_address(monkeypatch):
+def test_serve_accepts_any_loopback_address(monkeypatch, configured_shelf):
     # Given a loopback address that is not 127.0.0.1
     started = []
     monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
@@ -242,7 +274,7 @@ def test_serve_accepts_any_loopback_address(monkeypatch):
     assert started == [{"host": "127.0.0.2", "port": 8787, "reload": False}]
 
 
-def test_serve_accepts_ipv6_loopback(monkeypatch):
+def test_serve_accepts_ipv6_loopback(monkeypatch, configured_shelf):
     # Given the IPv6 loopback address
     started = []
     monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
@@ -282,7 +314,9 @@ def test_serve_refuses_an_unresolvable_hostname(monkeypatch):
     assert started == []
 
 
-def test_serve_allows_a_routable_address_when_explicitly_permitted(monkeypatch):
+def test_serve_allows_a_routable_address_when_explicitly_permitted(
+    monkeypatch, configured_shelf
+):
     # Given an operator who means it
     started = []
     monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
@@ -295,6 +329,23 @@ def test_serve_allows_a_routable_address_when_explicitly_permitted(monkeypatch):
     # Then it binds what was asked for
     assert result.exit_code == 0
     assert started == [{"host": "192.168.1.10", "port": 8787, "reload": False}]
+
+
+def test_serve_refuses_to_start_without_a_shelf(monkeypatch):
+    # Given a machine where no vault path has been set
+    started = []
+    monkeypatch.setattr("libris.server.run", lambda **kw: started.append(kw))
+
+    # When the daemon is started
+    result = runner.invoke(cli_app, ["serve"])
+
+    # Then it refuses and says how to fix it, rather than serving whatever
+    # directory it happened to be started in - which for #55's scheduled task
+    # is a directory nobody chose (#82)
+    assert result.exit_code != 0
+    assert "No Shelf is configured" in result.output
+    assert "libris config --vault" in result.output
+    assert started == []
 
 
 # --- /api/v1/lookup ---
@@ -437,11 +488,13 @@ def test_existing_note_is_found_by_isbn(token, tmp_path):
     # Then it is told so, with the identity rather than only a filename
     assert response.status_code == 200
     body = response.json()
-    assert body["libris_id"]
-    assert "Dune" in body["path"]
+    assert body["found"] is True
+    assert body["book"]["libris_id"]
+    assert body["book"]["title"] == "Dune"
+    assert "Dune" in body["book"]["path"]
 
 
-def test_a_book_not_held_answers_404(token, tmp_path):
+def test_a_book_not_held_says_so_in_the_body(token, tmp_path):
     # Given an empty Shelf
     config.set_book_vault_path(tmp_path)
 
@@ -452,8 +505,14 @@ def test_a_book_not_held_answers_404(token, tmp_path):
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    # Then a miss is a miss (ADR 0003)
-    assert response.status_code == 404
+    # Then a miss is a miss (ADR 0003), reported in the body rather than the
+    # status: a search that matched nothing succeeded (ADR 0021), and a real
+    # 404 means the base URL is wrong
+    assert response.status_code == 200
+    body = response.json()
+    assert body["found"] is False
+    assert body["book"] is None
+    assert body["near_matches"] == []
 
 
 # --- POST /api/v1/books ---
@@ -486,7 +545,7 @@ def test_creating_a_book_note_answers_with_its_identity(token, tmp_path):
     # guarantee stands behind it (ADR 0016)
     assert response.status_code == 201
     body = response.json()
-    assert body["libris_id"]
+    assert body["book"]["libris_id"]
     assert body["outcome"] == "created"
     assert body["guarantee"] == "live_shelf"
     assert (tmp_path / "Dune - Frank Herbert.md").exists()
@@ -507,7 +566,7 @@ def test_adding_a_book_already_held_leaves_it_untouched(token, tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["outcome"] == "already_present"
-    assert body["libris_id"] == first["libris_id"]
+    assert body["book"]["libris_id"] == first["book"]["libris_id"]
     assert note_path.read_text(encoding="utf-8") == original
 
 
@@ -548,7 +607,7 @@ def test_an_illegal_status_value_is_refused(token, tmp_path):
     assert not any(tmp_path.glob("*.md"))
 
 
-def test_a_near_title_is_offered_rather_than_decided(token, tmp_path):
+def test_a_near_match_is_offered_rather_than_decided(token, tmp_path):
     # Given a note whose title carries a subtitle the scraped page does not
     config.set_book_vault_path(tmp_path)
     create_book_note(
@@ -565,11 +624,13 @@ def test_a_near_title_is_offered_rather_than_decided(token, tmp_path):
 
     # Then it is still a miss - nothing claims this is the same Book - but the
     # popup is given the near match so a person can settle it
-    assert response.status_code == 404
-    similar = response.json()["detail"]["similar"]
-    assert len(similar) == 1
-    assert similar[0]["title"] == "The Brass Verdict: A Novel"
-    assert similar[0]["libris_id"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["found"] is False
+    near_matches = body["near_matches"]
+    assert len(near_matches) == 1
+    assert near_matches[0]["title"] == "The Brass Verdict: A Novel"
+    assert near_matches[0]["libris_id"]
 
 
 def test_a_different_book_by_the_same_author_is_not_offered(token, tmp_path):
@@ -588,8 +649,8 @@ def test_a_different_book_by_the_same_author_is_not_offered(token, tmp_path):
     )
 
     # Then nothing is offered, because nothing resembles it
-    assert response.status_code == 404
-    assert response.json()["detail"]["similar"] == []
+    assert response.status_code == 200
+    assert response.json()["near_matches"] == []
 
 
 def test_a_near_title_by_another_author_is_not_offered(token, tmp_path):
@@ -607,8 +668,8 @@ def test_a_near_title_by_another_author_is_not_offered(token, tmp_path):
     )
 
     # Then the author keeps them apart
-    assert response.status_code == 404
-    assert response.json()["detail"]["similar"] == []
+    assert response.status_code == 200
+    assert response.json()["near_matches"] == []
 
 
 def test_an_exact_match_still_answers_directly(token, tmp_path):
@@ -624,8 +685,150 @@ def test_an_exact_match_still_answers_directly(token, tmp_path):
     )
 
     # Then it is answered, not offered as a maybe
+    body = response.json()
+    assert body["found"] is True
+    assert body["book"]["libris_id"]
+    assert body["near_matches"] == []
+
+
+# --- GET /api/v1/fields ---
+
+
+def test_fields_needs_a_token(client):
+    # Given a caller with no credential
+    # When it asks what the Library defines
+    response = client.get("/api/v1/fields")
+
+    # Then it is refused: a field vocabulary is Library data (ADR 0022)
+    assert response.status_code == 401
+
+
+def test_fields_reports_the_vocabularies_the_library_defines(client, token):
+    # Given a running daemon
+    # When a Surface asks what values it may offer
+    response = client.get(
+        "/api/v1/fields", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    # Then it is told, so no client restates them and drifts the way
+    # `libris update` did with "Finished"
     assert response.status_code == 200
-    assert response.json()["libris_id"]
+    fields = response.json()["fields"]
+    assert fields["status"]["values"] == list(STATUS_VALUES)
+    assert fields["priority"]["values"] == list(PRIORITY_VALUES)
+    assert fields["format"]["values"] == list(FORMAT_VALUES)
+
+
+def test_fields_says_which_of_them_hold_several_values(client, token):
+    # Given a Surface that has to choose a control for each field
+    response = client.get(
+        "/api/v1/fields", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    # Then Format is marked as holding several at once and Status as holding
+    # one, so the popup does not have to know that from somewhere else
+    fields = response.json()["fields"]
+    assert fields["format"]["multi"] is True
+    assert fields["status"]["multi"] is False
+    assert fields["priority"]["multi"] is False
+
+
+# --- source_url ---
+
+
+def test_an_amazon_url_yields_an_asin_when_the_scraper_found_none(
+    client, token, monkeypatch
+):
+    # Given a page whose ASIN is a valid ISBN-10, present only in the URL
+    captured = _mock_search(monkeypatch, [])
+
+    # When the extension looks the page up without an asin field
+    client.post(
+        "/api/v1/lookup",
+        json={
+            "title": "Dune",
+            "source_url": "https://www.amazon.com/dp/0441013597/ref=sr_1_1",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then the identifier in the URL is used, because an identifier names one
+    # edition where a title names a book that may have twenty
+    assert captured["query"] == "isbn:0441013597"
+
+
+def test_a_scraped_asin_wins_over_the_url(client, token, monkeypatch):
+    # Given both an ASIN from the page and one in the URL
+    captured = _mock_search(monkeypatch, [])
+
+    # When the extension looks it up
+    client.post(
+        "/api/v1/lookup",
+        json={
+            "asin": "0441013597",
+            "source_url": "https://www.amazon.com/dp/1234567890",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then what the scraper read from the page is preferred
+    assert captured["query"] == "isbn:0441013597"
+
+
+def test_a_url_that_names_no_book_is_not_mistaken_for_one(client, token, monkeypatch):
+    # Given a page that is not a product page
+    captured = _mock_search(monkeypatch, [])
+
+    # When the extension looks it up
+    client.post(
+        "/api/v1/lookup",
+        json={
+            "title": "Dune",
+            "source_url": "https://www.amazon.com/gp/cart/view.html",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then nothing is invented from the URL and the names are used
+    assert captured["query"] == "intitle:Dune"
+
+
+# --- what a write answers with ---
+
+
+def test_a_write_names_the_note_it_points_at(token, tmp_path):
+    # Given a Shelf without the book
+    config.set_book_vault_path(tmp_path)
+
+    # When the extension adds it
+    body = _post_book(token).json()
+
+    # Then the answer carries what a person is shown, not only a path - the
+    # device running the extension may hold no Shelf at all (ADR 0019)
+    assert body["book"]["title"] == "Dune"
+    assert body["book"]["authors"] == ["Frank Herbert"]
+
+
+def test_an_already_held_book_answers_with_the_title_it_is_held_under(token, tmp_path):
+    # Given a note whose title differs from the one the page shows, matched on
+    # ISBN rather than on the titles agreeing
+    config.set_book_vault_path(tmp_path)
+    create_book_note(
+        BookCandidate(
+            title="Dune (Dune Chronicles #1)",
+            authors=["Frank Herbert"],
+            isbn="9780441013593",
+        ),
+        tmp_path,
+    )
+
+    # When the same book is captured from a page calling it something shorter
+    body = _post_book(token).json()
+
+    # Then the popup can name the Book as the Library holds it, rather than
+    # echoing back what the person tried to add
+    assert body["outcome"] == "already_present"
+    assert body["book"]["title"] == "Dune (Dune Chronicles #1)"
 
 
 # --- startup ---
