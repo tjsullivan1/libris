@@ -156,7 +156,8 @@ async def _warm_index(app: FastAPI):
     """
     vault_path = config.get_vault_path()
     count = len(shelf.index_for(vault_path).notes())
-    print(f"Indexed {count} Book Notes from {vault_path}", flush=True)
+    import logging
+    logging.getLogger(__name__).info("Indexed %d Book Notes", count)
     yield
 
 
