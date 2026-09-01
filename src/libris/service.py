@@ -19,6 +19,7 @@ from .merge import (
     merge_two_books,
     write_merged_book,
 )
+from .shelf import index_for
 
 
 class Outcome(Enum):
@@ -194,9 +195,10 @@ def find_existing(
 ) -> BookNote | None:
     """Find a Book Note already on the Shelf describing this book.
 
-    Checked against the live Shelf rather than an index, so the answer is true
-    at the moment it is given - the stronger of the two duplicate guarantees
-    (ADR 0010).
+    Checked against the live Shelf, so the answer is true at the moment it is
+    given - the stronger of the two duplicate guarantees (ADR 0010). The notes
+    come from an index, which is revalidated against the filesystem on every
+    call rather than held for a lifetime, so that remains true.
 
     Args:
         vault_path: The Shelf to search.
@@ -211,11 +213,7 @@ def find_existing(
     wanted_title = normalize_for_match(title) if title else None
     wanted_author = normalize_for_match(authors[0]) if authors else None
 
-    for book_path in list_books(vault_path):
-        note = BookNote.read(book_path)
-        if note is None:
-            continue
-
+    for note in index_for(vault_path).notes():
         if isbn and note.frontmatter.get("isbn") == isbn:
             return note
         if (
@@ -232,11 +230,6 @@ def find_existing(
             and normalize_for_match(note.first_author) == wanted_author
         ):
             return note
-            if (
-                note.first_author
-                and normalize_for_match(note.first_author) == wanted_author
-            ):
-                return note
     return None
 
 
@@ -275,9 +268,8 @@ def find_similar(
     wanted_author = normalize_for_match(authors[0]) if authors else None
 
     found: list[BookNote] = []
-    for book_path in list_books(vault_path):
-        note = BookNote.read(book_path)
-        if note is None or not note.title:
+    for note in index_for(vault_path).notes():
+        if not note.title:
             continue
         if wanted_author is not None:
             if not note.first_author:

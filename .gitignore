@@ -19,3 +19,5 @@ wheels/
 
 # claude worktrees 
 .claude/worktrees
+# Node, for the extension test and lint tooling only.
+node_modules/
