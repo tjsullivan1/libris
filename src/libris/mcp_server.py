@@ -73,17 +73,21 @@ def _shelf() -> Path:
     on a stderr nobody reads; a tool that answers with the fix puts it in front
     of the person who can apply it.
     """
-    if not config.is_vault_configured():
-        # Asked before get_vault_path rather than after, because on this branch
-        # that function still falls back to the working directory (#82) - and
-        # an MCP client spawns this server from whatever directory it happens to
-        # be in. Without the guard, an unconfigured add_book would write Book
-        # Notes into a stranger's project folder.
-        raise ToolError(
-            "No Shelf is configured, so there is no Library to work with. "
-            "Set one with: libris config --vault <path>"
-        )
-    return config.get_vault_path()
+    try:
+        if not config.is_vault_configured():
+            raise config.VaultNotConfigured(
+                "No Shelf is configured, so there is no Library to work with."
+            )
+        return config.get_vault_path()
+    except config.VaultNotConfigured as exc:
+        # Asked and caught, rather than either alone. get_vault_path refuses to
+        # guess since #82, so the catch is what makes this correct; the question
+        # in front of it keeps the message the tool's own, and covers a Shelf
+        # unconfigured between the two calls. Getting this wrong is not a small
+        # thing here: an MCP client spawns the server from whatever directory it
+        # happens to be in, so a fallback to the working directory would write
+        # Book Notes into a stranger's project folder.
+        raise ToolError(f"{exc} Set one with: libris config --vault <path>") from None
 
 
 def _text(value: object) -> str | None:
