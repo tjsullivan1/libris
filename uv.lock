@@ -529,7 +529,6 @@ server = [
 [package.dev-dependencies]
 dev = [
     { name = "ipython" },
-    { name = "libris", extra = ["mcp", "server"] },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -538,7 +537,6 @@ lint = [
     { name = "ruff" },
 ]
 test = [
-    { name = "libris", extra = ["mcp", "server"] },
     { name = "pytest" },
     { name = "pytest-cov" },
 ]
@@ -560,14 +558,12 @@ provides-extras = ["server", "mcp"]
 [package.metadata.requires-dev]
 dev = [
     { name = "ipython" },
-    { name = "libris", extras = ["server", "mcp"] },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
 lint = [{ name = "ruff" }]
 test = [
-    { name = "libris", extras = ["server", "mcp"] },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-cov" },
 ]

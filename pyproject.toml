@@ -41,10 +41,11 @@ lint = [
 test = [
   "pytest>=9.0.3",
   "pytest-cov",
-  # Both optional extras belong here rather than being left to the extra: the
-  # adapter tests skip themselves when their import is missing, and a suite that
-  # silently drops fifty tests looks exactly like a clean run.
-  "libris[server,mcp]",
+  # The optional extras deliberately do NOT belong here. This group installs on
+  # every `uv sync`, including CI's no-extras leg, whose whole job is to prove
+  # the core CLI works without them. Locally, `uv sync --all-extras` runs the
+  # whole suite; CI covers each combination as a matrix leg and asserts the
+  # imports are present, so a silently-skipped fifty tests fails loudly instead.
 ]
 
 [project.scripts]
