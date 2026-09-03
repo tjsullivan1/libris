@@ -6,6 +6,7 @@ module knows about HTTP, and it raises rather than returning status codes: the
 adapter decides what a failure looks like on the wire.
 """
 
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,6 +21,7 @@ from .merge import (
     merge_two_books,
     write_merged_book,
 )
+from .note_format import validate_field_value
 from .shelf import index_for
 
 
@@ -324,6 +326,222 @@ def find_similar(
 
     found.sort(key=lambda n: len(n.title or ""))
     return found[:limit]
+
+
+# What a search returns when the caller does not say, and the most it will
+# return however loudly they ask. A Surface asking for everything is asking to
+# read 1,452 To Read notes into a context window, which is what the ceiling
+# exists to refuse; the total travels instead so the answer stays honest.
+DEFAULT_SEARCH_LIMIT = 20
+MAX_SEARCH_LIMIT = 50
+
+# Words that say how a person is talking rather than which book they mean. A
+# query still scores them - "The Way of Kings" should outrank "Kings of the
+# Wyld" partly on "of" - but a note matching nothing else is not a match, or
+# searching for a title with "the" in it would report most of the Shelf.
+#
+# Curated rather than derived, because frequency cannot do this job: measured on
+# the real Shelf, "poems" appears in 51 notes and "one" in 50. They are
+# statistically identical and only one of them names a book. The list covers
+# pronouns, determiners, common prepositions and the filler of a spoken request
+# ("that mistborn one I just finished"), and holds no word that could title a
+# book on its own.
+_STOP_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "am",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "i",
+        "in",
+        "is",
+        "it",
+        "its",
+        "just",
+        "me",
+        "mine",
+        "my",
+        "of",
+        "on",
+        "one",
+        "ones",
+        "or",
+        "some",
+        "that",
+        "the",
+        "these",
+        "this",
+        "those",
+        "to",
+        "was",
+        "were",
+        "with",
+    }
+)
+
+
+@dataclass
+class SearchResult:
+    """What the Library holds for a query, and how much of it was returned.
+
+    `total` counts every match, not the returned slice. A Surface that shows
+    five of 1,452 can then say so, rather than implying it saw them all.
+    """
+
+    total: int
+    limit: int
+    books: list[BookNote] = field(default_factory=list)
+
+
+def _search_tokens(text: str) -> set[str]:
+    """Split text into the normalized words a search compares."""
+    normalized = normalize_for_match(text)
+    return set(normalized.split()) if normalized else set()
+
+
+def _weights(note_tokens: list[set[str]]) -> dict[str, float]:
+    """Weigh each word on the Shelf by how few notes carry it.
+
+    A word naming three notes says far more about which book was meant than one
+    naming fifty, and scoring every matched word alike is what put "The Hot One"
+    above "The Final Empire: Mistborn Book 1" for "that mistborn one".
+
+    Args:
+        note_tokens: The word set of every Book Note being searched.
+
+    Returns:
+        A weight per word. `1 + n/df` rather than `n/df`, so a word every note
+        carries still weighs something and a Shelf of near-identical titles does
+        not score nothing at all.
+    """
+    total = len(note_tokens)
+    frequency: dict[str, int] = {}
+    for tokens in note_tokens:
+        for token in tokens:
+            frequency[token] = frequency.get(token, 0) + 1
+    return {token: math.log(1 + total / count) for token, count in frequency.items()}
+
+
+def _rank(
+    query_tokens: set[str],
+    note_tokens: set[str],
+    weights: dict[str, float],
+    distinctive: set[str],
+) -> tuple[float, float] | None:
+    """Score one Book Note against a query, or None when it does not match.
+
+    Ranks rather than decides, for the reason find_similar does (ADR 0003):
+    "Mercy" and "Long Road to Mercy" are different books that share a word, and
+    only the person asking can say which they meant. Both are returned; the note
+    the query describes best is put first.
+
+    Args:
+        query_tokens: The words the person used.
+        note_tokens: The words in this note's title and authors.
+        weights: What each word on this Shelf is worth.
+        distinctive: The query's words that could name a book, so a note that
+            matched only filler is never offered as an answer.
+
+    Returns:
+        The weight of what matched, and how much of the note that accounts for -
+        so a short title matching one word outranks a long one matching the same
+        word incidentally. None when nothing matched, or only filler did.
+    """
+    matched = query_tokens & note_tokens
+    if not matched or not (matched & distinctive):
+        return None
+
+    scored = sum(weights.get(token, 0.0) for token in matched)
+    available = sum(weights.get(token, 0.0) for token in note_tokens) or 1.0
+    return scored, scored / available
+
+
+def search_library(
+    vault_path: Path,
+    query: str | None = None,
+    status: str | None = None,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+) -> SearchResult:
+    """Find the Book Notes a person is describing, without deciding which.
+
+    The free-text half is deliberately fuzzy and the filter half is not. A
+    status belongs to a closed vocabulary the Library defines (ADR 0022), so it
+    narrows exactly; the words someone actually said are matched loosely and
+    ranked, and every plausible answer goes back for them to settle (ADR 0003).
+
+    Args:
+        vault_path: The Shelf to search.
+        query: What the person said, matched against titles and authors. When
+            absent the filters answer alone - "what am I reading?" carries no
+            query at all.
+        status: A status to narrow to, from the Library's own vocabulary.
+        limit: The most notes to return, clamped to MAX_SEARCH_LIMIT.
+
+    Returns:
+        The matching Book Notes, best first, and the total number of matches
+        the limit may have cut short.
+
+    Raises:
+        InvalidFieldValue: If the status is not one the Library defines. Refused
+            rather than quietly matching nothing, which would report an empty
+            Library for a typo.
+    """
+    if status is not None:
+        validate_field_value("status", status)
+
+    limit = max(0, min(limit, MAX_SEARCH_LIMIT))
+    query_tokens = _search_tokens(query) if query else set()
+
+    # A query of nothing but filler is taken at face value - the alternative is
+    # answering "the" with silence, when the Shelf may well hold "The Road".
+    distinctive = query_tokens - _STOP_WORDS or query_tokens
+
+    candidates: list[tuple[BookNote, set[str]]] = []
+    for note in index_for(vault_path).notes():
+        if not note.title:
+            # Obsidian writes into this directory too, so a file that is not a
+            # Book Note is ordinary rather than exceptional.
+            continue
+        if status is not None and note.frontmatter.get("status") != status:
+            continue
+        candidates.append(
+            (note, _search_tokens(note.title) | _search_tokens(" ".join(note.authors)))
+        )
+
+    # Weighed across what the filter left, not the whole Shelf, so narrowing to
+    # one status weighs words by how well they separate the books still in play.
+    weights = _weights([tokens for _, tokens in candidates]) if query_tokens else {}
+
+    scored: list[tuple[tuple, BookNote]] = []
+    for note, note_tokens in candidates:
+        sort_title = normalize_for_match(note.title or "")
+        if not query_tokens:
+            # Nothing was asked, so nothing is ranked. Alphabetical is the order
+            # a person expects and, unlike relevance, is identical between two
+            # identical calls.
+            scored.append(((0.0, 0.0, 0, sort_title), note))
+            continue
+        rank = _rank(query_tokens, note_tokens, weights, distinctive)
+        if rank is None:
+            continue
+        matched, density = rank
+        scored.append(((-matched, -density, len(note.title or ""), sort_title), note))
+
+    scored.sort(key=lambda pair: pair[0])
+    return SearchResult(
+        total=len(scored),
+        limit=limit,
+        books=[note for _, note in scored[:limit]],
+    )
 
 
 def add_book(

@@ -14,6 +14,7 @@ from libris.markdown import (
 )
 from libris.note_format import InvalidFieldValue
 from libris.service import (
+    MAX_SEARCH_LIMIT,
     DecisionStatus,
     Outcome,
     add_book,
@@ -22,6 +23,7 @@ from libris.service import (
     find_by_libris_id,
     find_existing,
     is_isbn10,
+    search_library,
 )
 
 
@@ -382,3 +384,257 @@ def test_a_conflicting_pair_is_reported_not_merged(tmp_path):
     # yours"
     assert [o.status for o in outcomes] == [DecisionStatus.CONFLICTED]
     assert len(list(tmp_path.glob("*.md"))) == 2
+
+
+# --- searching the Library ---
+
+
+def _shelve(vault_path, title, authors, **overrides):
+    """Put one Book Note on a Shelf and hand back the note."""
+    path = create_book_note(
+        _candidate(title=title, authors=authors),
+        vault_path,
+        overrides=overrides or None,
+    )
+    return BookNote.read(path)
+
+
+def _titles(result):
+    return [note.title for note in result.books]
+
+
+def test_a_title_query_finds_the_note(tmp_path):
+    # Given a Shelf holding one book
+    _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When the Library is searched for its title
+    result = search_library(tmp_path, query="dune")
+
+    # Then it is found
+    assert _titles(result) == ["Dune"]
+    assert result.total == 1
+
+
+def test_an_author_alone_finds_their_books(tmp_path):
+    # Given two books by one author and one by another
+    _shelve(tmp_path, "The Way of Kings", ["Brandon Sanderson"])
+    _shelve(tmp_path, "Oathbringer", ["Brandon Sanderson"])
+    _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When someone asks for "that Sanderson one" - a query with no title in it
+    result = search_library(tmp_path, query="sanderson")
+
+    # Then both of theirs come back. This is the case find_similar cannot serve:
+    # it returns nothing without a title, and treats an author as an exact
+    # equality filter rather than something to search on (ADR 0003).
+    assert sorted(_titles(result)) == ["Oathbringer", "The Way of Kings"]
+
+
+def test_the_tighter_title_outranks_the_one_that_merely_contains_it(tmp_path):
+    # Given two different books that share a word
+    _shelve(tmp_path, "Long Road to Mercy", ["David Baldacci"])
+    _shelve(tmp_path, "Mercy", ["Jodi Picoult"])
+
+    # When the shared word is searched for
+    result = search_library(tmp_path, query="mercy")
+
+    # Then both are offered, because deciding between them is not this layer's
+    # job (ADR 0003) - but the note the query describes wholly comes first.
+    assert _titles(result) == ["Mercy", "Long Road to Mercy"]
+
+
+def test_more_matched_words_outrank_fewer(tmp_path):
+    # Given a Shelf where one title answers more of the query than the other
+    _shelve(tmp_path, "The Way of Kings", ["Brandon Sanderson"])
+    _shelve(tmp_path, "Kings of the Wyld", ["Nicholas Eames"])
+
+    # When several words are searched for
+    result = search_library(tmp_path, query="way of kings")
+
+    # Then the note matching more of them ranks first
+    assert _titles(result)[0] == "The Way of Kings"
+
+
+def test_the_query_is_normalized_before_matching(tmp_path):
+    # Given a note whose title carries punctuation and capitals
+    _shelve(tmp_path, "Mistborn: The Final Empire", ["Brandon Sanderson"])
+
+    # When the query carries neither
+    result = search_library(tmp_path, query="MISTBORN final empire")
+
+    # Then it still matches, the same way every other comparison here normalizes
+    assert _titles(result) == ["Mistborn: The Final Empire"]
+
+
+def test_a_miss_is_a_miss(tmp_path):
+    # Given a Shelf that holds nothing like the query
+    _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When something absent is searched for
+    result = search_library(tmp_path, query="neuromancer")
+
+    # Then nothing is invented (ADR 0003)
+    assert result.books == []
+    assert result.total == 0
+
+
+def test_a_status_narrows_the_search(tmp_path):
+    # Given the same author held at two different points in the reading cycle
+    _shelve(tmp_path, "Oathbringer", ["Brandon Sanderson"], status="Read")
+    _shelve(tmp_path, "The Way of Kings", ["Brandon Sanderson"], status="To Read")
+
+    # When the search is narrowed to what has been read
+    result = search_library(tmp_path, query="sanderson", status="Read")
+
+    # Then only that one comes back. Status is not fuzzy - it is a closed
+    # vocabulary the Library defines (ADR 0022) - so it filters rather than ranks.
+    assert _titles(result) == ["Oathbringer"]
+    assert result.total == 1
+
+
+def test_a_status_the_library_does_not_define_is_refused(tmp_path):
+    # Given a status outside the four the Library allows
+    # When it is used to narrow a search
+    # Then it is refused rather than silently matching nothing
+    with pytest.raises(InvalidFieldValue):
+        search_library(tmp_path, status="Finished")
+
+
+def test_omitting_the_query_lists_by_filter(tmp_path):
+    # Given a Shelf where one book is being read
+    _shelve(tmp_path, "Oathbringer", ["Brandon Sanderson"], status="Reading")
+    _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+
+    # When there is no query at all - "what am I reading?"
+    result = search_library(tmp_path, status="Reading")
+
+    # Then the filter alone answers it
+    assert _titles(result) == ["Oathbringer"]
+
+
+def test_omitting_everything_lists_the_whole_shelf(tmp_path):
+    # Given a Shelf of three books
+    for title in ("Dune", "Oathbringer", "Neuromancer"):
+        _shelve(tmp_path, title, ["Someone"])
+
+    # When nothing is asked for
+    result = search_library(tmp_path)
+
+    # Then the whole Shelf is counted, in a deterministic order
+    assert result.total == 3
+    assert _titles(result) == ["Dune", "Neuromancer", "Oathbringer"]
+
+
+def test_the_total_counts_matches_the_limit_did_not_return(tmp_path):
+    # Given more books than will be returned
+    for index in range(5):
+        _shelve(tmp_path, f"Dune {index}", ["Frank Herbert"])
+
+    # When the search is limited
+    result = search_library(tmp_path, query="dune", limit=2)
+
+    # Then the caller is told how many there really were, so a Surface can say
+    # "1,452 on the list, here are some" rather than implying it saw them all
+    assert len(result.books) == 2
+    assert result.total == 5
+
+
+def test_the_limit_is_capped(tmp_path):
+    # Given a Shelf and a caller asking for more than the ceiling
+    for index in range(3):
+        _shelve(tmp_path, f"Dune {index}", ["Frank Herbert"])
+
+    # When an absurd limit is requested
+    result = search_library(tmp_path, query="dune", limit=10_000)
+
+    # Then it is clamped rather than honoured. Reading a whole Library into a
+    # context window is the thing the cap exists to prevent.
+    assert result.limit == MAX_SEARCH_LIMIT
+
+
+def test_a_limit_of_zero_returns_nothing_but_still_counts(tmp_path):
+    # Given a Shelf holding matches
+    _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When nothing is asked to be returned
+    result = search_library(tmp_path, query="dune", limit=0)
+
+    # Then the count still answers "how many", which is a real question
+    assert result.books == []
+    assert result.total == 1
+
+
+def test_a_note_without_a_title_is_skipped_rather_than_crashing(tmp_path):
+    # Given a Shelf holding a file with frontmatter but no title
+    (tmp_path / "broken.md").write_text(
+        "---\nlibris_id: 01J0000000000000000000000A\ntitle:\nauthors: []\n---\n",
+        encoding="utf-8",
+    )
+    _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When the Library is listed
+    result = search_library(tmp_path)
+
+    # Then the untitled note is passed over. Obsidian writes into this directory
+    # too, so a note Libris did not create is ordinary rather than exceptional.
+    assert _titles(result) == ["Dune"]
+
+
+def test_a_common_word_alone_does_not_make_a_match(tmp_path):
+    # Given a Shelf where one note shares only a common word with the query
+    _shelve(tmp_path, "The Way of Kings", ["Brandon Sanderson"])
+    _shelve(tmp_path, "The Silmarillion", ["J.R.R. Tolkien"])
+
+    # When a title carrying that word is searched for
+    result = search_library(tmp_path, query="the way of kings")
+
+    # Then the note matching on "the" alone is not offered. Otherwise a title
+    # with an article in it would report most of a 3,000-note Shelf as a match,
+    # and the total would stop meaning anything.
+    assert _titles(result) == ["The Way of Kings"]
+
+
+def test_a_query_of_only_common_words_is_taken_at_face_value(tmp_path):
+    # Given a note whose title really is a common word
+    _shelve(tmp_path, "The Road", ["Cormac McCarthy"])
+
+    # When that is all the person said
+    result = search_library(tmp_path, query="the")
+
+    # Then it still matches, rather than the guard swallowing the only query
+    # the person gave
+    assert _titles(result) == ["The Road"]
+
+
+def test_a_distinctive_word_outweighs_a_common_one(tmp_path):
+    # Given a Shelf where one word is everywhere, on notes short enough that
+    # brevity alone would float them to the top
+    for subject in ("Big", "New", "Old", "Best", "Grey"):
+        _shelve(tmp_path, f"{subject} Book", ["Ann Bell"])
+    _shelve(tmp_path, "Book", ["Ann Bell"])
+    _shelve(tmp_path, "Mistborn: The Final Empire", ["Brandon Sanderson"])
+
+    # When a query names both a common word and a rare one
+    result = search_library(tmp_path, query="mistborn book")
+
+    # Then the rare word decides. Counting matched words alone ties these at one
+    # apiece, and the tie then goes to the shortest note - which is the wrong
+    # book for a reason that has nothing to do with what was asked.
+    assert _titles(result)[0] == "Mistborn: The Final Empire"
+
+
+def test_conversational_filler_does_not_pull_in_unrelated_books(tmp_path):
+    # Given the Shelf someone would actually be talking about
+    _shelve(tmp_path, "The Final Empire: Mistborn Book 1", ["Brandon Sanderson"])
+    _shelve(tmp_path, "The Hot One", ["Lauren Blakely"])
+    _shelve(tmp_path, "Eat That Frog", ["Brian Tracy"])
+
+    # When someone says it the way a person says it
+    result = search_library(tmp_path, query="that mistborn one")
+
+    # Then only the book they described comes back. Measured against the real
+    # Shelf, "that" and "one" appear in 39 and 50 notes while "mistborn" appears
+    # in 3, and weighting them alike returned 91 matches with no Mistborn among
+    # the first six.
+    assert _titles(result) == ["The Final Empire: Mistborn Book 1"]
+    assert result.total == 1
