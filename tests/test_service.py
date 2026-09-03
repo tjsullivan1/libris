@@ -5,6 +5,8 @@ surface and the MCP tools cannot drift apart by reimplementing matching. These
 tests exercise that layer directly, with no HTTP involved.
 """
 
+from datetime import date
+
 import pytest
 
 from libris.api import BookCandidate
@@ -15,6 +17,7 @@ from libris.markdown import (
 from libris.note_format import InvalidFieldValue
 from libris.service import (
     MAX_SEARCH_LIMIT,
+    BookNotFound,
     DecisionStatus,
     Outcome,
     add_book,
@@ -24,6 +27,7 @@ from libris.service import (
     find_existing,
     is_isbn10,
     search_library,
+    update_book,
 )
 
 
@@ -638,3 +642,196 @@ def test_conversational_filler_does_not_pull_in_unrelated_books(tmp_path):
     # the first six.
     assert _titles(result) == ["The Final Empire: Mistborn Book 1"]
     assert result.total == 1
+
+
+# --- updating a Book Note ---
+
+
+def _read_back(vault_path, libris_id):
+    for path in vault_path.glob("*.md"):
+        note = BookNote.read(path)
+        if note and note.libris_id == libris_id:
+            return note
+    raise AssertionError(f"no note holds {libris_id}")
+
+
+def test_a_named_field_is_set(tmp_path):
+    # Given a book waiting to be read
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+
+    # When its status is moved on
+    update_book(tmp_path, note.libris_id, {"status": "Reading"})
+
+    # Then the Shelf holds the new value
+    assert _read_back(tmp_path, note.libris_id).frontmatter["status"] == "Reading"
+
+
+def test_fields_that_were_not_named_are_left_alone(tmp_path):
+    # Given a book carrying a rating nobody mentioned
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read", rating=5)
+
+    # When only the status is set
+    update_book(tmp_path, note.libris_id, {"status": "Reading"})
+
+    # Then the rating survives. An update names only the fields it changes, so
+    # it can never overwrite a field it knows nothing about.
+    assert _read_back(tmp_path, note.libris_id).frontmatter["rating"] == 5
+
+
+def test_finishing_a_book_stamps_the_date_and_says_so(tmp_path):
+    # Given a book being read, with no finish date
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="Reading")
+
+    # When it is marked Read without a date
+    result = update_book(tmp_path, note.libris_id, {"status": "Read"})
+
+    # Then today is stamped, and reported as something the caller did not ask
+    # for - so a person who meant last Tuesday can correct it (ADR 0024)
+    today = date.today().isoformat()
+    assert _read_back(tmp_path, note.libris_id).frontmatter["date_finished"] == today
+    assert result.derived == {"date_finished": today}
+
+
+def test_starting_a_book_stamps_the_started_date(tmp_path):
+    # Given a book nobody has opened
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+
+    # When it is marked Reading
+    result = update_book(tmp_path, note.libris_id, {"status": "Reading"})
+
+    # Then the start date is stamped and disclosed
+    assert result.derived == {"date_started": date.today().isoformat()}
+
+
+def test_an_explicit_date_is_never_overridden(tmp_path):
+    # Given a book being read
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="Reading")
+
+    # When it is marked Read with the date it was actually finished
+    result = update_book(
+        tmp_path, note.libris_id, {"status": "Read", "date_finished": "2026-08-25"}
+    )
+
+    # Then that date stands and nothing is derived. The stamp is a fallback,
+    # never an override (ADR 0024).
+    written = _read_back(tmp_path, note.libris_id).frontmatter["date_finished"]
+    assert str(written) == "2026-08-25"
+    assert result.derived == {}
+
+
+def test_a_date_already_on_the_note_is_not_restamped(tmp_path):
+    # Given a book finished years ago
+    note = _shelve(
+        tmp_path, "Dune", ["Frank Herbert"], status="Read", date_finished="2019-04-01"
+    )
+
+    # When its status is set to Read once more
+    result = update_book(tmp_path, note.libris_id, {"status": "Read"})
+
+    # Then the original date survives. A re-read is not something the Library
+    # models, and inventing one here would be scope creep (ADR 0024).
+    written = _read_back(tmp_path, note.libris_id).frontmatter["date_finished"]
+    assert str(written) == "2019-04-01"
+    assert result.derived == {}
+
+
+def test_a_value_the_library_does_not_define_is_refused(tmp_path):
+    # Given a status outside the four the Library allows
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When it is written
+    # Then it is refused. `libris update` offers "Finished" to this day, which
+    # is the drift ADR 0022 exists to stop.
+    with pytest.raises(InvalidFieldValue):
+        update_book(tmp_path, note.libris_id, {"status": "Finished"})
+
+
+def test_a_field_that_is_not_the_readers_is_refused(tmp_path):
+    # Given a field describing the edition rather than the reading of it
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When it is written
+    # Then it is refused: Libris owns the title (ADR 0012), and bibliographic
+    # fields come from enrichment rather than from someone talking.
+    with pytest.raises(ValueError):
+        update_book(tmp_path, note.libris_id, {"title": "Doon"})
+
+
+def test_a_null_does_not_silently_clear_a_field(tmp_path):
+    # Given a book carrying a rating
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], rating=5)
+
+    # When a null arrives for it
+    # Then it is refused rather than treated as "clear this". A model emitting
+    # null for "unchanged" would otherwise erase a field nobody mentioned.
+    with pytest.raises(ValueError):
+        update_book(tmp_path, note.libris_id, {"rating": None})
+    assert _read_back(tmp_path, note.libris_id).frontmatter["rating"] == 5
+
+
+def test_an_unknown_identity_is_not_found(tmp_path):
+    # Given a Shelf that holds no such book
+    _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When an identity nothing answers for is updated
+    # Then it fails rather than creating anything (ADR 0003)
+    with pytest.raises(BookNotFound):
+        update_book(tmp_path, "01J0000000000000000000000A", {"status": "Read"})
+    assert len(list(tmp_path.glob("*.md"))) == 1
+
+
+def test_a_multi_valued_field_takes_several_values(tmp_path):
+    # Given a book owned on paper and listened to as an audiobook
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When both formats are recorded
+    update_book(tmp_path, note.libris_id, {"format": ["Physical", "Audiobook"]})
+
+    # Then both stand. Several at once is normal for a Format (ADR 0017).
+    assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == [
+        "Physical",
+        "Audiobook",
+    ]
+
+
+def test_a_superseded_identity_still_updates_the_survivor(tmp_path):
+    # Given a note that absorbed another in a merge
+    survivor = _shelve(tmp_path, "Dune", ["Frank Herbert"])
+    dead_id = "01J0000000000000000000000A"
+    raw = survivor.path.read_text(encoding="utf-8")
+    marker = "superseded_ids:" + chr(10) + "- " + dead_id + chr(10) + "status:"
+    survivor.path.write_text(raw.replace("status:", marker, 1), encoding="utf-8")
+
+    # When the identity that was merged away is updated
+    result = update_book(tmp_path, dead_id, {"status": "Read"})
+
+    # Then it reaches the surviving note. An ID picked up before a merge still
+    # applies rather than being rejected for a note Libris itself destroyed
+    # (ADR 0014).
+    assert result.note.libris_id == survivor.libris_id
+    assert _read_back(tmp_path, survivor.libris_id).frontmatter["status"] == "Read"
+
+
+def test_the_body_is_left_exactly_as_it_was(tmp_path):
+    # Given a note whose body holds the reader's own writing, including a line
+    # that looks like a frontmatter field
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
+    raw = note.path.read_text(encoding="utf-8")
+    frontmatter = raw.split("---", 2)[1]
+    body = (
+        "# Dune"
+        + chr(10) * 2
+        + "## Notes"
+        + chr(10) * 2
+        + "Wrote this. status: unclear."
+        + chr(10)
+    )
+    note.path.write_text("---" + frontmatter + "---" + chr(10) + body, encoding="utf-8")
+
+    # When the status is updated
+    update_book(tmp_path, note.libris_id, {"status": "Read"})
+
+    # Then the body survives exactly, including that line. An MCP write reaches
+    # frontmatter and nothing else (ADR 0023), and that line is the shape of the
+    # bug in #92.
+    assert note.path.read_text(encoding="utf-8").endswith(body)

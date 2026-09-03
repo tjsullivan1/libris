@@ -9,11 +9,17 @@ adapter decides what a failure looks like on the wire.
 import math
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
 from pathlib import Path
 
 from .api import BookCandidate, GoogleBooksClient
-from .markdown import BookNote, create_book_note, list_books
+from .markdown import (
+    BookNote,
+    create_book_note,
+    list_books,
+    set_frontmatter_fields,
+)
 from .matching import best_match, normalize_for_match, titles_match
 from .merge import (
     delete_secondary_file,
@@ -21,7 +27,11 @@ from .merge import (
     merge_two_books,
     write_merged_book,
 )
-from .note_format import validate_field_value
+from .note_format import (
+    READER_FIELDS,
+    normalize_field_value,
+    validate_field_value,
+)
 from .shelf import index_for
 
 
@@ -595,6 +605,104 @@ def add_book(
         # cannot be read back rather than leaving the Surface with only a path.
         title=note.title if note else candidate.title,
         authors=note.authors if note else candidate.authors,
+    )
+
+
+class BookNotFound(Exception):
+    """No Book Note answers for the identity a write named.
+
+    A miss never writes and never creates (ADR 0003): an update that cannot find
+    its book is a question for the person who named it, not an excuse to add one.
+    """
+
+
+# The date a status implies when the note does not already carry one. The
+# Library has held half of this rule for years - `ensure_frontmatter_fields`
+# forces status to Read when a finish date is present - and this is the other
+# half (ADR 0024).
+_STATUS_STAMPS = {"Read": "date_finished", "Reading": "date_started"}
+
+
+@dataclass
+class UpdateResult:
+    """What an update did, including the parts nobody asked for.
+
+    `derived` names the fields the Library set on its own. It travels because a
+    stamped date is indistinguishable from a stated one afterwards, and a person
+    who meant last Tuesday can only correct it while still in the conversation
+    (ADR 0024).
+    """
+
+    note: BookNote
+    written: dict[str, object] = field(default_factory=dict)
+    derived: dict[str, object] = field(default_factory=dict)
+
+
+def update_book(
+    vault_path: Path,
+    libris_id: str,
+    fields: dict[str, object],
+) -> UpdateResult:
+    """Set fields on the Book Note holding an identity.
+
+    Only the named fields change, so an update can never overwrite a field it
+    knows nothing about. Only the reader's own fields may be named: a title
+    belongs to Libris (ADR 0012) and the bibliographic fields come from
+    enrichment rather than from someone talking.
+
+    Args:
+        vault_path: The Shelf to write into.
+        libris_id: The identity to update. A superseded identity resolves to the
+            note that absorbed it (ADR 0014), so an id picked up before a merge
+            still applies.
+        fields: Field names and the values to set them to.
+
+    Returns:
+        The updated Book Note, what was written, and anything the Library
+        derived.
+
+    Raises:
+        BookNotFound: If no note answers for the identity.
+        InvalidFieldValue: If a value is not one the Library defines.
+        ValueError: If a field is not the reader's to set, or a value is null.
+        FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
+    """
+    note = find_by_libris_id(vault_path, libris_id)
+    if note is None:
+        raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
+
+    for name, value in fields.items():
+        if name not in READER_FIELDS:
+            raise ValueError(
+                f"{name} is not a field this Surface may set. "
+                f"Settable fields: {', '.join(sorted(READER_FIELDS))}."
+            )
+        if value is None:
+            # A model that emits null for "leave this alone" would otherwise
+            # erase a field nobody mentioned. Clearing a field is not something
+            # this call does; omitting it is how you leave it alone.
+            raise ValueError(
+                f"{name} was given no value. Omit a field to leave it unchanged."
+            )
+        validate_field_value(name, value)
+
+    written = {
+        name: normalize_field_value(name, value) for name, value in fields.items()
+    }
+
+    derived: dict[str, object] = {}
+    stamp = _STATUS_STAMPS.get(str(fields.get("status", "")))
+    if stamp and stamp not in fields and not note.frontmatter.get(stamp):
+        # Only ever fills an empty field, so re-marking a dated book Read leaves
+        # the original date alone. A re-read is not something the Library models.
+        derived[stamp] = date.today().isoformat()
+        written[stamp] = derived[stamp]
+
+    if written:
+        set_frontmatter_fields(note.path, written)
+
+    return UpdateResult(
+        note=BookNote.read(note.path) or note, written=written, derived=derived
     )
 
 
