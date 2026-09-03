@@ -5,9 +5,11 @@ A simple CLI tool to track your reading list in Obsidian. The name comes from th
 ## Features
 - Search books using the Google Books API.
 - Add books to your Obsidian vault with a pre-defined schema (Frontmatter).
-- Track reading status (To Read, Reading, Finished).
+- Track reading status (To Read, Reading, Read, Not To Read).
 - Enrich existing book notes with data from Google Books.
 - Interactive search and selection.
+- Clip books from a book page with the [browser extension](#browser-extension).
+- Search and update your Library [from an assistant](#talking-to-libris-from-an-agent) over MCP.
 
 ## Installation
 Ensure you have `uv` installed.
@@ -239,6 +241,104 @@ The popup names the problem rather than reporting a generic failure:
 | That token doesn't match | The daemon is up and reachable, but the token is stale. Run `libris serve --show-token` and paste it again. |
 | Google Books couldn't be reached | The lookup failed upstream. Nothing was written; try again. |
 | This doesn't look like a book page | The page yielded no title and no identifier. This is not a lookup failure — you are probably not on a book's page. |
+
+## Talking to Libris from an agent
+
+Libris ships an MCP server, so an assistant can search your Library and move books through the
+reading cycle by talking to it. "What am I reading?", "add the new Sanderson", "I finished
+Oathbringer, four stars" — all of that, without you opening Obsidian.
+
+It reaches a book's catalogue fields only. It cannot read or write the notes you have written
+about a book: those stay in Obsidian, by design.
+
+### 1. Install it
+
+The MCP stack is optional, so it ships as an extra:
+
+```bash
+uv sync --extra mcp            # in this repo
+uv tool install 'libris[mcp]'  # anywhere else
+```
+
+You need a Shelf configured, the same one the CLI uses:
+
+```bash
+libris config --vault "/path/to/your/Book List"
+```
+
+### 2. Register it with your client
+
+The server speaks over stdio, so the client starts it for you — you never run `libris mcp`
+yourself. In Claude Code:
+
+```bash
+claude mcp add libris -- uv run --directory /path/to/libris libris mcp
+```
+
+Or, in an `mcp.json` (Claude Desktop, VS Code, and most other clients):
+
+```json
+{
+  "mcpServers": {
+    "libris": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/libris", "libris", "mcp"]
+    }
+  }
+}
+```
+
+**Use the `uv run --directory` form while developing.** `libris` on your PATH is a `uv tool`
+snapshot that goes stale silently, and a server registered once and started daily is where a
+stale snapshot hides longest. If you would rather register the installed command, run
+`uv tool install 'libris[mcp]' --force` after every change and use `libris` with no arguments
+before `mcp`.
+
+### The tools
+
+| Tool | What it does |
+| --- | --- |
+| `search_library` | Finds books you already have. Takes words that identify a book, an optional status, and a limit. Omit the query to list by status alone. |
+| `find_book` | Looks a book up in Google Books, to add it. This searches the outside world, not your Library. |
+| `add_book` | Adds a book by the Google Books id `find_book` returned. |
+| `update_book` | Sets a book's status, priority, rating, format or dates. |
+
+There is deliberately no tool that reads a note's body, and none that writes one.
+
+### What to expect
+
+**The first call is slow.** Libris parses your whole Shelf on the first question and keeps it
+after that — about 16 seconds against a 3,000-note vault, then about 60 milliseconds for
+everything afterwards. Connecting is quick; it is the first *question* that pauses. See
+[#94](https://github.com/tjsullivan1/libris/issues/94).
+
+**Search hands back everything plausible rather than picking.** Ask about a book you do not own
+and you may get a handful of loosely related titles rather than nothing, because a search that
+guesses confidently and guesses wrong is the failure mode Libris refuses. Read the titles.
+
+**Adding stops when you might already have the book.** If your Library holds something with a
+similar title, nothing is written — you are shown the near matches and asked. Say it is a
+different book and it goes ahead. This is stricter than the browser extension on purpose: there,
+a person is already looking at the near matches when they press the button.
+
+**Marking a book Read dates it today**, unless you say otherwise, and the answer tells you it
+did. If you finished it last Tuesday, say so and it will be corrected — but only while you are
+still in the conversation, because a stamped date is indistinguishable from a stated one
+afterwards.
+
+**Nothing can be cleared.** Fields can be set but not emptied, so "drop the priority on that
+one" has no answer yet. Refusing was the safer way to be wrong: an assistant that sends an empty
+value for "leave this alone" would otherwise erase a field nobody mentioned.
+
+### Troubleshooting
+
+| What you see | What it means |
+| --- | --- |
+| No Shelf is configured | The server is running but has no vault. Run `libris config --vault <path>`. |
+| Google Books has no volume '…' | The id was not one `find_book` returned. Ask it again rather than composing an id. |
+| Google Books could not be reached | The lookup failed upstream, and nothing was written. It also answers this for a badly-shaped id, because that is what the API returns. |
+| The mcp extra is not installed | `uv sync --extra mcp`, or `pip install 'libris[mcp]'`. |
+| The server never connects | Check the command runs on its own: `uv run --directory /path/to/libris libris mcp` should sit there waiting for input rather than exiting. |
 
 ## Schema
 Books are saved as Markdown files with the following frontmatter:
