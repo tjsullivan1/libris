@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import quote
 
 import httpx
 
@@ -169,24 +170,49 @@ class GoogleBooksClient:
         self.on_rate_limit(wait_time, attempt + 1, self.max_retries)
         time.sleep(wait_time)
 
-    def search(self, query: str) -> list[BookCandidate]:
-        params = {"q": query, "maxResults": 10}
+    def _identifying_params(self) -> dict:
+        """Build the params that say who is asking.
 
+        Returns:
+            The API key when one is configured, and otherwise a `quotaUser` so
+            an unauthenticated caller is rate limited on its own account rather
+            than against every anonymous user of the API.
+        """
+        params: dict = {}
         api_key = get_api_key()
         if api_key:
             params["key"] = api_key
-        else:
-            # Use a unique identifier to help avoid global rate limits for
-            # unauthenticated users.
-            try:
-                params["quotaUser"] = socket.gethostname()
-            except OSError:
-                logger.debug("Could not determine hostname for quotaUser.")
+            return params
+        try:
+            params["quotaUser"] = socket.gethostname()
+        except OSError:
+            logger.debug("Could not determine hostname for quotaUser.")
+        return params
+
+    def _get(self, url: str, params: dict) -> dict:
+        """Fetch one URL, retrying what is worth retrying.
+
+        Extracted from `search` so `get_volume` shares the retry and rate-limit
+        handling rather than growing a second, subtly different copy of it.
+
+        Args:
+            url: The endpoint to fetch.
+            params: Query parameters, before the identifying ones are added.
+
+        Returns:
+            The decoded JSON body.
+
+        Raises:
+            httpx.HTTPStatusError: If the response is an error the retries could
+                not clear.
+            httpx.RequestError: If the request could not be made.
+        """
+        params = {**params, **self._identifying_params()}
 
         with httpx.Client(timeout=self.timeout) as client:
             for attempt in range(self.max_retries + 1):
                 try:
-                    response = client.get(self.BASE_URL, params=params)
+                    response = client.get(url, params=params)
 
                     if response.status_code == 429:
                         if attempt < self.max_retries:
@@ -194,8 +220,7 @@ class GoogleBooksClient:
                             continue
 
                     response.raise_for_status()
-                    data = response.json()
-                    break
+                    return response.json()
                 except (httpx.HTTPStatusError, httpx.RequestError) as e:
                     if attempt < self.max_retries and (
                         isinstance(e, httpx.RequestError)
@@ -217,35 +242,94 @@ class GoogleBooksClient:
                         time.sleep(wait_time)
                         continue
                     raise
-            else:
-                # This part is technically reached if all retries for 429 were exhausted but no exception was raised
-                response.raise_for_status()
-                data = response.json()
+            # Reached when every 429 retry was used without an exception being
+            # raised: ask once more and let the error out this time.
+            response.raise_for_status()
+            return response.json()
 
-        items = data.get("items", [])
-        books = []
-        for item in items:
-            volume_info = item.get("volumeInfo", {})
+    @staticmethod
+    def _to_candidate(item: dict) -> BookCandidate:
+        """Build a Book Candidate from one Google Books volume.
 
-            # Extract ISBN
-            isbn = None
-            for ident in volume_info.get("industryIdentifiers", []):
-                if ident.get("type") == "ISBN_13":
-                    isbn = ident.get("identifier")
-                    break
-                if ident.get("type") == "ISBN_10" and not isbn:
-                    isbn = ident.get("identifier")
+        Args:
+            item: A volume, as the API returns it.
 
-            book = BookCandidate(
-                title=volume_info.get("title", "Unknown Title"),
-                authors=volume_info.get("authors", ["Unknown Author"]),
-                isbn=isbn,
-                page_count=volume_info.get("pageCount"),
-                published_date=volume_info.get("publishedDate"),
-                google_books_id=item.get("id"),
-                thumbnail=volume_info.get("imageLinks", {}).get("thumbnail"),
-                genres=volume_info.get("categories", []),
-                description=volume_info.get("description"),
-            )
-            books.append(book)
-        return books
+        Returns:
+            The candidate it describes. An ISBN-13 is preferred over an ISBN-10,
+            because that is what a Book Note records.
+        """
+        volume_info = item.get("volumeInfo", {})
+
+        isbn = None
+        for ident in volume_info.get("industryIdentifiers", []):
+            if ident.get("type") == "ISBN_13":
+                isbn = ident.get("identifier")
+                break
+            if ident.get("type") == "ISBN_10" and not isbn:
+                isbn = ident.get("identifier")
+
+        return BookCandidate(
+            title=volume_info.get("title", "Unknown Title"),
+            authors=volume_info.get("authors", ["Unknown Author"]),
+            isbn=isbn,
+            page_count=volume_info.get("pageCount"),
+            published_date=volume_info.get("publishedDate"),
+            google_books_id=item.get("id"),
+            thumbnail=volume_info.get("imageLinks", {}).get("thumbnail"),
+            genres=volume_info.get("categories", []),
+            description=volume_info.get("description"),
+        )
+
+    def search(self, query: str) -> list[BookCandidate]:
+        """Find Book Candidates matching a query.
+
+        Args:
+            query: A Google Books query, which may carry `intitle:` and
+                `inauthor:` operators.
+
+        Returns:
+            The candidates the API offered, in the order it offered them.
+        """
+        data = self._get(self.BASE_URL, {"q": query, "maxResults": 10})
+        return [self._to_candidate(item) for item in data.get("items", [])]
+
+    def get_volume(self, google_books_id: str) -> BookCandidate | None:
+        """Fetch one volume by the id that names it.
+
+        This is what lets a Surface name a Book Candidate instead of handing the
+        whole record back (ADR 0025): the metadata written into a Book Note is
+        always fetched by this code rather than retyped by a caller, so a note
+        can never assert something the source did not say.
+
+        Args:
+            google_books_id: The volume id, as carried on a Book Candidate.
+
+        Returns:
+            The candidate, or None if Google Books has no such volume.
+
+        Raises:
+            httpx.HTTPStatusError: If the API failed for any reason other than
+                the volume being absent. Only a 404 means "no such book";
+                anything else means the answer is unknown, and reporting that
+                as a miss would let a write proceed on nothing.
+            httpx.RequestError: If the request could not be made.
+
+        Note:
+            Google Books distinguishes an absent volume from a malformed id, and
+            not in the way you would expect. Measured against the live API: a
+            well-formed id naming nothing ("zzzzzzzzzzzz") answers 404 with "The
+            volume ID could not be found", while a malformed one ("x", or
+            anything not of the right shape) answers 503 "Service temporarily
+            unavailable". So a caller that invents an id - which for MCP means a
+            model that hallucinated or truncated one - is retried with backoff
+            and then told the service is down. A Surface reporting that failure
+            should name both causes rather than only the outage.
+        """
+        url = f"{self.BASE_URL}/{quote(google_books_id, safe='')}"
+        try:
+            data = self._get(url, {})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return self._to_candidate(data)

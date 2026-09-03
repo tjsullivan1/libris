@@ -835,3 +835,87 @@ def test_the_body_is_left_exactly_as_it_was(tmp_path):
     # frontmatter and nothing else (ADR 0023), and that line is the shape of the
     # bug in #92.
     assert note.path.read_text(encoding="utf-8").endswith(body)
+
+
+# --- adding over a Near Match (ADR 0026) ---
+
+
+def test_a_near_match_stops_the_write_when_asked_to(tmp_path):
+    # Given a Library already holding something that may be this Book
+    create_book_note(_candidate(title="The Brass Verdict: A Novel"), tmp_path)
+
+    # When a Surface that wants to ask first tries to add it
+    result = add_book(
+        tmp_path, _candidate(title="The Brass Verdict"), stop_on_near_match=True
+    )
+
+    # Then nothing is written and the near matches come back for a person to
+    # settle. Over MCP the caller is a model, so a near match reported after the
+    # write arrives too late to be a question (ADR 0026).
+    assert result.outcome is Outcome.NEEDS_CONFIRMATION
+    assert [n.title for n in result.near_matches] == ["The Brass Verdict: A Novel"]
+    assert result.libris_id is None
+    assert len(list(tmp_path.glob("*.md"))) == 1
+
+
+def test_a_near_match_does_not_stop_the_write_by_default(tmp_path):
+    # Given the same Library
+    create_book_note(_candidate(title="The Brass Verdict: A Novel"), tmp_path)
+
+    # When a Surface with a person already looking at the near matches adds it -
+    # which is what the extension's popup does
+    result = add_book(tmp_path, _candidate(title="The Brass Verdict"))
+
+    # Then it writes. The two adapters differ deliberately, and this is the REST
+    # half of ADR 0026.
+    assert result.outcome is Outcome.CREATED
+    assert len(list(tmp_path.glob("*.md"))) == 2
+
+
+def test_stopping_is_not_triggered_when_nothing_is_near(tmp_path):
+    # Given a Library holding something else entirely
+    create_book_note(_candidate(title="Dune"), tmp_path)
+
+    # When an unrelated Book is added by a Surface that would have asked
+    result = add_book(
+        tmp_path, _candidate(title="Neuromancer"), stop_on_near_match=True
+    )
+
+    # Then it writes without a question. The confirmation is the price of an
+    # ambiguity, not of every add.
+    assert result.outcome is Outcome.CREATED
+    assert result.near_matches == []
+
+
+def test_a_book_already_held_is_reported_as_held_not_as_a_question(tmp_path):
+    # Given a Library that exactly holds this Book
+    create_book_note(_candidate(isbn="9780441013593"), tmp_path)
+
+    # When it is added again by a Surface that would have asked
+    result = add_book(
+        tmp_path, _candidate(isbn="9780441013593"), stop_on_near_match=True
+    )
+
+    # Then the exact check answers first. Asking "did you mean this one?" about a
+    # Book the Library provably already holds is a question with no useful answer.
+    assert result.outcome is Outcome.ALREADY_PRESENT
+    assert result.libris_id is not None
+
+
+def test_confirming_writes_even_over_a_near_match(tmp_path):
+    # Given a near match that stopped a first attempt
+    create_book_note(_candidate(title="The Brass Verdict: A Novel"), tmp_path)
+    stopped = add_book(
+        tmp_path, _candidate(title="The Brass Verdict"), stop_on_near_match=True
+    )
+    assert stopped.outcome is Outcome.NEEDS_CONFIRMATION
+
+    # When the person says it is a different Book
+    result = add_book(
+        tmp_path, _candidate(title="The Brass Verdict"), stop_on_near_match=False
+    )
+
+    # Then it writes. Confirmation is the second call, not a flag the first one
+    # carried.
+    assert result.outcome is Outcome.CREATED
+    assert len(list(tmp_path.glob("*.md"))) == 2

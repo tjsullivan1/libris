@@ -44,6 +44,9 @@ class Outcome(Enum):
 
     CREATED = "created"
     ALREADY_PRESENT = "already_present"
+    # Nothing was written, and will not be until a person answers. Only a
+    # Surface that asked to stop can receive this (ADR 0026).
+    NEEDS_CONFIRMATION = "needs_confirmation"
 
 
 @dataclass
@@ -58,10 +61,13 @@ class AddResult:
     """
 
     libris_id: str | None
-    path: Path
+    path: Path | None
     outcome: Outcome
     title: str | None = None
     authors: list[str] = field(default_factory=list)
+    # The Book Notes that stopped the write, when one was stopped. Empty in
+    # every other case, including a write that went ahead past them.
+    near_matches: list[BookNote] = field(default_factory=list)
 
 
 def is_isbn10(value: str) -> bool:
@@ -557,6 +563,7 @@ def add_book(
     vault_path: Path,
     candidate: BookCandidate,
     overrides: dict | None = None,
+    stop_on_near_match: bool = False,
 ) -> AddResult:
     """Add a Book to the Library, unless it is already held.
 
@@ -568,9 +575,16 @@ def add_book(
         vault_path: The Shelf to write into.
         candidate: The Book Candidate accepted by whoever chose it.
         overrides: Frontmatter fields to set, validated by create_book_note.
+        stop_on_near_match: Refuse to write when the Library holds a Near Match,
+            returning the candidates instead. For a Surface whose caller is a
+            model, where a near match reported after the write arrives too late
+            to be a question (ADR 0026). Off by default, because the extension
+            shows Near Matches to a person before they press the button and
+            asking twice would be asking nobody.
 
     Returns:
-        The identity of the Book Note and what happened to it.
+        The identity of the Book Note and what happened to it, or the Near
+        Matches that stopped it.
 
     Raises:
         InvalidFieldValue: If an override carries a value the Library does not
@@ -586,6 +600,8 @@ def add_book(
         authors=candidate.authors,
     )
     if existing is not None:
+        # The exact check answers first, so a Book the Library provably holds is
+        # reported as held rather than raised as a question with no useful answer.
         return AddResult(
             libris_id=existing.libris_id,
             path=existing.path,
@@ -593,6 +609,20 @@ def add_book(
             title=existing.title,
             authors=existing.authors,
         )
+
+    if stop_on_near_match:
+        near = find_similar(
+            vault_path, title=candidate.title, authors=candidate.authors
+        )
+        if near:
+            return AddResult(
+                libris_id=None,
+                path=None,
+                outcome=Outcome.NEEDS_CONFIRMATION,
+                title=candidate.title,
+                authors=candidate.authors,
+                near_matches=near,
+            )
 
     path = create_book_note(candidate, vault_path, overrides=overrides or None)
     note = BookNote.read(path)
