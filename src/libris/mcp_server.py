@@ -18,7 +18,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from . import config, service
+from . import config, installed_version, service
 from .api import GoogleBooksClient
 from .markdown import BookNote
 from .note_format import (
@@ -197,11 +197,9 @@ def create_server(name: str = "libris") -> "MCPServer":
     one: configuration is read at start rather than at import, and a test can
     build a server per configuration.
     """
-    from .server import libris_version
-
     mcp = MCPServer(
         name=name,
-        version=libris_version(),
+        version=installed_version(),
         instructions=INSTRUCTIONS,
     )
 

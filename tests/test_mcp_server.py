@@ -9,6 +9,7 @@ tools/call over the SDK's in-memory transport.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -233,3 +234,29 @@ def test_connecting_does_not_read_the_shelf(shelved, monkeypatch):
     # initialize records the server as failed rather than slow (#94). The cost
     # belongs on the first tool call, where a person can see it happen.
     assert reads == []
+
+
+def test_the_adapter_does_not_need_the_server_extra(monkeypatch):
+    # Given an environment where the web stack is not installed, which is what
+    # `uv sync --extra mcp` gives you
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_fastapi(name, *args, **kwargs):
+        if name.split(".")[0] in {"fastapi", "uvicorn", "starlette"}:
+            raise ModuleNotFoundError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    for module in [m for m in list(sys.modules) if m.startswith("libris.server")]:
+        monkeypatch.delitem(sys.modules, module)
+    monkeypatch.setattr(builtins, "__import__", _no_fastapi)
+
+    # When the MCP server is built
+    server = create_server()
+
+    # Then it builds. The two extras are independent, and reaching into
+    # server.py for a version helper - which lives in libris/__init__.py anyway -
+    # made `libris mcp` require FastAPI to start. CI caught it; this keeps it
+    # caught, because a developer with both extras installed never sees it.
+    assert server.name == "libris"
