@@ -1,6 +1,6 @@
 [project]
 name = "libris"
-version = "0.4.1"
+version = "0.5.0"
 description = "A simple CLI tool to track your reading list in Obsidian"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,6 +21,13 @@ server = [
     "uvicorn>=0.30",
 ]
 
+# The MCP server an agent drives (#93). Separate from `server` because stdio
+# needs no web stack, and optional for the same reason `server` is: the core
+# CLI installs without either, and cli.py imports this lazily too.
+mcp = [
+    "mcp>=2.1.1",
+]
+
 [dependency-groups]
 dev = [
   {include-group = "lint"},
@@ -34,6 +41,10 @@ lint = [
 test = [
   "pytest>=9.0.3",
   "pytest-cov",
+  # Both optional extras belong here rather than being left to the extra: the
+  # adapter tests skip themselves when their import is missing, and a suite that
+  # silently drops fifty tests looks exactly like a clean run.
+  "libris[server,mcp]",
 ]
 
 [project.scripts]

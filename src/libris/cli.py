@@ -1316,3 +1316,41 @@ def serve(
     typer.echo(f"Libris daemon listening on http://{host}:{port}")
     typer.echo("Run `libris serve --show-token` for the token the extension needs.")
     server.run(host=host, port=port, reload=reload)
+
+
+@app.command()
+def mcp():
+    """Run the MCP server an agent drives, over stdio.
+
+    Speaks JSON-RPC on stdin and stdout, so it is started by an MCP client
+    rather than by hand. Register it with:
+
+        uv run --directory <repo> libris mcp
+
+    which always runs the working tree - `libris` on PATH is a `uv tool`
+    snapshot that goes stale silently, and a server registered once and spawned
+    daily is where that hides longest.
+    """
+    try:
+        from . import mcp_server
+    except ImportError:
+        # Written to stderr: stdout is the protocol channel, and a stray line on
+        # it corrupts the first message rather than being seen by anyone.
+        typer.echo(
+            "The mcp extra is not installed, so `libris mcp` cannot run.", err=True
+        )
+        typer.echo("Install it with: uv sync --extra mcp", err=True)
+        typer.echo("or, outside this repo: pip install 'libris[mcp]'", err=True)
+        raise typer.Exit(1) from None
+
+    if not is_vault_configured():
+        # Unlike `libris serve`, this starts anyway. An MCP client shows a server
+        # that exited as a connection failure and puts the reason on a stderr
+        # nobody reads, so the tools report the problem instead - to the person
+        # who can fix it, in the conversation where it came up.
+        typer.echo(
+            "No Shelf is configured; the tools will say so until one is set.",
+            err=True,
+        )
+
+    mcp_server.run()
