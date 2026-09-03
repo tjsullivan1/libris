@@ -107,8 +107,10 @@ def test_the_vocabularies_ride_in_the_schemas(shelved):
     ]
 
     # Then the Library's own values are in them, generated rather than restated
-    # (ADR 0022). `libris update` still offers "Finished", which is exactly the
-    # drift a served vocabulary prevents.
+    # (ADR 0022). "Finished" is the value the `libris status` prompt used to
+    # offer from a hardcoded list, which no note has ever held - the drift a
+    # served vocabulary exists to prevent, named here so a client that starts
+    # keeping its own copy fails this test rather than repeating the mistake.
     assert enums == ["To Read", "Reading", "Read", "Not To Read"]
     assert "Finished" not in enums
 

@@ -30,3 +30,9 @@ the vocabulary, and generating a schema from the one definition is the Library s
 A model reads a tool schema before it composes a call, whereas a `fields` tool is one it can
 simply not call, which returns the guess this ADR exists to prevent. The cost is that the schema
 is built once per process, so a vocabulary change needs a restart.
+
+Correction of fact, not of decision: the example above is stale. The prompt that offered
+"Finished" belongs to `libris status`, not a `libris update` that has never existed, and it was
+changed to render from `STATUS_VALUES` in 44713a9 - the same commit that added the endpoint. The
+drift was real when this was written and is what the decision rests on; nothing in `src/` offers
+the value now.
