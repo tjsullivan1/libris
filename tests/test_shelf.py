@@ -309,3 +309,37 @@ def test_a_note_deleted_between_the_listing_and_the_read_is_dropped(tmp_path):
 
     # Then the answer holds what survives, rather than raising
     assert [n.title for n in index.notes()] == ["Dune"]
+
+
+def test_resolving_an_identity_does_not_re_read_the_shelf(tmp_path, counted_reads):
+    # Given a Shelf that has already been read once
+    paths = [_shelve(tmp_path, title) for title in ("Dune", "Piranesi", "Mercy")]
+    wanted = BookNote.read(paths[1]).libris_id
+    shelf.index_for(tmp_path).notes()
+    counted_reads.clear()
+
+    # When an identity is resolved, twice
+    assert service.find_by_libris_id(tmp_path, wanted).libris_id == wanted
+    assert service.find_by_libris_id(tmp_path, wanted).libris_id == wanted
+
+    # Then nothing was parsed again. Measured against the real Shelf this was
+    # 5.5 seconds per call against 27 milliseconds through the index, and
+    # update_book resolves an identity on every write.
+    assert counted_reads == []
+
+
+def test_resolving_an_unknown_identity_does_not_re_read_the_shelf(
+    tmp_path, counted_reads
+):
+    # Given a Shelf that has already been read once
+    for title in ("Dune", "Piranesi", "Mercy"):
+        _shelve(tmp_path, title)
+    shelf.index_for(tmp_path).notes()
+    counted_reads.clear()
+
+    # When an identity nothing answers for is resolved - the case that has to
+    # look at every note before it can say no
+    assert service.find_by_libris_id(tmp_path, "01J0000000000000000000000A") is None
+
+    # Then it still costs nothing. This was the worst case at 10.4 seconds.
+    assert counted_reads == []
