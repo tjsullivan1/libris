@@ -50,22 +50,44 @@ def set_book_vault_path(path: Path):
     set_config(LEGACY_VAULT_KEY, resolved)
 
 
+class VaultNotConfigured(Exception):
+    """Raised when a Shelf is needed and nobody has chosen one.
+
+    This used to be a silent fallback to the working directory, which meant an
+    unconfigured Libris wrote Book Notes into whatever directory it was
+    launched from (#82). Refusing is the safer answer: a Shelf is a location a
+    person picks once, and guessing it wrong scatters notes somewhere they will
+    not think to look.
+    """
+
+
 def get_vault_path() -> Path:
+    """Get the configured Shelf.
+
+    Returns:
+        The resolved path to the Shelf.
+
+    Raises:
+        VaultNotConfigured: If neither the current nor the legacy vault key is
+            set. Callers that want to report the absence rather than fail on it
+            should ask `is_vault_configured` first.
+    """
     config = get_config()
     path_str = config.get(BOOK_VAULT_KEY) or config.get(LEGACY_VAULT_KEY)
     if not path_str:
-        return Path(".").resolve()
+        raise VaultNotConfigured(
+            "No Shelf is configured. Set one with: libris config --vault <path>"
+        )
     return Path(path_str).expanduser().resolve()
 
 
 def is_vault_configured() -> bool:
     """Check whether a Shelf has actually been configured.
 
-    `get_vault_path` falls back to the working directory when nothing is set
-    (see #82), so "the path it returns exists" says nothing about whether a
-    person chose it. The daemon needs the difference: it refuses to start
-    without a Shelf, and `/health` reports it so a Surface can tell "running"
-    from "usable" (ADR 0019).
+    `get_vault_path` raises when nothing is set (#82), so this exists for the
+    callers that must report the absence rather than fail on it: the daemon
+    refuses to start without a Shelf, and `/health` reports the difference so a
+    Surface can tell "running" from "usable" (ADR 0019).
 
     Returns:
         True when a vault path is set under either the current or legacy key.

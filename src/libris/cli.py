@@ -11,6 +11,7 @@ import typer
 from . import installed_version
 from .api import GoogleBooksClient
 from .config import (
+    VaultNotConfigured,
     ensure_server_token,
     get_obsidian_vault_root,
     get_vault_path,
@@ -91,6 +92,27 @@ def main(
     """Track the books you have read, are reading, or mean to read."""
 
 
+def _require_vault_path() -> Path:
+    """Get the Shelf, or stop the command with an explanation.
+
+    Library code raises and the CLI reports, per `AGENTS.md`. Every command
+    that touches the Shelf needs the same three lines, so they live here rather
+    than at each of the eleven call sites.
+
+    Returns:
+        The resolved path to the configured Shelf.
+
+    Raises:
+        typer.Exit: With code 1 when no Shelf is configured.
+    """
+    try:
+        return get_vault_path()
+    except VaultNotConfigured:
+        typer.echo("No Shelf is configured, so there is nothing to read or write.")
+        typer.echo("Set one with: libris config --vault <path>")
+        raise typer.Exit(code=1) from None
+
+
 _RENAME_SKIP_MESSAGES = {
     "missing_title": "missing title in frontmatter",
     "missing_author": "missing author in frontmatter",
@@ -112,7 +134,7 @@ def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
 @app.command()
 def status():
     """Update the status of a book in your vault."""
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
     books = list_books(vault_path)
 
     if not books:
@@ -148,7 +170,7 @@ def list_cmd(
     ),
 ):
     """List all books in your vault."""
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
     start = time.perf_counter() if timing else None
     books = list_books(vault_path)
     elapsed = (time.perf_counter() - start) if timing and start is not None else None
@@ -264,7 +286,7 @@ def add(
     book_index = choices.index(selected_choice)
     selected_book = books[book_index]
 
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
     if not vault_path.exists():
         typer.echo(f"Vault path does not exist: {vault_path}")
         return
@@ -328,7 +350,12 @@ def config(
     if not vault_path and not api_key and not obsidian_vault:
         from .config import get_api_key
 
-        typer.echo(f"Current vault path: {get_vault_path()}")
+        # `libris config` with no arguments is how a person finds out what is
+        # set, so an unset Shelf is what it is here to report, not a failure.
+        if is_vault_configured():
+            typer.echo(f"Current vault path: {get_vault_path()}")
+        else:
+            typer.echo("Current vault path: Not set")
         obsidian_root = get_obsidian_vault_root()
         if obsidian_root:
             typer.echo(f"Obsidian vault root: {obsidian_root}")
@@ -346,7 +373,7 @@ def clean(
     ),
 ):
     """Select a specific book to clean its frontmatter."""
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
     books = list_books(vault_path)
 
     if not books:
@@ -399,7 +426,7 @@ def cleanup(
     ),
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
     books = list_books(vault_path)
 
     if not books:
@@ -692,7 +719,7 @@ def autoenrich(
     --interactive to select the right book; otherwise they are logged for later
     review.
     """
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
     books = list_books(vault_path)
 
     if not books:
@@ -805,7 +832,7 @@ def enrich(
     ),
 ):
     """Search Google Books to fill in missing data for a book."""
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
 
     if filename is None:
         books = list_books(vault_path)
@@ -835,7 +862,7 @@ def enrich(
 @app.command()
 def duplicates():
     """Find and report duplicate books in the vault."""
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
 
     groups = find_duplicates(vault_path)
 
@@ -900,7 +927,7 @@ def merge(
     Without --auto: Interactive mode where you choose which books to merge.
     With --auto: Automatically merge books when ISBN + Google ID match and no metadata conflicts exist.
     """
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
 
     if decisions is not None:
         _merge_from_decisions(vault_path, Path(decisions), allow_conflicts, dry_run)
@@ -1082,7 +1109,7 @@ def import_cmd(
         typer.echo(f"File not found: {file_path}")
         raise typer.Exit(code=1)
 
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
     if not vault_path.exists():
         typer.echo(f"Vault path does not exist: {vault_path}")
         raise typer.Exit(code=1)
@@ -1150,7 +1177,7 @@ def migrate(
     A dry run by default: summarises what would change, prints a sample of
     diffs, and writes nothing. Review the diff before using --apply.
     """
-    vault_path = get_vault_path()
+    vault_path = _require_vault_path()
     if not vault_path.exists():
         typer.echo(f"Shelf does not exist: {vault_path}")
         raise typer.Exit(code=1)
@@ -1278,10 +1305,9 @@ def serve(
         raise typer.Exit(1) from None
 
     if not is_vault_configured():
-        # get_vault_path falls back to the working directory (#82), so without
-        # this the daemon would serve whatever directory it was started in -
-        # and #55 starts it from a scheduled task, where nobody picked that
-        # directory at all.
+        # Checked here rather than left to _require_vault_path so the message
+        # names the daemon's problem: it has nothing to serve. #55 starts it
+        # from a scheduled task, where nobody is watching for a traceback.
         typer.echo("No Shelf is configured, so the daemon has nothing to serve.")
         typer.echo("Set one with: libris config --vault <path>")
         raise typer.Exit(1)
