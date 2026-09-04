@@ -1,7 +1,6 @@
 """Import books from external sources (currently Audible JSON) into the vault."""
 
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -14,7 +13,9 @@ from .markdown import (
     FrontmatterUnreadable,
     create_book_note,
     list_books,
+    split_frontmatter,
     update_book_status,
+    write_note,
 )
 from .matching import normalize_for_match
 
@@ -211,11 +212,11 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
         return True
 
     content = path.read_text(encoding="utf-8")
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
-    if match is None:
+    split = split_frontmatter(content)
+    if split is None:
         return False
 
-    frontmatter_yaml, rest_of_content = match.group(1), match.group(2)
+    frontmatter_yaml, rest_of_content = split
     try:
         data = yaml.safe_load(frontmatter_yaml)
     except yaml.YAMLError:
@@ -230,8 +231,10 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
 
     data["format"] = book.format
     new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-    content_part = rest_of_content.lstrip("\n")
-    path.write_text(f"---\n{new_frontmatter}\n---\n{content_part}", encoding="utf-8")
+    # The body goes back as it was read. It carries its own leading newlines now
+    # that the split preserves them, so stripping would delete a blank line the
+    # reader put there (#99).
+    write_note(path, f"---\n{new_frontmatter}\n---\n{rest_of_content}")
     return True
 
 

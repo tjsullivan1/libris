@@ -1,6 +1,6 @@
 [project]
 name = "libris"
-version = "0.5.2"
+version = "0.5.3"
 description = "A simple CLI tool to track your reading list in Obsidian"
 readme = "README.md"
 requires-python = ">=3.12"

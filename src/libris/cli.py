@@ -34,6 +34,7 @@ from .markdown import (
     split_frontmatter,
     update_book_status,
     update_frontmatter_from_book,
+    write_note,
 )
 from .matching import (
     best_match,
@@ -624,7 +625,7 @@ def _append_auto_enrich_note(
         f'> Query: "{original_query}" → Matched: "{matched_title}"\n'
         f"> Please verify this is the correct book.\n"
     )
-    file_path.write_text(content.rstrip() + note + "\n", encoding="utf-8")
+    write_note(file_path, content.rstrip() + note + "\n")
 
 
 def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
