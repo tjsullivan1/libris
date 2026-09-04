@@ -15,15 +15,19 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
-        # The server extra is optional, so both states are supported states and
-        # both get tested: with it the daemon works, without it every other
-        # command still does.
-        extras: ["none", "server"]
+        # Both extras are optional, so every state is a supported state and each
+        # gets tested: with one the daemon or the MCP server works, without
+        # either every other command still does, and with both they coexist.
+        extras: ["none", "server", "mcp", "all"]
         include:
           - extras: "none"
             sync-args: ""
           - extras: "server"
             sync-args: "--extra server"
+          - extras: "mcp"
+            sync-args: "--extra mcp"
+          - extras: "all"
+            sync-args: "--all-extras"
     steps:
       - uses: actions/checkout@v7
 
@@ -34,12 +38,29 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen ${{ matrix.sync-args }}
 
-      # Server tests skip when FastAPI is absent, and skipped tests exit 0. This
-      # fails loudly if the extra ever stops installing, rather than letting the
-      # suite report green over a server that was never exercised.
+      # Tests for an absent extra skip themselves, and skipped tests exit 0. These
+      # fail loudly if an extra ever stops installing, rather than letting the
+      # suite report green over a surface that was never exercised.
       - name: Verify the server extra installed
-        if: matrix.extras == 'server'
+        if: matrix.extras == 'server' || matrix.extras == 'all'
         run: uv run python -c "import fastapi, uvicorn"
+
+      - name: Verify the mcp extra installed
+        if: matrix.extras == 'mcp' || matrix.extras == 'all'
+        run: uv run python -c "from mcp.server import MCPServer"
+
+      # The other half of the same guarantee: the no-extras leg exists to prove
+      # the core CLI works without them, which is worthless if something quietly
+      # pulls them in - a test dependency group did exactly that once.
+      - name: Verify neither extra installed
+        if: matrix.extras == 'none'
+        run: |
+          uv run python - <<'PY'
+          import importlib.util, sys
+          leaked = [m for m in ("fastapi", "mcp") if importlib.util.find_spec(m)]
+          if leaked:
+              sys.exit(f"The no-extras leg installed: {', '.join(leaked)}")
+          PY
 
       - name: Run tests
         run: uv run pytest

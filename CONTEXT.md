@@ -93,6 +93,12 @@ asked. *Absorbed*: the Library already satisfied it, and the outcome names the L
 turned out to mean. *Rejected*: it could not apply and a person has to decide.
 _Avoid_: intent status, failure, error
 
+**Derived Field**:
+A field a write set that the caller did not name — the date stamped onto a Book Note when its
+Status moves to Read or Reading. Always reported back with the write, so a value nobody asked
+for is never one nobody sees.
+_Avoid_: default, implicit field, side effect
+
 **Resolution**:
 Turning a person's reference to a book ("that Sanderson one I just finished") into a Libris
 ID. Always performed while the person is still present to disambiguate.

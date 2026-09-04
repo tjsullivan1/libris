@@ -6,19 +6,31 @@ module knows about HTTP, and it raises rather than returning status codes: the
 adapter decides what a failure looks like on the wire.
 """
 
+import math
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
 from pathlib import Path
 
 from .api import BookCandidate, GoogleBooksClient
-from .markdown import BookNote, create_book_note, list_books
+from .markdown import (
+    BookNote,
+    create_book_note,
+    list_books,
+    set_frontmatter_fields,
+)
 from .matching import best_match, normalize_for_match, titles_match
 from .merge import (
     delete_secondary_file,
     get_primary_book,
     merge_two_books,
     write_merged_book,
+)
+from .note_format import (
+    READER_FIELDS,
+    normalize_field_value,
+    validate_field_value,
 )
 from .shelf import index_for
 
@@ -32,6 +44,9 @@ class Outcome(Enum):
 
     CREATED = "created"
     ALREADY_PRESENT = "already_present"
+    # Nothing was written, and will not be until a person answers. Only a
+    # Surface that asked to stop can receive this (ADR 0026).
+    NEEDS_CONFIRMATION = "needs_confirmation"
 
 
 @dataclass
@@ -46,10 +61,13 @@ class AddResult:
     """
 
     libris_id: str | None
-    path: Path
+    path: Path | None
     outcome: Outcome
     title: str | None = None
     authors: list[str] = field(default_factory=list)
+    # The Book Notes that stopped the write, when one was stopped. Empty in
+    # every other case, including a write that went ahead past them.
+    near_matches: list[BookNote] = field(default_factory=list)
 
 
 def is_isbn10(value: str) -> bool:
@@ -203,24 +221,23 @@ def find_by_libris_id(vault_path: Path, libris_id: str) -> BookNote | None:
 
     Note:
         Guaranteeing that a live identity wins means the scan cannot stop at the
-        first superseded match, so resolving an identity that is superseded or
-        unknown reads every Book Note: about 14 seconds against the 3,136-note
-        Shelf. Resolving one Intent that way is fine; resolving a queue of them
-        in a loop is not. A caller with many to resolve should build an index in
-        one pass instead.
+        first superseded match, so an identity that is superseded or unknown is
+        compared against every Book Note. Those comparisons come from the index
+        rather than from the disk: reading and parsing the Shelf per call cost
+        5.5 seconds for a live id and 10.4 for an unknown one against the real
+        3,063-note Shelf, where the same lookup through the index costs 27
+        milliseconds. update_book resolves an identity on every write, so that
+        was the difference between a tool that answers and one that stalls.
     """
     wanted = libris_id.strip() if libris_id else ""
     if not wanted:
-        # Checked after stripping: a whitespace-only id would otherwise read
-        # every note on the Shelf to find nothing.
+        # Checked before the scan: a whitespace-only id would otherwise be
+        # compared against every note on the Shelf to find nothing.
         return None
 
     superseding: BookNote | None = None
 
-    for book_path in list_books(vault_path):
-        note = BookNote.read(book_path)
-        if note is None:
-            continue
+    for note in index_for(vault_path).notes():
         if note.libris_id == wanted:
             return note
         if superseding is None and wanted in note.superseded_ids:
@@ -326,10 +343,234 @@ def find_similar(
     return found[:limit]
 
 
+# What a search returns when the caller does not say, and the most it will
+# return however loudly they ask. A Surface asking for everything is asking to
+# read 1,452 To Read notes into a context window, which is what the ceiling
+# exists to refuse; the total travels instead so the answer stays honest.
+DEFAULT_SEARCH_LIMIT = 20
+MAX_SEARCH_LIMIT = 50
+
+# Words that say how a person is talking rather than which book they mean. A
+# query still scores them - "The Way of Kings" should outrank "Kings of the
+# Wyld" partly on "of" - but a note matching nothing else is not a match, or
+# searching for a title with "the" in it would report most of the Shelf.
+#
+# Curated rather than derived, because frequency cannot do this job: measured on
+# the real Shelf, "poems" appears in 51 notes and "one" in 50. They are
+# statistically identical and only one of them names a book. The list covers
+# pronouns, determiners, common prepositions and the filler of a spoken request
+# ("that mistborn one I just finished"), and holds no word that could title a
+# book on its own.
+_STOP_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "am",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "i",
+        "in",
+        "is",
+        "it",
+        "its",
+        "just",
+        "me",
+        "mine",
+        "my",
+        "of",
+        "on",
+        "one",
+        "ones",
+        "or",
+        "some",
+        "that",
+        "the",
+        "these",
+        "this",
+        "those",
+        "to",
+        "was",
+        "were",
+        "with",
+    }
+)
+
+
+@dataclass
+class SearchResult:
+    """What the Library holds for a query, and how much of it was returned.
+
+    `total` counts every match, not the returned slice. A Surface that shows
+    five of 1,452 can then say so, rather than implying it saw them all.
+    """
+
+    total: int
+    limit: int
+    books: list[BookNote] = field(default_factory=list)
+
+
+def _search_tokens(text: str) -> set[str]:
+    """Split text into the normalized words a search compares."""
+    normalized = normalize_for_match(text)
+    return set(normalized.split()) if normalized else set()
+
+
+def _weights(note_tokens: list[set[str]]) -> dict[str, float]:
+    """Weigh each word on the Shelf by how few notes carry it.
+
+    A word naming three notes says far more about which book was meant than one
+    naming fifty, and scoring every matched word alike is what put "The Hot One"
+    above "The Final Empire: Mistborn Book 1" for "that mistborn one".
+
+    Args:
+        note_tokens: The word set of every Book Note being searched.
+
+    Returns:
+        A weight per word: `log(1 + n/df)`. The log is what keeps one very rare
+        word from swamping the ranking outright, and the `1 +` inside it is what
+        keeps a word every note carries weighing something rather than zero, so
+        a Shelf of near-identical titles does not score nothing at all.
+    """
+    total = len(note_tokens)
+    frequency: dict[str, int] = {}
+    for tokens in note_tokens:
+        for token in tokens:
+            frequency[token] = frequency.get(token, 0) + 1
+    return {token: math.log(1 + total / count) for token, count in frequency.items()}
+
+
+def _rank(
+    query_tokens: set[str],
+    note_tokens: set[str],
+    weights: dict[str, float],
+    distinctive: set[str],
+) -> tuple[float, float] | None:
+    """Score one Book Note against a query, or None when it does not match.
+
+    Ranks rather than decides, for the reason find_similar does (ADR 0003):
+    "Mercy" and "Long Road to Mercy" are different books that share a word, and
+    only the person asking can say which they meant. Both are returned; the note
+    the query describes best is put first.
+
+    Args:
+        query_tokens: The words the person used.
+        note_tokens: The words in this note's title and authors.
+        weights: What each word on this Shelf is worth.
+        distinctive: The query's words that could name a book, so a note that
+            matched only filler is never offered as an answer.
+
+    Returns:
+        The weight of what matched, and how much of the note that accounts for -
+        so a short title matching one word outranks a long one matching the same
+        word incidentally. None when nothing matched, or only filler did.
+    """
+    matched = query_tokens & note_tokens
+    if not matched or not (matched & distinctive):
+        return None
+
+    scored = sum(weights.get(token, 0.0) for token in matched)
+    available = sum(weights.get(token, 0.0) for token in note_tokens) or 1.0
+    return scored, scored / available
+
+
+def search_library(
+    vault_path: Path,
+    query: str | None = None,
+    status: str | None = None,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+) -> SearchResult:
+    """Find the Book Notes a person is describing, without deciding which.
+
+    The free-text half is deliberately fuzzy and the filter half is not. A
+    status belongs to a closed vocabulary the Library defines (ADR 0022), so it
+    narrows exactly; the words someone actually said are matched loosely and
+    ranked, and every plausible answer goes back for them to settle (ADR 0003).
+
+    Args:
+        vault_path: The Shelf to search.
+        query: What the person said, matched against titles and authors. When
+            absent the filters answer alone - "what am I reading?" carries no
+            query at all.
+        status: A status to narrow to, from the Library's own vocabulary.
+        limit: The most notes to return, clamped to MAX_SEARCH_LIMIT.
+
+    Returns:
+        The matching Book Notes, best first, and the total number of matches
+        the limit may have cut short.
+
+    Raises:
+        InvalidFieldValue: If the status is not one the Library defines. Refused
+            rather than quietly matching nothing, which would report an empty
+            Library for a typo.
+    """
+    if status is not None:
+        validate_field_value("status", status)
+
+    limit = max(0, min(limit, MAX_SEARCH_LIMIT))
+    query_tokens = _search_tokens(query) if query else set()
+
+    # A query of nothing but filler is taken at face value - the alternative is
+    # answering "the" with silence, when the Shelf may well hold "The Road".
+    distinctive = query_tokens - _STOP_WORDS or query_tokens
+
+    candidates: list[tuple[BookNote, set[str]]] = []
+    for note in index_for(vault_path).notes():
+        if not note.title:
+            # Obsidian writes into this directory too, so a file that is not a
+            # Book Note is ordinary rather than exceptional.
+            continue
+        if status is not None and note.frontmatter.get("status") != status:
+            continue
+        # Only worth doing when something will be ranked. Listing "To Read"
+        # walks 1,452 notes on the real Shelf, and tokenizing every title and
+        # author to then sort alphabetically is work with no reader.
+        tokens = (
+            _search_tokens(note.title) | _search_tokens(" ".join(note.authors))
+            if query_tokens
+            else set()
+        )
+        candidates.append((note, tokens))
+
+    # Weighed across what the filter left, not the whole Shelf, so narrowing to
+    # one status weighs words by how well they separate the books still in play.
+    weights = _weights([tokens for _, tokens in candidates]) if query_tokens else {}
+
+    scored: list[tuple[tuple, BookNote]] = []
+    for note, note_tokens in candidates:
+        sort_title = normalize_for_match(note.title or "")
+        if not query_tokens:
+            # Nothing was asked, so nothing is ranked. Alphabetical is the order
+            # a person expects and, unlike relevance, is identical between two
+            # identical calls.
+            scored.append(((0.0, 0.0, 0, sort_title), note))
+            continue
+        rank = _rank(query_tokens, note_tokens, weights, distinctive)
+        if rank is None:
+            continue
+        matched, density = rank
+        scored.append(((-matched, -density, len(note.title or ""), sort_title), note))
+
+    scored.sort(key=lambda pair: pair[0])
+    return SearchResult(
+        total=len(scored),
+        limit=limit,
+        books=[note for _, note in scored[:limit]],
+    )
+
+
 def add_book(
     vault_path: Path,
     candidate: BookCandidate,
     overrides: dict | None = None,
+    stop_on_near_match: bool = False,
 ) -> AddResult:
     """Add a Book to the Library, unless it is already held.
 
@@ -341,9 +582,16 @@ def add_book(
         vault_path: The Shelf to write into.
         candidate: The Book Candidate accepted by whoever chose it.
         overrides: Frontmatter fields to set, validated by create_book_note.
+        stop_on_near_match: Refuse to write when the Library holds a Near Match,
+            returning the candidates instead. For a Surface whose caller is a
+            model, where a near match reported after the write arrives too late
+            to be a question (ADR 0026). Off by default, because the extension
+            shows Near Matches to a person before they press the button and
+            asking twice would be asking nobody.
 
     Returns:
-        The identity of the Book Note and what happened to it.
+        The identity of the Book Note and what happened to it, or the Near
+        Matches that stopped it.
 
     Raises:
         InvalidFieldValue: If an override carries a value the Library does not
@@ -359,6 +607,8 @@ def add_book(
         authors=candidate.authors,
     )
     if existing is not None:
+        # The exact check answers first, so a Book the Library provably holds is
+        # reported as held rather than raised as a question with no useful answer.
         return AddResult(
             libris_id=existing.libris_id,
             path=existing.path,
@@ -366,6 +616,20 @@ def add_book(
             title=existing.title,
             authors=existing.authors,
         )
+
+    if stop_on_near_match:
+        near = find_similar(
+            vault_path, title=candidate.title, authors=candidate.authors
+        )
+        if near:
+            return AddResult(
+                libris_id=None,
+                path=None,
+                outcome=Outcome.NEEDS_CONFIRMATION,
+                title=candidate.title,
+                authors=candidate.authors,
+                near_matches=near,
+            )
 
     path = create_book_note(candidate, vault_path, overrides=overrides or None)
     note = BookNote.read(path)
@@ -377,6 +641,127 @@ def add_book(
         # cannot be read back rather than leaving the Surface with only a path.
         title=note.title if note else candidate.title,
         authors=note.authors if note else candidate.authors,
+    )
+
+
+class BookNotFound(Exception):
+    """No Book Note answers for the identity a write named.
+
+    A miss never writes and never creates (ADR 0003): an update that cannot find
+    its book is a question for the person who named it, not an excuse to add one.
+    """
+
+
+# The date a status implies when the note does not already carry one. The
+# Library has held half of this rule for years - `ensure_frontmatter_fields`
+# forces status to Read when a finish date is present - and this is the other
+# half (ADR 0024).
+_STATUS_STAMPS = {"Read": "date_finished", "Reading": "date_started"}
+
+
+@dataclass
+class UpdateResult:
+    """What an update did, including the parts nobody asked for.
+
+    `derived` names the fields the Library set on its own. It travels because a
+    stamped date is indistinguishable from a stated one afterwards, and a person
+    who meant last Tuesday can only correct it while still in the conversation
+    (ADR 0024).
+    """
+
+    note: BookNote
+    written: dict[str, object] = field(default_factory=dict)
+    derived: dict[str, object] = field(default_factory=dict)
+
+
+def update_book(
+    vault_path: Path,
+    libris_id: str,
+    fields: dict[str, object],
+) -> UpdateResult:
+    """Set fields on the Book Note holding an identity.
+
+    Only the named fields change, so an update can never overwrite a field it
+    knows nothing about. Only the reader's own fields may be named: a title
+    belongs to Libris (ADR 0012) and the bibliographic fields come from
+    enrichment rather than from someone talking.
+
+    Args:
+        vault_path: The Shelf to write into.
+        libris_id: The identity to update. A superseded identity resolves to the
+            note that absorbed it (ADR 0014), so an id picked up before a merge
+            still applies.
+        fields: Field names and the values to set them to.
+
+    Returns:
+        The updated Book Note, what was written, and anything the Library
+        derived.
+
+    Raises:
+        BookNotFound: If no note answers for the identity.
+        InvalidFieldValue: If a value is not one the Library defines.
+        ValueError: If a field is not the reader's to set, or a value is null.
+        FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
+    """
+    note = find_by_libris_id(vault_path, libris_id)
+    if note is None:
+        raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
+
+    written: dict[str, object] = {}
+    for name, value in fields.items():
+        if name not in READER_FIELDS:
+            raise ValueError(
+                f"{name} is not a field this Surface may set. "
+                f"Settable fields: {', '.join(sorted(READER_FIELDS))}."
+            )
+        if value is None or (isinstance(value, (str, list, dict)) and not value):
+            # Null is the obvious way to erase a field by accident; the empty
+            # string and the empty list are the quiet ones. `format: []` reaches
+            # normalize_field_value and comes back None, and an empty string
+            # writes an empty field - both are a clear, arrived at without
+            # anyone asking for one. A model that emits any of the three for
+            # "leave this alone" would erase a field nobody mentioned.
+            #
+            # Emptiness is tested by type rather than by truthiness, because a
+            # rating of 0 and a False are values a reader can mean.
+            raise ValueError(
+                f"{name} was given no value. Omit a field to leave it unchanged; "
+                f"this call cannot clear one."
+            )
+        # Repair the shape, then check the repaired value, then write exactly
+        # what was checked. Validating first meant judging one value and writing
+        # another: `format: "audiobook"` and `["physical", "EBOOK"]` were both
+        # refused although normalization turns them into values the Library
+        # defines, while `ensure_frontmatter_fields` repairs that same field on
+        # every pass (ADR 0017). The MCP schema never sends those, but this is a
+        # service-layer call and its two adapters do not agree on what they send.
+        repaired = normalize_field_value(name, value)
+        if repaired is None or (
+            isinstance(repaired, (str, list, dict)) and not repaired
+        ):
+            # Normalization can empty a value that arrived non-empty - a format
+            # of unrecognised words comes back None - and that is a clear by
+            # another route.
+            raise ValueError(
+                f"{name} was given {value!r}, which holds no value the Library "
+                f"recognises. Omit a field to leave it unchanged."
+            )
+        validate_field_value(name, repaired)
+        written[name] = repaired
+
+    derived: dict[str, object] = {}
+    stamp = _STATUS_STAMPS.get(str(fields.get("status", "")))
+    if stamp and stamp not in fields and not note.frontmatter.get(stamp):
+        # Only ever fills an empty field, so re-marking a dated book Read leaves
+        # the original date alone. A re-read is not something the Library models.
+        derived[stamp] = date.today().isoformat()
+        written[stamp] = derived[stamp]
+
+    if written:
+        set_frontmatter_fields(note.path, written)
+
+    return UpdateResult(
+        note=BookNote.read(note.path) or note, written=written, derived=derived
     )
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "libris"
-version = "0.4.1"
+version = "0.5.0"
 description = "A simple CLI tool to track your reading list in Obsidian"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,6 +21,13 @@ server = [
     "uvicorn>=0.30",
 ]
 
+# The MCP server an agent drives (#93). Separate from `server` because stdio
+# needs no web stack, and optional for the same reason `server` is: the core
+# CLI installs without either, and cli.py imports this lazily too.
+mcp = [
+    "mcp>=2.1.1",
+]
+
 [dependency-groups]
 dev = [
   {include-group = "lint"},
@@ -34,6 +41,11 @@ lint = [
 test = [
   "pytest>=9.0.3",
   "pytest-cov",
+  # The optional extras deliberately do NOT belong here. This group installs on
+  # every `uv sync`, including CI's no-extras leg, whose whole job is to prove
+  # the core CLI works without them. Locally, `uv sync --all-extras` runs the
+  # whole suite; CI covers each combination as a matrix leg and asserts the
+  # imports are present, so a silently-skipped fifty tests fails loudly instead.
 ]
 
 [project.scripts]

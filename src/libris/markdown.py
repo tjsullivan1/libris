@@ -271,6 +271,71 @@ def update_book_status(file_path: Path, new_status: str):
     file_path.write_text(new_content, encoding="utf-8")
 
 
+class FrontmatterUnreadable(ValueError):
+    """A Book Note's frontmatter could not be parsed, so it was not written to."""
+
+
+def _split_frontmatter(content: str) -> Optional[tuple[str, str]]:
+    """Split a note into its frontmatter block and everything after it.
+
+    Deliberately not a regex. The body is returned exactly as it was found -
+    every byte after the line closing the block, blank lines included - because
+    an update to one field must not reflow a reader's own writing (ADR 0023).
+
+    Args:
+        content: The whole file.
+
+    Returns:
+        The YAML text and the body, or None if there is no closed frontmatter
+        block at the start of the file.
+    """
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "".join(lines[1:index]), "".join(lines[index + 1 :])
+    return None
+
+
+def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
+    """Set named frontmatter fields on a Book Note, leaving the body untouched.
+
+    The body is carried across exactly rather than re-rendered. Every other
+    write path here reconstructs a note - `ensure_frontmatter_fields` re-dumps
+    the YAML and reflows the body on every pass - which is right for a repair
+    pass and wrong for setting a status.
+
+    Field order is preserved for keys the note already carries; new keys are
+    appended, so an update does not reshuffle a note.
+
+    Args:
+        file_path: The Book Note to write.
+        updates: Field names and the values to set them to.
+
+    Raises:
+        FrontmatterUnreadable: If the file has no parseable frontmatter block.
+            Refused rather than repaired: this is the write path for one field,
+            not the place to rebuild a broken note.
+    """
+    content = file_path.read_text(encoding="utf-8")
+    split = _split_frontmatter(content)
+    if split is None:
+        raise FrontmatterUnreadable(f"{file_path.name} has no readable frontmatter.")
+
+    frontmatter_yaml, body = split
+    try:
+        data = yaml.safe_load(frontmatter_yaml)
+    except yaml.YAMLError as exc:
+        raise FrontmatterUnreadable(f"{file_path.name}: {exc}") from None
+    if not isinstance(data, dict):
+        raise FrontmatterUnreadable(f"{file_path.name} has no frontmatter mapping.")
+
+    data.update(updates)
+    rendered = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+    file_path.write_text("---\n" + rendered + "\n---\n" + body, encoding="utf-8")
+
+
 def list_books(vault_path: Path):
     """Lists all markdown files in the vault, assuming each is a book note."""
     return [

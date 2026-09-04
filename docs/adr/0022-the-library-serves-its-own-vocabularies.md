@@ -22,3 +22,17 @@ designed for two.
 `rating` is left unconstrained, as it is today. Nothing in `FIELD_VOCABULARIES` bounds it, and
 inventing a rule here would put the vocabulary's fourth definition in the place this decision
 exists to prevent.
+
+Extended for MCP: the tools carry the vocabularies as JSON Schema enums on `update_book` and
+`add_book`, generated from `FIELD_VOCABULARIES` at server start, rather than exposing a `fields`
+tool. This is the same decision, not an exception to it - the objection is to a client restating
+the vocabulary, and generating a schema from the one definition is the Library serving its own.
+A model reads a tool schema before it composes a call, whereas a `fields` tool is one it can
+simply not call, which returns the guess this ADR exists to prevent. The cost is that the schema
+is built once per process, so a vocabulary change needs a restart.
+
+Correction of fact, not of decision: the example above is stale. The prompt that offered
+"Finished" belongs to `libris status`, not a `libris update` that has never existed, and it was
+changed to render from `STATUS_VALUES` in 44713a9 - the same commit that added the endpoint. The
+drift was real when this was written and is what the decision rests on; nothing in `src/` offers
+the value now.
