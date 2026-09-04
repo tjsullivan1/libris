@@ -27,6 +27,7 @@ from .note_format import (
     PRIORITY_VALUES,
     STATUS_VALUES,
     InvalidFieldValue,
+    read_formats,
 )
 
 # The vocabularies as the model sees them. Generated from note_format rather
@@ -136,7 +137,13 @@ class Book(BaseModel):
     def of(cls, note: BookNote) -> "Book":
         """Build the tool form of a Book Note."""
         frontmatter = note.frontmatter
-        formats = frontmatter.get("format") or []
+        # Read through the vocabulary's own reader rather than trusting the
+        # shape on disk. `format` is a list in most notes and a bare string in
+        # some - two on the Shelf today - and Obsidian writes the field where
+        # Libris cannot guard it (ADR 0017), so the shape is not ours to assume.
+        # Testing `isinstance(..., list)` reported no format at all for those
+        # notes, and dropped the case repair besides.
+        formats = read_formats(frontmatter.get("format"))
         return cls(
             libris_id=note.libris_id,
             title=note.title,
@@ -145,7 +152,7 @@ class Book(BaseModel):
             priority=_text(frontmatter.get("priority")),
             rating=_text(frontmatter.get("rating")),
             series=_text(frontmatter.get("series")),
-            format=[str(f) for f in formats] if isinstance(formats, list) else [],
+            format=formats,
             date_started=_text(frontmatter.get("date_started")),
             date_finished=_text(frontmatter.get("date_finished")),
             path=str(note.path),

@@ -262,3 +262,24 @@ def test_the_adapter_does_not_need_the_server_extra(monkeypatch):
     # made `libris mcp` require FastAPI to start. CI caught it; this keeps it
     # caught, because a developer with both extras installed never sees it.
     assert server.name == "libris"
+
+
+def test_a_bare_string_format_is_reported_not_dropped(shelved):
+    # Given a note whose format is a bare string rather than a list
+    note = next(
+        n
+        for n in (BookNote.read(p) for p in Path(shelved).glob("*.md"))
+        if n.title == "Dune"
+    )
+    raw = note.path.read_text(encoding="utf-8")
+    note.path.write_text(
+        raw.replace("format: null", "format: physical", 1), encoding="utf-8"
+    )
+
+    # When the book is searched for
+    answer = payload(call("search_library", {"query": "dune"}))
+
+    # Then the format is reported, and in the Library's own casing. Reaching into
+    # the frontmatter and testing isinstance(list) returned no format at all for
+    # these notes, which would tell an agent a book has none recorded.
+    assert answer["books"][0]["format"] == ["Physical"]

@@ -707,6 +707,7 @@ def update_book(
     if note is None:
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
 
+    written: dict[str, object] = {}
     for name, value in fields.items():
         if name not in READER_FIELDS:
             raise ValueError(
@@ -727,11 +728,26 @@ def update_book(
                 f"{name} was given no value. Omit a field to leave it unchanged; "
                 f"this call cannot clear one."
             )
-        validate_field_value(name, value)
-
-    written = {
-        name: normalize_field_value(name, value) for name, value in fields.items()
-    }
+        # Repair the shape, then check the repaired value, then write exactly
+        # what was checked. Validating first meant judging one value and writing
+        # another: `format: "audiobook"` and `["physical", "EBOOK"]` were both
+        # refused although normalization turns them into values the Library
+        # defines, while `ensure_frontmatter_fields` repairs that same field on
+        # every pass (ADR 0017). The MCP schema never sends those, but this is a
+        # service-layer call and its two adapters do not agree on what they send.
+        repaired = normalize_field_value(name, value)
+        if repaired is None or (
+            isinstance(repaired, (str, list, dict)) and not repaired
+        ):
+            # Normalization can empty a value that arrived non-empty - a format
+            # of unrecognised words comes back None - and that is a clear by
+            # another route.
+            raise ValueError(
+                f"{name} was given {value!r}, which holds no value the Library "
+                f"recognises. Omit a field to leave it unchanged."
+            )
+        validate_field_value(name, repaired)
+        written[name] = repaired
 
     derived: dict[str, object] = {}
     stamp = _STATUS_STAMPS.get(str(fields.get("status", "")))

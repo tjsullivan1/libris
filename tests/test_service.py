@@ -983,3 +983,50 @@ def test_listing_by_filter_does_not_tokenize_every_note(tmp_path, monkeypatch):
     # alphabetically is work with no reader.
     assert len(result.books) == 3
     assert calls == []
+
+
+def test_a_format_written_as_a_bare_string_is_repaired_not_refused(tmp_path):
+    # Given a note whose format is a bare string, which two notes on the real
+    # Shelf hold and which Obsidian can write at any time (ADR 0017)
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
+    raw = note.path.read_text(encoding="utf-8")
+    note.path.write_text(
+        raw.replace("format: null", "format: Physical", 1), encoding="utf-8"
+    )
+
+    # When a second format is recorded
+    update_book(tmp_path, note.libris_id, {"format": ["Physical", "Audiobook"]})
+
+    # Then the write lands
+    assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == [
+        "Physical",
+        "Audiobook",
+    ]
+
+
+def test_a_format_is_repaired_before_it_is_judged(tmp_path):
+    # Given a format in a shape and case the Library repairs elsewhere
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When it arrives that way
+    update_book(tmp_path, note.libris_id, {"format": ["physical", "EBOOK"]})
+
+    # Then it is repaired and written, rather than refused for a spelling the
+    # Library corrects on every other pass. Validating before normalizing judged
+    # one value and wrote a different one.
+    assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == [
+        "Physical",
+        "Ebook",
+    ]
+
+
+def test_a_format_of_nothing_recognisable_is_still_refused(tmp_path):
+    # Given a format holding no value the Library defines
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], format=["Physical"])
+
+    # When it arrives
+    # Then it is refused rather than normalized away to nothing. Repairing before
+    # judging must not become a second route to clearing a field.
+    with pytest.raises(ValueError):
+        update_book(tmp_path, note.libris_id, {"format": ["papyrus"]})
+    assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == ["Physical"]
