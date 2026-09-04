@@ -26,6 +26,7 @@ from .note_format import (
     has_description_callout,
     has_title_heading,
     mint_libris_id,
+    parse_frontmatter_yaml,
     read_formats,
     render_body,
     split_body,
@@ -348,7 +349,7 @@ def plan_note_format_migration(path: Path) -> NoteMigration:
     # 3,136-note run, so it is reported and left alone, the same way
     # plan_note_migration treats a note it cannot read.
     try:
-        current = yaml.safe_load(frontmatter_text)
+        current = parse_frontmatter_yaml(frontmatter_text)
     except yaml.YAMLError as exc:
         return NoteMigration(
             path=path,

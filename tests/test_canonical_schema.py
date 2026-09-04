@@ -8,6 +8,8 @@ its fixtures use the code's schema rather than the vault's.
 These tests build notes shaped like real ones. See #61.
 """
 
+from datetime import date
+
 import pytest
 
 from libris.api import BookCandidate
@@ -541,3 +543,64 @@ def test_a_list_is_still_accepted_for_format(tmp_path):
 
     # Then it is written
     assert read_frontmatter(path)["format"] == ["Physical", "Audiobook"]
+
+
+# --- the frontmatter parser (#94) ------------------------------------------
+
+
+# Frontmatter shaped like the real Shelf's, covering every value type it holds.
+# Dates and duplicate keys are where the C and Python YAML loaders are known to
+# diverge, so both appear here rather than being taken on trust.
+_REPRESENTATIVE_FRONTMATTER = """\
+libris_id: lb-2026-0001
+title: A Book
+authors:
+  - "[[An Author]]"
+  - Another Author
+isbn: 9780000000001
+page_count: 321
+date_published: 2019-04-01
+date_added: 2026-09-04
+date_started: 2026-09-01
+date_finished:
+status: Reading
+rating: 4
+format:
+  - Audiobook
+tags: Book
+genres: null
+referred_by: "A friend: with a colon"
+"""
+
+
+def test_the_frontmatter_parser_agrees_with_the_python_loader():
+    # Given frontmatter shaped like the Shelf's, dates and all
+    import yaml
+
+    from libris.note_format import parse_frontmatter_yaml
+
+    # When it is parsed through the Library's parser and through PyYAML's own
+    # pure-Python safe loader
+    ours = parse_frontmatter_yaml(_REPRESENTATIVE_FRONTMATTER)
+    theirs = yaml.load(_REPRESENTATIVE_FRONTMATTER, Loader=yaml.SafeLoader)
+
+    # Then they agree on the values and on their types. Equality alone would let
+    # a date through as the string that spells it, which is exactly the
+    # divergence the C loader is suspected of.
+    assert ours == theirs
+    assert [type(v) for v in ours.values()] == [type(v) for v in theirs.values()]
+    assert isinstance(ours["date_published"], date)
+
+
+def test_the_frontmatter_parser_reports_damage_rather_than_guessing():
+    # Given a frontmatter block that is not YAML
+    import pytest as _pytest
+    import yaml
+
+    from libris.note_format import parse_frontmatter_yaml
+
+    # When it is parsed
+    # Then it raises the error every caller already catches, whichever loader
+    # is compiled in
+    with _pytest.raises(yaml.YAMLError):
+        parse_frontmatter_yaml("title: [unclosed\nstatus: To Read\n")
