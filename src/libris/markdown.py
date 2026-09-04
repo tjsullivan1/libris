@@ -18,6 +18,7 @@ from .note_format import (
     has_description_callout,
     mint_libris_id,
     normalize_field_value,
+    parse_frontmatter_yaml,
     read_formats,
     read_superseded_ids,
     render_body,
@@ -379,7 +380,7 @@ def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
 
     frontmatter_yaml, body = split
     try:
-        data = yaml.safe_load(frontmatter_yaml)
+        data = parse_frontmatter_yaml(frontmatter_yaml)
     except yaml.YAMLError as exc:
         raise FrontmatterUnreadable(f"{file_path.name}: {exc}") from None
     if not isinstance(data, dict):
@@ -487,7 +488,7 @@ def ensure_frontmatter_fields(
     frontmatter_yaml, rest_of_content = split
 
     try:
-        data = yaml.safe_load(frontmatter_yaml)
+        data = parse_frontmatter_yaml(frontmatter_yaml)
         if not isinstance(data, dict):
             return False, None
     except Exception:
@@ -686,7 +687,7 @@ def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
     if split is None:
         return None
     try:
-        data = yaml.safe_load(split[0])
+        data = parse_frontmatter_yaml(split[0])
         return data if isinstance(data, dict) else None
     except Exception:
         return None
@@ -702,7 +703,7 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
     frontmatter_yaml, rest_of_content = split
 
     try:
-        data = yaml.safe_load(frontmatter_yaml)
+        data = parse_frontmatter_yaml(frontmatter_yaml)
         if not isinstance(data, dict):
             return False
     except Exception:
