@@ -254,21 +254,27 @@ def create_book_note(
     return file_path
 
 
-def update_book_status(file_path: Path, new_status: str):
-    """Updates the status in the book's frontmatter.
+def update_book_status(file_path: Path, new_status: str) -> None:
+    """Set the status in a Book Note's frontmatter, leaving the body untouched.
+
+    This used to be an unanchored, uncounted `re.sub` for `status:\\s*(.*)` over
+    the whole file, on the reasoning that a regex disturbs a note less than a
+    YAML round-trip does. The reasoning was right and the region was wrong: it
+    rewrote every line containing `status:` anywhere in the file, including a
+    reader's own sentences about the book (#92). `set_frontmatter_fields` keeps
+    the intent - the body is carried across byte for byte - and confines the
+    edit to the frontmatter block, where the field actually lives.
+
+    Args:
+        file_path: The Book Note to write.
+        new_status: The status to set, from the Library's own vocabulary.
 
     Raises:
         InvalidFieldValue: If the status is not one the Library defines.
+        FrontmatterUnreadable: If the note has no frontmatter block to write to.
     """
     validate_field_value("status", new_status)
-    content = file_path.read_text(encoding="utf-8")
-
-    # Simple regex to find and replace status
-    # This is safer than full YAML re-dumping if there are complex structures or custom user notes
-    pattern = r"(status:\s*)(.*)"
-    new_content = re.sub(pattern, f"\\1{new_status}", content)
-
-    file_path.write_text(new_content, encoding="utf-8")
+    set_frontmatter_fields(file_path, {"status": new_status})
 
 
 class FrontmatterUnreadable(ValueError):

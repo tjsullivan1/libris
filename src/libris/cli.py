@@ -22,6 +22,7 @@ from .config import (
 from .importer import SUPPORTED_FORMATS, run_import
 from .markdown import (
     BookNote,
+    FrontmatterUnreadable,
     RenameResult,
     create_book_note,
     ensure_frontmatter_fields,
@@ -159,7 +160,12 @@ def status():
     if not new_status:
         return
 
-    update_book_status(selected_file, new_status)
+    try:
+        update_book_status(selected_file, new_status)
+    except FrontmatterUnreadable as exc:
+        typer.echo(f"{exc} Nothing was written to it.")
+        raise typer.Exit(code=1) from None
+
     typer.echo(f"Updated: {selected_file_name} -> {new_status}")
 
 

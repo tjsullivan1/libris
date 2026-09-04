@@ -138,6 +138,54 @@ def test_update_book_status(tmp_path):
     assert "status: To Read" not in content
 
 
+def test_update_book_status_leaves_the_body_alone(tmp_path):
+    # Given a Book Note whose body quotes the word the frontmatter key uses -
+    # a reader writing about the book, which is what a note is for
+    file_path = tmp_path / "body_says_status.md"
+    file_path.write_text(
+        """---
+title: Test
+status: To Read
+---
+
+## Notes
+The narrator's status: unreliable, and gloriously so.
+Compare status: the sequel, which drops the device.
+""",
+        encoding="utf-8",
+    )
+
+    # When the status is updated
+    from libris.markdown import update_book_status
+
+    update_book_status(file_path, "Reading")
+
+    # Then the frontmatter carries the new status and the reader's own
+    # sentences survive verbatim
+    content = file_path.read_text(encoding="utf-8")
+    assert read_frontmatter(file_path)["status"] == "Reading"
+    assert "The narrator's status: unreliable, and gloriously so." in content
+    assert "Compare status: the sequel, which drops the device." in content
+
+
+def test_update_book_status_refuses_a_note_it_cannot_parse(tmp_path):
+    # Given a file with no frontmatter block at all
+    import pytest
+
+    file_path = tmp_path / "no_frontmatter.md"
+    original = "Just a body, mentioning status: somewhere.\n"
+    file_path.write_text(original, encoding="utf-8")
+
+    # When its status is updated
+    # Then it is refused rather than rewritten - this is the write path for one
+    # field, not the place to rebuild a broken note
+    from libris.markdown import FrontmatterUnreadable, update_book_status
+
+    with pytest.raises(FrontmatterUnreadable):
+        update_book_status(file_path, "Reading")
+    assert file_path.read_text(encoding="utf-8") == original
+
+
 def test_ensure_frontmatter_fields(tmp_path):
     file_path = tmp_path / "legacy_book.md"
     file_path.write_text("""---
