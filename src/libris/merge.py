@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from .markdown import _normalize_author, read_frontmatter, tidy_author
+from .markdown import (
+    _normalize_author,
+    read_frontmatter,
+    split_frontmatter,
+    tidy_author,
+)
 from .note_format import (
     MULTI_VALUED_FIELDS,
     READER_FIELDS,
@@ -37,13 +42,10 @@ def _count_nonnull_fields(frontmatter: Dict[str, Any]) -> int:
 def _extract_body_content(file_path: Path) -> str:
     """Extract the body content (everything after frontmatter) from a markdown file."""
     content = file_path.read_text(encoding="utf-8")
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
-    if not match:
-        match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
-
-    if match:
-        return match.group(2) if len(match.groups()) > 1 else ""
-    return content
+    split = split_frontmatter(content)
+    if split is None:
+        return content
+    return split[1]
 
 
 def _merge_body_content(primary_body: str, secondary_body: str) -> str:

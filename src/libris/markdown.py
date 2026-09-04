@@ -634,13 +634,11 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
 def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
     """Read and return the frontmatter dict from a markdown file, or None."""
     content = file_path.read_text(encoding="utf-8")
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
-    if not match:
-        match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
-        if not match:
-            return None
+    split = split_frontmatter(content)
+    if split is None:
+        return None
     try:
-        data = yaml.safe_load(match.group(1))
+        data = yaml.safe_load(split[0])
         return data if isinstance(data, dict) else None
     except Exception:
         return None

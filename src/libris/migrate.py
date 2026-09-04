@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from .markdown import BookNote, list_books
+from .markdown import BookNote, list_books, split_frontmatter
 from .note_format import (
     FORMAT_VALUES,
     LEAKED_HEADINGS,
@@ -203,8 +203,8 @@ def plan_note_migration(path: Path) -> NoteMigration:
         note that wants a human eye before it is written.
     """
     original = path.read_text(encoding="utf-8")
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", original, re.DOTALL)
-    if match is None:
+    split = split_frontmatter(original)
+    if split is None:
         return NoteMigration(
             path=path,
             original=original,
@@ -212,7 +212,11 @@ def plan_note_migration(path: Path) -> NoteMigration:
             warnings=["no parseable frontmatter; skipped"],
         )
 
-    frontmatter_text, body = match.group(1), match.group(2)
+    # This path recomposes the body rather than carrying it across - the
+    # composition below supplies its own blank line after the fence - so the
+    # leading newlines go here. `lstrip("\n")` rather than `lstrip()`, which
+    # would take an indented first line's indentation with them (#99).
+    frontmatter_text, body = split[0], split[1].lstrip("\n")
     note = BookNote.read(path)
     if note is None:
         return NoteMigration(
@@ -326,8 +330,8 @@ def plan_note_format_migration(path: Path) -> NoteMigration:
     # that back on write - emitting it here too produced \r\r\n on 1,345 notes.
     original = path.read_text(encoding="utf-8")
 
-    match = re.match(r"^---\n(.*?)\n---\n(.*)$", original, re.DOTALL)
-    if match is None:
+    split = split_frontmatter(original)
+    if split is None:
         return NoteMigration(
             path=path,
             original=original,
@@ -335,7 +339,10 @@ def plan_note_format_migration(path: Path) -> NoteMigration:
             warnings=["no parseable frontmatter"],
         )
 
-    frontmatter_text, body = match.group(1), match.group(2)
+    # Carried across rather than recomposed: this migration changes one field and
+    # must leave the body identical, so `migrated == original` still holds for a
+    # note whose format needs nothing.
+    frontmatter_text, body = split
 
     # Parsed before anything else: one unparseable note must not abort a
     # 3,136-note run, so it is reported and left alone, the same way
