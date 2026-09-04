@@ -255,7 +255,7 @@ def create_book_note(
 
 
 def update_book_status(file_path: Path, new_status: str) -> None:
-    """Set the status in a Book Note's frontmatter, leaving the body untouched.
+    r"""Set the status in a Book Note's frontmatter, leaving the body untouched.
 
     This used to be an unanchored, uncounted `re.sub` for `r"(status:\s*)(.*)"` over
     the whole file, on the reasoning that a regex disturbs a note less than a
