@@ -257,7 +257,7 @@ def create_book_note(
 def update_book_status(file_path: Path, new_status: str) -> None:
     """Set the status in a Book Note's frontmatter, leaving the body untouched.
 
-    This used to be an unanchored, uncounted `re.sub` for `status:\\s*(.*)` over
+    This used to be an unanchored, uncounted `re.sub` for `r"(status:\s*)(.*)"` over
     the whole file, on the reasoning that a regex disturbs a note less than a
     YAML round-trip does. The reasoning was right and the region was wrong: it
     rewrote every line containing `status:` anywhere in the file, including a
