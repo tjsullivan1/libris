@@ -14,6 +14,7 @@ from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
+import httpx
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
@@ -32,6 +33,12 @@ from .note_format import (
 # than restated, so the Library still defines its own values (ADR 0022): a tool
 # schema is read before a call is composed, where a `fields` tool is one a model
 # can simply not call.
+#
+# Subscripting Literal with a tuple is how Python passes it several arguments,
+# so these are each exactly the four/three/three strings and not "the tuple" -
+# `Literal[STATUS_VALUES] == Literal[*STATUS_VALUES]` is True. Written this way
+# because the values are a runtime import; a reviewer has already read it as a
+# bug once, hence this note.
 Status = Literal[STATUS_VALUES]
 Priority = Literal[PRIORITY_VALUES]
 Format = Literal[FORMAT_VALUES]
@@ -251,7 +258,10 @@ def create_server(name: str = "libris") -> "MCPServer":
             candidates = service.lookup_candidates(
                 isbn=isbn, title=title, authors=authors or None
             )
-        except Exception as exc:
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            # Only the upstream failures, matching the REST adapter. Catching
+            # every Exception would report a bug in this code as an outage, and
+            # a tool that never fails loudly is one nobody debugs.
             raise ToolError(f"Google Books could not be reached: {exc}") from None
 
         return [
@@ -292,7 +302,20 @@ def create_server(name: str = "libris") -> "MCPServer":
         a question. Show them to the person, then call again with confirm.
         """
         shelf = _shelf()
-        candidate = GoogleBooksClient().get_volume(google_books_id)
+        try:
+            candidate = GoogleBooksClient().get_volume(google_books_id)
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            # Both causes are named because the API cannot tell them apart for
+            # us. Measured against the live service: an id that is well formed
+            # but names nothing answers 404, while a malformed one answers 503
+            # "Service temporarily unavailable". Reporting only the outage would
+            # send someone looking at Google's status page for their own typo.
+            raise ToolError(
+                f"Could not fetch volume {google_books_id!r}: {exc}. Either "
+                f"Google Books is unreachable, or that id is malformed - it "
+                f"answers 503 rather than 404 for an id of the wrong shape. "
+                f"Use find_book to get an id rather than composing one."
+            ) from None
         if candidate is None:
             raise ToolError(
                 f"Google Books has no volume {google_books_id!r}. Use find_book "

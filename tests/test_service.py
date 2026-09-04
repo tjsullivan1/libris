@@ -9,6 +9,7 @@ from datetime import date
 
 import pytest
 
+from libris import service
 from libris.api import BookCandidate
 from libris.markdown import (
     BookNote,  # noqa: F401
@@ -919,3 +920,66 @@ def test_confirming_writes_even_over_a_near_match(tmp_path):
     # carried.
     assert result.outcome is Outcome.CREATED
     assert len(list(tmp_path.glob("*.md"))) == 2
+
+
+def test_an_empty_string_does_not_clear_a_field(tmp_path):
+    # Given a book carrying a start date
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], date_started="2019-04-01")
+
+    # When an empty string arrives for it
+    # Then it is refused. Null is the obvious way to erase a field by accident;
+    # the empty string is the quiet one, and it passes every vocabulary check
+    # because the field has no vocabulary.
+    with pytest.raises(ValueError):
+        update_book(tmp_path, note.libris_id, {"date_started": ""})
+    written = _read_back(tmp_path, note.libris_id).frontmatter["date_started"]
+    assert str(written) == "2019-04-01"
+
+
+def test_an_empty_list_does_not_clear_a_multi_valued_field(tmp_path):
+    # Given a book recorded in two formats
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], format=["Physical", "Ebook"])
+
+    # When an empty list arrives for it
+    # Then it is refused. This one is quieter still: an empty list passes
+    # validation entry by entry because there are no entries, and then
+    # normalize_field_value turns it into None - a clear nobody asked for.
+    with pytest.raises(ValueError):
+        update_book(tmp_path, note.libris_id, {"format": []})
+    assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == [
+        "Physical",
+        "Ebook",
+    ]
+
+
+def test_a_rating_of_zero_is_a_value_not_an_absence(tmp_path):
+    # Given a book with no rating
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
+
+    # When it is rated zero
+    update_book(tmp_path, note.libris_id, {"rating": 0})
+
+    # Then it is written. Emptiness is tested by type rather than truthiness,
+    # because a zero and a False are things a reader can mean.
+    assert _read_back(tmp_path, note.libris_id).frontmatter["rating"] == 0
+
+
+def test_listing_by_filter_does_not_tokenize_every_note(tmp_path, monkeypatch):
+    # Given a Shelf and a count of how often a note's words are split
+    for title in ("Dune", "Piranesi", "Mercy"):
+        _shelve(tmp_path, title, ["Someone"], status="To Read")
+
+    calls = []
+    real = service._search_tokens
+    monkeypatch.setattr(
+        service, "_search_tokens", lambda text: (calls.append(text), real(text))[1]
+    )
+
+    # When the Library is listed by status alone
+    result = service.search_library(tmp_path, status="To Read")
+
+    # Then nothing was tokenized. Listing "To Read" walks 1,452 notes on the
+    # real Shelf, and splitting every title and author to then sort them
+    # alphabetically is work with no reader.
+    assert len(result.books) == 3
+    assert calls == []

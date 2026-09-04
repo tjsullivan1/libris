@@ -434,9 +434,10 @@ def _weights(note_tokens: list[set[str]]) -> dict[str, float]:
         note_tokens: The word set of every Book Note being searched.
 
     Returns:
-        A weight per word. `1 + n/df` rather than `n/df`, so a word every note
-        carries still weighs something and a Shelf of near-identical titles does
-        not score nothing at all.
+        A weight per word: `log(1 + n/df)`. The log is what keeps one very rare
+        word from swamping the ranking outright, and the `1 +` inside it is what
+        keeps a word every note carries weighing something rather than zero, so
+        a Shelf of near-identical titles does not score nothing at all.
     """
     total = len(note_tokens)
     frequency: dict[str, int] = {}
@@ -528,9 +529,15 @@ def search_library(
             continue
         if status is not None and note.frontmatter.get("status") != status:
             continue
-        candidates.append(
-            (note, _search_tokens(note.title) | _search_tokens(" ".join(note.authors)))
+        # Only worth doing when something will be ranked. Listing "To Read"
+        # walks 1,452 notes on the real Shelf, and tokenizing every title and
+        # author to then sort alphabetically is work with no reader.
+        tokens = (
+            _search_tokens(note.title) | _search_tokens(" ".join(note.authors))
+            if query_tokens
+            else set()
         )
+        candidates.append((note, tokens))
 
     # Weighed across what the filter left, not the whole Shelf, so narrowing to
     # one status weighs words by how well they separate the books still in play.
@@ -706,12 +713,19 @@ def update_book(
                 f"{name} is not a field this Surface may set. "
                 f"Settable fields: {', '.join(sorted(READER_FIELDS))}."
             )
-        if value is None:
-            # A model that emits null for "leave this alone" would otherwise
-            # erase a field nobody mentioned. Clearing a field is not something
-            # this call does; omitting it is how you leave it alone.
+        if value is None or (isinstance(value, (str, list, dict)) and not value):
+            # Null is the obvious way to erase a field by accident; the empty
+            # string and the empty list are the quiet ones. `format: []` reaches
+            # normalize_field_value and comes back None, and an empty string
+            # writes an empty field - both are a clear, arrived at without
+            # anyone asking for one. A model that emits any of the three for
+            # "leave this alone" would erase a field nobody mentioned.
+            #
+            # Emptiness is tested by type rather than by truthiness, because a
+            # rating of 0 and a False are values a reader can mean.
             raise ValueError(
-                f"{name} was given no value. Omit a field to leave it unchanged."
+                f"{name} was given no value. Omit a field to leave it unchanged; "
+                f"this call cannot clear one."
             )
         validate_field_value(name, value)
 
