@@ -11,6 +11,7 @@ import yaml
 from .api import BookCandidate
 from .markdown import (
     BookNote,
+    FrontmatterUnreadable,
     create_book_note,
     list_books,
     update_book_status,
@@ -197,7 +198,14 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
         read - in which case nothing was written to it.
     """
     if "status" in updates:
-        update_book_status(path, book.status)
+        try:
+            update_book_status(path, book.status)
+        except FrontmatterUnreadable:
+            # Same answer this function already gives for a format update it
+            # cannot parse: report the note as untouched rather than guessing
+            # at its shape. An import run writes many notes and must not stop
+            # on one it cannot read.
+            return False
 
     if "format" not in updates:
         return True
