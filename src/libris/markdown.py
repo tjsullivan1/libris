@@ -281,7 +281,7 @@ class FrontmatterUnreadable(ValueError):
     """A Book Note's frontmatter could not be parsed, so it was not written to."""
 
 
-def _split_frontmatter(content: str) -> Optional[tuple[str, str]]:
+def split_frontmatter(content: str) -> Optional[tuple[str, str]]:
     """Split a note into its frontmatter block and everything after it.
 
     Deliberately not a regex. The body is returned exactly as it was found -
@@ -325,7 +325,7 @@ def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
             not the place to rebuild a broken note.
     """
     content = file_path.read_text(encoding="utf-8")
-    split = _split_frontmatter(content)
+    split = split_frontmatter(content)
     if split is None:
         raise FrontmatterUnreadable(f"{file_path.name} has no readable frontmatter.")
 
@@ -427,17 +427,16 @@ def ensure_frontmatter_fields(
     """
     content = file_path.read_text(encoding="utf-8")
 
-    # Use a more robust regex to find the frontmatter block
-    # Matches --- at start of file, then content, then --- on its own line
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
-    if not match:
-        # Fallback for files that might not have a newline after the closing ---
-        match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
-        if not match:
-            return False, None
+    # Split by line rather than by regex. The regex this replaced ended
+    # `---\s*\n?(.*)`, and `\s*` is greedy over all whitespace: on a body opening
+    # with an indented code block it ate the blank line and the next line's
+    # indentation together, so a repair pass turned the first line of the block
+    # into a paragraph (#99).
+    split = split_frontmatter(content)
+    if split is None:
+        return False, None
 
-    frontmatter_yaml = match.group(1)
-    rest_of_content = match.group(2)
+    frontmatter_yaml, rest_of_content = split
 
     try:
         data = yaml.safe_load(frontmatter_yaml)
@@ -502,14 +501,16 @@ def ensure_frontmatter_fields(
         and stripped_content.startswith("## Notes")
         and not re.search(r"(?m)^#\s+", stripped_content)
     ):
-        rest_of_content = f"# {title}\n\n{rest_of_content.lstrip()}"
+        # Deliberately composing new content here, so the leading blank lines go
+        # rather than surviving between the heading and the body it introduces.
+        rest_of_content = f"\n# {title}\n\n{rest_of_content.lstrip()}"
         updated = True
 
     if updated and not dry_run:
-        # Use dump but ensure we don't add unnecessary trailing newlines or spaces
         new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-        # Ensure there is exactly one newline before and after the rest of the content
-        new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content.lstrip()}"
+        # The body goes back exactly as it was read - it carries its own leading
+        # newlines, and stripping them was what cost an indented block its indent.
+        new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
         file_path.write_text(new_content, encoding="utf-8")
 
     return updated, data
@@ -648,14 +649,11 @@ def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
 def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
     """Fill null frontmatter fields from a candidate. Returns True if changed."""
     content = file_path.read_text(encoding="utf-8")
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
-    if not match:
-        match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
-        if not match:
-            return False
+    split = split_frontmatter(content)
+    if split is None:
+        return False
 
-    frontmatter_yaml = match.group(1)
-    rest_of_content = match.group(2)
+    frontmatter_yaml, rest_of_content = split
 
     try:
         data = yaml.safe_load(frontmatter_yaml)
@@ -681,7 +679,9 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
         and stripped_content.startswith("## Notes")
         and not re.search(r"(?m)^#\s+", stripped_content)
     ):
-        rest_of_content = f"# {title}\n\n{rest_of_content.lstrip()}"
+        # Deliberately composing new content here, so the leading blank lines go
+        # rather than surviving between the heading and the body it introduces.
+        rest_of_content = f"\n# {title}\n\n{rest_of_content.lstrip()}"
         updated = True
 
     # Add description to body if missing
@@ -696,7 +696,9 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
 
     if updated:
         new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-        new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content.lstrip()}"
+        # As in ensure_frontmatter_fields: the body carries its own leading
+        # newlines, and stripping them cost an indented block its indent (#99).
+        new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
         file_path.write_text(new_content, encoding="utf-8")
         return True
 

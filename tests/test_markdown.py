@@ -186,6 +186,59 @@ def test_update_book_status_refuses_a_note_it_cannot_parse(tmp_path):
     assert file_path.read_text(encoding="utf-8") == original
 
 
+# A body whose first element is an indented code block - four spaces is how
+# Markdown marks one without a fence, so losing them turns the first line into a
+# paragraph and leaves the rest as code (#99).
+_INDENTED_BODY = """
+    from libris import shelf
+    shelf.index_for(vault)
+
+A note about the snippet above.
+"""
+
+
+def test_ensure_frontmatter_fields_keeps_the_body_indented(tmp_path):
+    # Given a note whose body opens with an indented code block, and enough
+    # missing fields that the repair pass will rewrite it
+    file_path = tmp_path / "indented.md"
+    file_path.write_text(
+        "---\ntitle: A Book\nstatus: To Read\n---\n" + _INDENTED_BODY,
+        encoding="utf-8",
+    )
+
+    # When the repair pass runs, as `libris cleanup` runs it over every note
+    from libris.markdown import ensure_frontmatter_fields
+
+    updated, _ = ensure_frontmatter_fields(file_path)
+
+    # Then the code block is still a code block
+    assert updated
+    body = file_path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+    assert body == _INDENTED_BODY
+
+
+def test_update_frontmatter_from_book_keeps_the_body_indented(tmp_path):
+    # Given the same note, missing the fields a candidate would fill
+    file_path = tmp_path / "indented_enrich.md"
+    file_path.write_text(
+        "---\ntitle: A Book\nauthors: null\nisbn: null\n---\n" + _INDENTED_BODY,
+        encoding="utf-8",
+    )
+
+    # When enrichment fills them from a candidate
+    from libris.markdown import update_frontmatter_from_book
+
+    changed = update_frontmatter_from_book(
+        file_path,
+        BookCandidate(title="A Book", authors=["An Author"], isbn="9780000000001"),
+    )
+
+    # Then the reader's code block survives the write
+    assert changed
+    body = file_path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+    assert body == _INDENTED_BODY
+
+
 def test_ensure_frontmatter_fields(tmp_path):
     file_path = tmp_path / "legacy_book.md"
     file_path.write_text("""---
