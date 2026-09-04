@@ -31,6 +31,7 @@ from .markdown import (
     list_books,
     read_frontmatter,
     rename_book_file,
+    split_frontmatter,
     update_book_status,
     update_frontmatter_from_book,
 )
@@ -594,12 +595,10 @@ def _append_auto_enrich_note(
     content = file_path.read_text(encoding="utf-8")
 
     # Add 'review' to the tags in frontmatter
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", content, re.DOTALL)
-    if not match:
-        match = re.match(r"^---\s*\n(.*?)\n---(.*)$", content, re.DOTALL)
+    split = split_frontmatter(content)
 
-    if match:
-        data = yaml.safe_load(match.group(1))
+    if split is not None:
+        data = yaml.safe_load(split[0])
         if isinstance(data, dict):
             tags = data.get("tags")
             if isinstance(tags, str):
@@ -615,8 +614,8 @@ def _append_auto_enrich_note(
             else:
                 data["tags"] = ["review"]
             new_fm = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-            rest = match.group(2)
-            content = f"---\n{new_fm}\n---\n{rest.lstrip()}"
+            # The body goes back as it was read, leading newlines and all (#99).
+            content = f"---\n{new_fm}\n---\n{split[1]}"
 
     # Append the callout note to the body
     note = (
