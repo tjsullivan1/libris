@@ -250,7 +250,7 @@ def create_book_note(
     yaml_content = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
 
     body = render_body(book.title, "", book.description)
-    file_path.write_text(f"---\n{yaml_content}---\n\n{body}", encoding="utf-8")
+    write_note(file_path, f"---\n{yaml_content}---\n\n{body}")
     return file_path
 
 
@@ -304,6 +304,54 @@ def split_frontmatter(content: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def note_newline(path: Path) -> str:
+    """The line ending a Book Note already uses.
+
+    Args:
+        path: The Book Note. It need not exist.
+
+    Returns:
+        The note's dominant line ending. A note that does not exist yet, or holds
+        no line at all, gets the platform's - there is nothing to preserve, and
+        creating a note is not the same act as rewriting one.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return os.linesep
+
+    crlf = raw.count(b"\r\n")
+    bare_lf = raw.count(b"\n") - crlf
+    if not crlf and not bare_lf:
+        return os.linesep
+    return "\r\n" if crlf >= bare_lf else "\n"
+
+
+def write_note(path: Path, content: str) -> None:
+    """Write a Book Note, keeping the line endings it already had.
+
+    `Path.write_text` leaves `newline=None`, and that translates every "\\n" to
+    `os.linesep` on the way out. It made every write platform-dependent: this
+    Shelf is stored CRLF, so reading a note on macOS and writing it back turned
+    all 3,059 of them into LF and showed every line as changed (#100). Writing
+    bytes takes the platform out of it.
+
+    The content is normalised to "\\n" before the note's own ending is applied,
+    because applying "\\r\\n" to text that already holds it is what produced
+    "\\r\\r\\n" on 1,345 notes once already - see the comment in
+    `migrate.plan_format_note_migration`.
+
+    Args:
+        path: The Book Note to write.
+        content: The note's full text.
+    """
+    newline = note_newline(path)
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    if newline != "\n":
+        content = content.replace("\n", newline)
+    path.write_bytes(content.encode("utf-8"))
+
+
 def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
     """Set named frontmatter fields on a Book Note, leaving the body untouched.
 
@@ -339,7 +387,7 @@ def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
 
     data.update(updates)
     rendered = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-    file_path.write_text("---\n" + rendered + "\n---\n" + body, encoding="utf-8")
+    write_note(file_path, "---\n" + rendered + "\n---\n" + body)
 
 
 def list_books(vault_path: Path):
@@ -511,7 +559,7 @@ def ensure_frontmatter_fields(
         # The body goes back exactly as it was read - it carries its own leading
         # newlines, and stripping them was what cost an indented block its indent.
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
-        file_path.write_text(new_content, encoding="utf-8")
+        write_note(file_path, new_content)
 
     return updated, data
 
@@ -697,7 +745,7 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
         # As in ensure_frontmatter_fields: the body carries its own leading
         # newlines, and stripping them cost an indented block its indent (#99).
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
-        file_path.write_text(new_content, encoding="utf-8")
+        write_note(file_path, new_content)
         return True
 
     return False
@@ -731,7 +779,7 @@ def update_wikilinks_in_vault(
             new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
             new_content = new_content.replace(f"[[{old_stem}^", f"[[{new_stem}^")
             if new_content != content:
-                md_file.write_text(new_content, encoding="utf-8")
+                write_note(md_file, new_content)
                 updated_count += 1
     return updated_count
 

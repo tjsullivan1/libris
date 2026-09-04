@@ -3,6 +3,8 @@ from datetime import date
 from pathlib import Path
 from statistics import median
 
+import pytest
+
 from libris.api import BookCandidate
 from libris.markdown import (
     compute_canonical_filename,
@@ -184,6 +186,74 @@ def test_update_book_status_refuses_a_note_it_cannot_parse(tmp_path):
     with pytest.raises(FrontmatterUnreadable):
         update_book_status(file_path, "Reading")
     assert file_path.read_text(encoding="utf-8") == original
+
+
+# Line endings are asserted on bytes throughout. `read_text` applies universal
+# newline translation, so a test that reads a note back as text cannot tell CRLF
+# from LF and would pass against the bug it is meant to pin (#100).
+_CRLF_NOTE = (
+    b"---\r\ntitle: A Book\r\nstatus: To Read\r\nlibris_id: lb-2026-0001\r\n---\r\n"
+    b"\r\n# A Book\r\n\r\nSome thoughts.\r\n"
+)
+_LF_NOTE = _CRLF_NOTE.replace(b"\r\n", b"\n")
+
+
+def _endings(raw: bytes) -> tuple[int, int]:
+    """Count (CRLF, bare LF) in a note's bytes."""
+    crlf = raw.count(b"\r\n")
+    return crlf, raw.count(b"\n") - crlf
+
+
+@pytest.mark.parametrize(
+    "note,expected",
+    [(_CRLF_NOTE, "crlf"), (_LF_NOTE, "lf")],
+    ids=["crlf-note", "lf-note"],
+)
+def test_a_write_keeps_the_line_endings_the_note_already_had(tmp_path, note, expected):
+    # Given a note stored with one kind of line ending
+    from libris.markdown import (
+        ensure_frontmatter_fields,
+        set_frontmatter_fields,
+        update_book_status,
+    )
+
+    for name, write in [
+        ("set_frontmatter", lambda p: set_frontmatter_fields(p, {"status": "Reading"})),
+        ("update_status", lambda p: update_book_status(p, "Reading")),
+        ("repair_pass", ensure_frontmatter_fields),
+    ]:
+        path = tmp_path / f"{expected}_{name}.md"
+        path.write_bytes(note)
+
+        # When libris writes to it
+        write(path)
+
+        # Then it still uses the endings it arrived with, whatever the platform
+        crlf, bare_lf = _endings(path.read_bytes())
+        if expected == "crlf":
+            assert bare_lf == 0, f"{name} introduced bare LF into a CRLF note"
+            assert crlf > 0
+        else:
+            assert crlf == 0, f"{name} converted an LF note to CRLF"
+            assert bare_lf > 0
+
+
+def test_write_note_never_doubles_a_carriage_return(tmp_path):
+    # Given a CRLF note, and content that already carries CRLF itself - the
+    # shape that produced \r\r\n across 1,345 notes when the platform added its
+    # own translation on top (see migrate.plan_format_note_migration)
+    from libris.markdown import write_note
+
+    path = tmp_path / "crlf.md"
+    path.write_bytes(_CRLF_NOTE)
+
+    # When it is written back
+    write_note(path, "---\r\ntitle: A Book\r\n---\r\n\r\nBody.\r\n")
+
+    # Then no line ends in two carriage returns
+    raw = path.read_bytes()
+    assert b"\r\r" not in raw
+    assert _endings(raw) == (raw.count(b"\r\n"), 0)
 
 
 # A body whose first element is an indented code block - four spaces is how

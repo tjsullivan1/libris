@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from .markdown import BookNote, list_books, split_frontmatter
+from .markdown import BookNote, list_books, split_frontmatter, write_note
 from .note_format import (
     FORMAT_VALUES,
     LEAKED_HEADINGS,
@@ -418,6 +418,6 @@ def apply_migration(plans: list[NoteMigration]) -> int:
     written = 0
     for plan in plans:
         if plan.changed:
-            plan.path.write_text(plan.migrated, encoding="utf-8")
+            write_note(plan.path, plan.migrated)
             written += 1
     return written

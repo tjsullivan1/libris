@@ -16,6 +16,7 @@ from .markdown import (
     read_frontmatter,
     split_frontmatter,
     tidy_author,
+    write_note,
 )
 from .note_format import (
     MULTI_VALUED_FIELDS,
@@ -340,7 +341,7 @@ def write_merged_book(
         merged_frontmatter, sort_keys=False, allow_unicode=True
     ).strip()
     content = f"---\n{frontmatter_yaml}\n---\n{merged_body.lstrip()}"
-    primary_path.write_text(content, encoding="utf-8")
+    write_note(primary_path, content)
 
 
 def delete_secondary_file(secondary_path: Path) -> None:

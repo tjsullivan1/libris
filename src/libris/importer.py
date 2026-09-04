@@ -15,6 +15,7 @@ from .markdown import (
     list_books,
     split_frontmatter,
     update_book_status,
+    write_note,
 )
 from .matching import normalize_for_match
 
@@ -233,7 +234,7 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
     # The body goes back as it was read. It carries its own leading newlines now
     # that the split preserves them, so stripping would delete a blank line the
     # reader put there (#99).
-    path.write_text(f"---\n{new_frontmatter}\n---\n{rest_of_content}", encoding="utf-8")
+    write_note(path, f"---\n{new_frontmatter}\n---\n{rest_of_content}")
     return True
 
 
