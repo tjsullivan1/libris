@@ -262,7 +262,7 @@ def update_book_status(file_path: Path, new_status: str) -> None:
     YAML round-trip does. The reasoning was right and the region was wrong: it
     rewrote every line containing `status:` anywhere in the file, including a
     reader's own sentences about the book (#92). `set_frontmatter_fields` keeps
-    the intent - the body is carried across byte for byte - and confines the
+    the intent - the body is carried across unchanged - and confines the
     edit to the frontmatter block, where the field actually lives.
 
     Args:
