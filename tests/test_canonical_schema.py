@@ -592,7 +592,7 @@ def test_the_frontmatter_parser_agrees_with_the_python_loader():
     # `1 == 1.0` - and this Shelf holds 2,898 integer page counts and 888
     # integer ratings for such a divergence to hide in.
     assert ours == theirs
-assert {k: type(v) for k, v in ours.items()} == {k: type(v) for k, v in theirs.items()}
+    assert {k: type(v) for k, v in ours.items()} == {k: type(v) for k, v in theirs.items()}
     assert isinstance(ours["date_published"], date)
     assert isinstance(ours["rating"], int) and not isinstance(ours["rating"], bool)
 
