@@ -506,7 +506,7 @@ wheels = [
 
 [[package]]
 name = "libris"
-version = "0.5.0"
+version = "0.5.4"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
