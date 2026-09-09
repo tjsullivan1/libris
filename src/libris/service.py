@@ -969,6 +969,71 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
     return damaged
 
 
+@dataclass
+class IdCollision:
+    """Book Notes that claim one identity, and what distinguishes them.
+
+    ADR 0001 makes the Libris ID what identifies a note across replicas. Two
+    notes holding one is not untidiness: `find_by_libris_id` returns whichever
+    the scan reaches first, so an Intent naming that id can apply to a different
+    book on a different run, and sync pushes both under one identity and keeps
+    whichever arrived last.
+    """
+
+    libris_id: str
+    notes: list[BookNote] = field(default_factory=list)
+
+    @property
+    def titles(self) -> list[str]:
+        """What each colliding note calls itself, for telling them apart."""
+        return [note.title or "(untitled)" for note in self.notes]
+
+    @property
+    def share_an_isbn(self) -> bool:
+        """Whether every colliding note names the same ISBN.
+
+        A fact rather than a recommendation, but the one that most often decides
+        which repair is right: notes that agree on an ISBN are usually one book
+        copied and lightly edited, where merging is the answer. Notes that do not
+        are two books that ended up sharing an identity, where re-minting one is.
+        Which of those it is remains a person's call (ADR 0003).
+        """
+        isbns = {note.isbn for note in self.notes}
+        return len(isbns) == 1 and None not in isbns
+
+
+def find_id_collisions(vault_path: Path) -> list[IdCollision]:
+    """Find Libris IDs that more than one Book Note claims.
+
+    Reads and reports; nothing is written and nothing is merged. What to do
+    about a collision depends on whether the notes describe one book, which the
+    Library cannot tell from the identity alone - so it offers rather than
+    decides, as with a duplicate Book (ADR 0003).
+
+    A note carrying no id at all is not a collision. It is a different problem,
+    and `ensure_frontmatter_fields` already mints one.
+
+    Args:
+        vault_path: The Shelf to inspect.
+
+    Returns:
+        One entry per contested id, ordered by id, each holding the notes that
+        claim it in filename order. Ids held by exactly one note - which is all
+        but one of the 3,062 on the real Shelf - are left out.
+    """
+    by_id: dict[str, list[BookNote]] = {}
+    for note in index_for(vault_path).notes():
+        identity = note.libris_id
+        if identity:
+            by_id.setdefault(identity, []).append(note)
+
+    return [
+        IdCollision(libris_id=identity, notes=sorted(notes, key=lambda n: n.path.name))
+        for identity, notes in sorted(by_id.items())
+        if len(notes) > 1
+    ]
+
+
 class DecisionStatus(Enum):
     """What became of one decision from an exported review."""
 

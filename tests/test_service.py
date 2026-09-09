@@ -27,6 +27,7 @@ from libris.service import (
     find_by_libris_id,
     find_encoding_damage,
     find_existing,
+    find_id_collisions,
     is_isbn10,
     search_library,
     update_book,
@@ -1316,3 +1317,97 @@ def test_a_parseable_note_still_reads_its_identifiers_normally(tmp_path):
     # Then nothing about the raw-text fallback changed the normal path
     assert found["ok.md"].google_books_id == "vol9"
     assert found["ok.md"].identifier == "vol9"
+
+
+# --- Book Notes contesting one identity (#75) -------------------------------
+
+
+def _note_with_id(vault, name, libris_id, title="A Book", isbn=None):
+    """Write a Book Note claiming a given Libris ID."""
+    lines = [f"libris_id: {libris_id}", f"title: {title}", "authors:", "  - An Author"]
+    if isbn:
+        lines.append(f'isbn: "{isbn}"')
+    (vault / name).write_text(
+        "---\n" + "\n".join(lines) + "\n---\n\nBody.\n", encoding="utf-8"
+    )
+    return vault / name
+
+
+def test_two_notes_claiming_one_identity_are_reported(tmp_path):
+    # Given two Book Notes carrying the same Libris ID, as the real Shelf holds
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "b.md", "01M0WQEHRZ6KZK0D3BM7C2YXEM")
+    _note_with_id(vault, "a.md", "01M0WQEHRZ6KZK0D3BM7C2YXEM")
+
+    # When the Shelf is inspected
+    collisions = find_id_collisions(vault)
+
+    # Then the contested identity is reported, with its notes in filename order
+    # so two runs report it the same way
+    assert len(collisions) == 1
+    assert collisions[0].libris_id == "01M0WQEHRZ6KZK0D3BM7C2YXEM"
+    assert [note.path.name for note in collisions[0].notes] == ["a.md", "b.md"]
+
+
+def test_distinct_identities_are_not_reported(tmp_path):
+    # Given notes that each hold their own identity
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "a.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    _note_with_id(vault, "b.md", "01BBBBBBBBBBBBBBBBBBBBBBBB")
+
+    # When the Shelf is inspected
+    # Then nothing is reported
+    assert find_id_collisions(vault) == []
+
+
+def test_notes_without_an_identity_are_not_a_collision(tmp_path):
+    # Given two notes that carry no Libris ID at all
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("a.md", "b.md"):
+        (vault / name).write_text(
+            "---\ntitle: A Book\nauthors:\n  - An Author\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    # When the Shelf is inspected
+    # Then they are not reported as contesting one identity. Sharing "no id" is
+    # a different problem, and ensure_frontmatter_fields already mints one.
+    assert find_id_collisions(vault) == []
+
+
+def test_a_collision_says_whether_the_notes_name_one_book(tmp_path):
+    # Given one identity held by two notes naming the same ISBN, and another
+    # held by two notes naming different ones
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "same1.md", "01AAAAAAAAAAAAAAAAAAAAAAAA", isbn="9780000000001")
+    _note_with_id(vault, "same2.md", "01AAAAAAAAAAAAAAAAAAAAAAAA", isbn="9780000000001")
+    _note_with_id(vault, "diff1.md", "01BBBBBBBBBBBBBBBBBBBBBBBB", isbn="9780000000001")
+    _note_with_id(vault, "diff2.md", "01BBBBBBBBBBBBBBBBBBBBBBBB", isbn="9780000000002")
+
+    # When the Shelf is inspected
+    found = {c.libris_id: c for c in find_id_collisions(vault)}
+
+    # Then the fact that most often decides merge-versus-remint travels with the
+    # collision - without the report making that decision
+    assert found["01AAAAAAAAAAAAAAAAAAAAAAAA"].share_an_isbn is True
+    assert found["01BBBBBBBBBBBBBBBBBBBBBBBB"].share_an_isbn is False
+
+
+def test_reporting_a_collision_writes_nothing(tmp_path):
+    # Given two notes contesting an identity
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    first = _note_with_id(vault, "a.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    second = _note_with_id(vault, "b.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    before = (first.read_bytes(), second.read_bytes())
+
+    # When the Shelf is inspected
+    find_id_collisions(vault)
+
+    # Then neither note is touched. Merging or re-minting without being asked is
+    # exactly what this must not do.
+    assert (first.read_bytes(), second.read_bytes()) == before

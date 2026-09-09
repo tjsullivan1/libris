@@ -673,7 +673,7 @@ def test_doctor_says_so_when_the_shelf_is_clean(tmp_path, monkeypatch):
 
     # Then it says nothing is wrong rather than printing an empty report
     assert result.exit_code == 0
-    assert "No lost characters" in result.output
+    assert "Nothing on the Shelf needs a decision" in result.output
 
 
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
@@ -699,3 +699,58 @@ def test_a_short_damaged_string_is_shown_whole():
     # When it is rendered
     # Then it is printed outright - excerpting it would only hide it
     assert _excerpt_damage("S�ren Kierkegaard") == "S�ren Kierkegaard"
+
+
+def test_doctor_reports_a_contested_identity(tmp_path, monkeypatch):
+    # Given two Book Notes claiming one Libris ID and naming one ISBN
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("a.md", "b.md"):
+        (vault / name).write_text(
+            "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n"
+            'authors:\n  - An Author\nisbn: "9780000000001"\n---\n\nBody.\n',
+            encoding="utf-8",
+        )
+    before = {p.name: p.read_bytes() for p in vault.glob("*.md")}
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When the doctor runs
+    result = CliRunner().invoke(app, ["doctor"])
+
+    # Then the contested identity is reported, both notes named, and the fact
+    # that points at merging travels with it
+    assert result.exit_code == 0
+    assert "1 Libris ID(s) are claimed by more than one note" in result.output
+    assert "01AAAAAAAAAAAAAAAAAAAAAAAA" in result.output
+    assert "a.md" in result.output and "b.md" in result.output
+    assert "same ISBN" in result.output
+    assert "Nothing is merged or re-minted here" in result.output
+
+    # And nothing was written
+    assert {p.name: p.read_bytes() for p in vault.glob("*.md")} == before
+
+
+def test_doctor_reports_both_kinds_of_damage_together(tmp_path, monkeypatch):
+    # Given a Shelf with a contested identity and, separately, a lost character
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("a.md", "b.md"):
+        (vault / name).write_text(
+            "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n"
+            "authors:\n  - An Author\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+    (vault / "lost.md").write_text(
+        "---\nlibris_id: 01BBBBBBBBBBBBBBBBBBBBBBBB\ntitle: Either-Or\n"
+        'authors:\n  - "S�ren Kierkegaard"\ngoogle_books_id: vol1\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When the doctor runs
+    result = CliRunner().invoke(app, ["doctor"])
+
+    # Then both are reported. One check finding nothing must not hide the other.
+    assert result.exit_code == 0
+    assert "claimed by more than one note" in result.output
+    assert "have lost a character" in result.output

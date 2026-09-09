@@ -62,7 +62,12 @@ from .note_format import (
     parse_frontmatter_yaml,
     validate_field_value,
 )
-from .service import LOST_CHARACTER, apply_decisions, find_encoding_damage
+from .service import (
+    LOST_CHARACTER,
+    apply_decisions,
+    find_encoding_damage,
+    find_id_collisions,
+)
 
 # Windows consoles and redirected output default to cp1252, which cannot encode
 # 39 of this Shelf's filenames - they carry U+FFFD where an accent was lost. A
@@ -920,29 +925,40 @@ def _excerpt_damage(value: str, width: int = 36) -> str:
     return lead + " ... ".join(windows) + tail
 
 
-@app.command()
-def doctor(
-    verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Show every damaged string, not a summary"
-    ),
-):
-    """Report damage on the Shelf that a person needs to decide about.
+def _report_id_collisions(collisions: list) -> None:
+    """Print the Book Notes that claim one Libris ID.
 
-    Reads and reports. Nothing is written, and nothing is asked of the network:
-    the point is to see the damage before anything proposes a repair for it.
-
-    Currently reports lost characters - a note carrying the replacement
-    character where an accented letter used to be (#78). The letter itself is
-    gone from the file, so the correct spelling has to come from the API or from
-    a reader, and neither belongs in a report.
+    Args:
+        collisions: What `find_id_collisions` found.
     """
-    vault_path = _require_vault_path()
+    typer.echo(f"{len(collisions)} Libris ID(s) are claimed by more than one note.\n")
+    for collision in collisions:
+        typer.echo(f"  {collision.libris_id}")
+        for note in collision.notes:
+            typer.echo(f"    {note.path.name}")
+        if collision.share_an_isbn:
+            typer.echo(
+                "    These name the same ISBN, so this is likely one note copied "
+                "and edited - merging is probably right."
+            )
+        else:
+            typer.echo(
+                "    These name different books, so re-minting one id is probably "
+                "right rather than merging."
+            )
+    typer.echo(
+        "\nNothing is merged or re-minted here. Which repair is right depends on "
+        "whether these are one book, and only a person can say (ADR 0003)."
+    )
 
-    damaged = find_encoding_damage(vault_path)
-    if not damaged:
-        typer.echo("No lost characters on the Shelf.")
-        return
 
+def _report_encoding_damage(damaged: list, verbose: bool) -> None:
+    """Print the notes that have lost a character to a bad decode.
+
+    Args:
+        damaged: What `find_encoding_damage` found.
+        verbose: Whether to print every damaged string as well as the summary.
+    """
     in_place = [note for note in damaged if not note.touches_filename]
     renames = [note for note in damaged if note.touches_filename]
     unidentifiable = [note for note in damaged if note.identifier is None]
@@ -986,6 +1002,45 @@ def doctor(
             for value in values:
                 typer.echo(f"  {name}: {_excerpt_damage(value)}")
         typer.echo("")
+
+
+@app.command()
+def doctor(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show every damaged string, not a summary"
+    ),
+):
+    """Report damage on the Shelf that a person needs to decide about.
+
+    Reads and reports. Nothing is written, and nothing is asked of the network:
+    the point is to see the damage before anything proposes a repair for it.
+
+    Two checks so far, both of which end in a judgement the Library cannot make:
+
+    Contested identities - two Book Notes claiming one Libris ID (#75). Merging
+    is right when they are one book and re-minting is right when they are not,
+    and the identity alone does not say which.
+
+    Lost characters - a note carrying the replacement character where an
+    accented letter used to be (#78). The letter itself is gone from the file,
+    so the correct spelling has to come from the API or from a reader.
+    """
+    vault_path = _require_vault_path()
+
+    collisions = find_id_collisions(vault_path)
+    damaged = find_encoding_damage(vault_path)
+
+    if not collisions and not damaged:
+        typer.echo("Nothing on the Shelf needs a decision.")
+        return
+
+    if collisions:
+        _report_id_collisions(collisions)
+
+    if damaged:
+        if collisions:
+            typer.echo("")
+        _report_encoding_damage(damaged, verbose)
 
 
 @app.command()
