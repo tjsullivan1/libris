@@ -624,3 +624,78 @@ def test_the_version_still_reads_from_package_metadata():
     # Then it still answers, so deferring the import did not break the thing it
     # was deferred for.
     assert isinstance(version, str) and version
+
+
+# --- the doctor report (#78) ------------------------------------------------
+
+
+def test_doctor_reports_lost_characters_without_touching_anything(
+    tmp_path, monkeypatch
+):
+    # Given a Shelf with one damaged note
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "S�ren.md"
+    note.write_text(
+        '---\ntitle: Either-Or\nauthors:\n  - "S�ren Kierkegaard"\n'
+        "google_books_id: vol1\n---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    before = note.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When the doctor runs
+    result = CliRunner().invoke(app, ["doctor"])
+
+    # Then it reports the damage and says a rename would be needed
+    assert result.exit_code == 0
+    assert "1 notes have lost a character" in result.output
+    assert "filename" in result.output
+    assert "authors" in result.output
+    assert "1 would need a rename" in result.output
+
+    # And the note is untouched
+    assert note.read_bytes() == before
+
+
+def test_doctor_says_so_when_the_shelf_is_clean(tmp_path, monkeypatch):
+    # Given a Shelf whose notes are intact, accents and all
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "fine.md").write_text(
+        '---\ntitle: Either-Or\nauthors:\n  - "Søren Kierkegaard"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When the doctor runs
+    result = CliRunner().invoke(app, ["doctor"])
+
+    # Then it says nothing is wrong rather than printing an empty report
+    assert result.exit_code == 0
+    assert "No lost characters" in result.output
+
+
+def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
+    # Given a description callout of the length the real Shelf holds, damaged in
+    # two places far apart
+    from libris.cli import _excerpt_damage
+
+    value = "A" * 200 + "�" + "B" * 200 + "�" + "C" * 200
+
+    # When it is rendered for the report
+    excerpt = _excerpt_damage(value)
+
+    # Then both losses are shown in context and the filler between them is not
+    assert excerpt.count("�") == 2
+    assert len(excerpt) < len(value) / 2
+    assert "..." in excerpt
+
+
+def test_a_short_damaged_string_is_shown_whole():
+    # Given a damaged author name
+    from libris.cli import _excerpt_damage
+
+    # When it is rendered
+    # Then it is printed outright - excerpting it would only hide it
+    assert _excerpt_damage("S�ren Kierkegaard") == "S�ren Kierkegaard"
