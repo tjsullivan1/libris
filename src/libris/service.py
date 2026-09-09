@@ -823,6 +823,32 @@ def _damaged_strings(value: object) -> list[str]:
     return []
 
 
+def _raw_frontmatter_value(text: str, key: str) -> str | None:
+    """Read one top-level scalar out of frontmatter that will not parse as YAML.
+
+    Deliberately naive: it looks for the key at the start of a line and takes
+    the rest of it. That is enough for the identifiers, which are short scalars
+    every note writes on one line, and it is the only thing available when the
+    block as a whole cannot be parsed. It is not a YAML parser and must not grow
+    into one - anything needing more than this should be reading `frontmatter`.
+
+    Args:
+        text: The raw frontmatter text, or "" when the note parsed normally.
+        key: The top-level key to read.
+
+    Returns:
+        The value with any surrounding quotes removed, or None when the key is
+        absent or names nothing. Indented keys are ignored: a nested `isbn:` is
+        not the note's own.
+    """
+    prefix = f"{key}:"
+    for line in text.splitlines():
+        if not line.startswith(prefix):
+            continue
+        return line[len(prefix) :].strip().strip("\"'") or None
+    return None
+
+
 def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
     """Find every Book Note that has lost a character to a bad decode.
 
@@ -915,12 +941,27 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
             continue
 
         note = BookNote(path=path, frontmatter=frontmatter)
+
+        # A note whose YAML will not parse still states its identifiers in plain
+        # sight, and they are what decides whether the damage can be repaired
+        # from the API or needs a reader. Reporting such a note as unidentifiable
+        # because the block as a whole would not parse gets that backwards, and
+        # would have sent a person to look up a book whose volume id is written
+        # on the line above the damage.
+        google_books_id = frontmatter.get("google_books_id") or _raw_frontmatter_value(
+            unparsed_frontmatter, "google_books_id"
+        )
+        isbn = note.isbn or read_isbn(
+            _raw_frontmatter_value(unparsed_frontmatter, "isbn")
+        )
+
         damaged.append(
             EncodingDamage(
                 path=path,
-                libris_id=note.libris_id,
-                google_books_id=(frontmatter.get("google_books_id") or None),
-                isbn=note.isbn,
+                libris_id=note.libris_id
+                or _raw_frontmatter_value(unparsed_frontmatter, "libris_id"),
+                google_books_id=google_books_id,
+                isbn=isbn,
                 fields=fields,
             )
         )
