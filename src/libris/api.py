@@ -248,10 +248,21 @@ class GoogleBooksClient:
                         time.sleep(wait_time)
                         continue
                     raise
-            # Reached when every 429 retry was used without an exception being
-            # raised: ask once more and let the error out this time.
-            response.raise_for_status()
-            return response.json()
+
+            # Unreachable. Every path through the loop body returns, raises or
+            # continues, and the last attempt cannot continue: a 429 there fails
+            # the `attempt < self.max_retries` guard, falls into
+            # `raise_for_status`, and is re-raised by the handler above.
+            #
+            # What stood here instead was `raise_for_status()` and a `return`,
+            # under a comment describing a success path that cannot happen. It
+            # also read `response`, which is only bound inside the loop, so the
+            # one way to reach it - `max_retries` below zero, making `range`
+            # empty - raised NameError rather than saying what was wrong (#96).
+            raise AssertionError(
+                f"_get finished {self.max_retries + 1} attempts without "
+                f"returning or raising; max_retries={self.max_retries!r}."
+            )
 
     @staticmethod
     def _to_candidate(item: dict) -> BookCandidate:

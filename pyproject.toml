@@ -1,6 +1,6 @@
 [project]
 name = "libris"
-version = "0.5.7"
+version = "0.5.8"
 description = "A simple CLI tool to track your reading list in Obsidian"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -91,7 +91,11 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "S", "I"]
+# W catches invalid escape sequences (W605). One reached main in a non-raw
+# docstring and warned at every import until it was noticed days later; the
+# other selected families do not look at escapes at all. Enabling it needed no
+# cleanup - the repo was already clean under W (#113).
+select = ["E", "F", "S", "I", "W"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]

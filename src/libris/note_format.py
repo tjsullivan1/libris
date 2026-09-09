@@ -258,6 +258,7 @@ def is_isbn10(value: str) -> bool:
     Kindle editions, and the two are indistinguishable by shape. The checksum
     is what separates them, so callers can treat an ASIN as an ISBN only when
     it passes the ISBN-10 check digit.
+
     Args:
         value: The identifier to check.
 

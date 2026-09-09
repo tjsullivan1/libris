@@ -1,9 +1,12 @@
 {
   "name": "libris-extension",
-  "version": "0.4.0",
+  "version": "0.5.8",
   "private": true,
   "type": "module",
   "description": "The Libris browser extension. No bundler and no runtime dependencies - it is sideloaded unpacked, and everything here is for tests and lint.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "vitest run",
     "lint": "eslint ."
