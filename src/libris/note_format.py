@@ -199,6 +199,58 @@ def read_superseded_ids(value: object) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
+def read_isbn(value: object) -> str | None:
+    """Read an `isbn` value into the identifier it names.
+
+    An ISBN is an identifier that happens to be spelled in digits, and the Shelf
+    holds it in shapes that are the same identifier written differently. Measured
+    across 3,063 notes:
+
+        2,599  a plain 13-digit string
+           45  a plain 10-digit string, leading zero intact because it is quoted
+           31  a bare number, which YAML hands back as an int
+           12  a 10-character string ending in the X check digit
+           12  a string carrying hyphens, "978-1440629570"
+            4  a string carrying an invisible character - a no-break space, or
+               a LEFT-TO-RIGHT MARK left behind by a copy-paste
+
+    Two of those defeat a comparison against a caller's string. `786937521 ==
+    "786937521"` is False, so `find_existing` could not see those 31 notes at
+    all and would have added a second note for a book already held (#105). The
+    hyphens fail the same way: they are group separators and carry no
+    information, so they are removed rather than compared.
+
+    Deliberately does not validate. Four notes hold an Amazon ASIN and one has a
+    stray character, and this is the wrong place to judge that - a value nobody
+    can parse still has to compare equal to itself.
+
+    Args:
+        value: Whatever the frontmatter or a caller held.
+
+    Returns:
+        The identifier as text, or None when the note names none. `bool` is
+        excluded because it is an `int` in Python and `isbn: true` names nothing.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        return None
+
+    # Everything that is not a letter or a digit is presentation: the hyphens
+    # that group an ISBN, and - on four notes of this Shelf - a no-break space
+    # and three LEFT-TO-RIGHT MARKs, invisible characters a copy-paste from a
+    # retailer's page left behind. Keeping only what carries the identity is one
+    # rule rather than a list of characters to remember to add to.
+    #
+    # Upper-cased for the X check digit, which a note may hold either way.
+    cleaned = "".join(char for char in text if char.isalnum()).upper()
+    return cleaned or None
+
+
 def read_formats(value: object) -> list[str]:
     """Read a `format` value into the list of media it means (ADR 0017).
 

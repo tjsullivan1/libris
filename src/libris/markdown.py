@@ -20,6 +20,7 @@ from .note_format import (
     normalize_field_value,
     parse_frontmatter_yaml,
     read_formats,
+    read_isbn,
     read_superseded_ids,
     render_body,
     render_description_callout,
@@ -133,6 +134,15 @@ class BookNote:
         """The book's title, or None when absent or blank."""
         value = self.frontmatter.get("title")
         return value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def isbn(self) -> str | None:
+        """The book's ISBN as text, or None when the note names none.
+
+        Read through `read_isbn` rather than off the dict, because how a note
+        happens to be quoted decided whether it could be found (#105).
+        """
+        return read_isbn(self.frontmatter.get("isbn"))
 
     @property
     def authors(self) -> list[str]:
@@ -612,9 +622,9 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
             # Conversations: Tools" are one Book (#72).
             title_groups.setdefault(normalize_for_match(note.title), []).append(idx)
 
-        isbn = note.frontmatter.get("isbn")
+        isbn = note.isbn
         if isbn:
-            key = f"isbn:{str(isbn).strip()}"
+            key = f"isbn:{isbn}"
             groups_by_key.setdefault(key, set()).add(idx)
 
         gid = note.frontmatter.get("google_books_id")
