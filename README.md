@@ -151,6 +151,21 @@ libris import library.json --apply --limit 50
 Currently supported import formats:
 - `audible-json` — Audible library JSON export (auto-detected for `.json` files)
 
+### 12. Check the Shelf for damage
+Report notes that need a person to decide something. Reads and reports — nothing is written, and nothing is asked of the network.
+
+```bash
+# Summarise what is damaged
+libris doctor
+
+# Show every damaged string, in context
+libris doctor --verbose
+```
+
+Currently reports **lost characters**: a note carrying `�` where an accented letter used to be. The letter itself is gone from the file, so `doctor` says which notes are affected and what identifies them — it never guesses at the correct spelling, because there is no way to tell `S�ren` from Søren, Sören or Suren without asking the API or a reader.
+
+Notes whose *filename* carries the damage are counted separately: renaming a note rewrites the wikilinks pointing at it, which is its own piece of work.
+
 ## Browser extension
 
 Clip the book on an Amazon or Goodreads page straight into your Library. The extension talks to a

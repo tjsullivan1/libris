@@ -25,6 +25,7 @@ from libris.service import (
     apply_decisions,
     build_lookup_query,
     find_by_libris_id,
+    find_encoding_damage,
     find_existing,
     is_isbn10,
     search_library,
@@ -1089,3 +1090,229 @@ def test_an_isbn_lookup_still_misses_a_book_the_shelf_does_not_hold(tmp_path):
     # When a different ISBN is looked up
     # Then it is a miss, rather than the normalisation making everything match
     assert find_existing(vault, isbn="786937521") is None
+
+
+# --- reporting characters lost to a bad decode (#78) ------------------------
+
+
+def _damaged_note(vault, name, frontmatter, body="## Notes\n\nMine.\n"):
+    """Write a Book Note verbatim, damage and all."""
+    path = vault / name
+    path.write_text(f"---\n{frontmatter}\n---\n\n{body}", encoding="utf-8")
+    return path
+
+
+def test_a_note_that_lost_nothing_is_not_reported(tmp_path):
+    # Given a Shelf whose notes are intact
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault, "fine.md", 'title: Either-Or\nauthors:\n  - "Søren Kierkegaard"'
+    )
+
+    # When the Shelf is inspected
+    # Then nothing is reported. An accented character is not damage.
+    assert find_encoding_damage(vault) == []
+
+
+def test_a_lost_character_is_found_wherever_the_note_keeps_it(tmp_path):
+    # Given notes that lost a character in each of the places one can hide
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault,
+        "S�ren.md",
+        'title: Either-Or\nauthors:\n  - "S�ren Kierkegaard"\ngoogle_books_id: vol1',
+    )
+    _damaged_note(
+        vault,
+        "title.md",
+        'title: "La Com�die Humaine"\nauthors:\n  - Balzac\ngoogle_books_id: vol2',
+    )
+    _damaged_note(
+        vault,
+        "body.md",
+        "title: Discourse\nauthors:\n  - Descartes\ngoogle_books_id: vol3",
+        body="# Discourse\n\n> Discours de la m�thode.\n",
+    )
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then each note is reported against the field that actually holds it
+    assert set(found) == {"S�ren.md", "title.md", "body.md"}
+    assert set(found["S�ren.md"].fields) == {"filename", "authors"}
+    assert set(found["title.md"].fields) == {"title"}
+    assert set(found["body.md"].fields) == {"body"}
+
+    # And the body is reported by line, not whole
+    assert found["body.md"].fields["body"] == ["> Discours de la m�thode."]
+
+
+def test_the_report_says_what_could_repair_each_note(tmp_path):
+    # Given three notes with different means of identification
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault, "gid.md", 'title: "A�B"\ngoogle_books_id: vol1\nisbn: "9780000000001"'
+    )
+    _damaged_note(vault, "isbn.md", 'title: "A�B"\nisbn: "9780000000001"')
+    _damaged_note(vault, "neither.md", 'title: "A�B"')
+
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then the volume id is preferred, an ISBN will do, and a note with neither
+    # says so rather than being reported as repairable
+    assert found["gid.md"].identifier == "vol1"
+    assert found["isbn.md"].identifier == "9780000000001"
+    assert found["neither.md"].identifier is None
+
+
+def test_the_report_separates_what_needs_a_rename(tmp_path):
+    # Given one note damaged only in frontmatter and one damaged in its filename
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(vault, "clean-name.md", 'title: "A�B"\ngoogle_books_id: vol1')
+    _damaged_note(vault, "A�B.md", 'title: "A�B"\ngoogle_books_id: vol2')
+
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then only the second needs a rename, which rewrites wikilinks and is its
+    # own piece of work
+    assert not found["clean-name.md"].touches_filename
+    assert found["clean-name.md"].repairable_in_place == ["title"]
+    assert found["A�B.md"].touches_filename
+
+
+def test_the_report_writes_nothing(tmp_path):
+    # Given a damaged note
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(vault, "d.md", 'title: "A�B"\ngoogle_books_id: vol1')
+    before = path.read_bytes()
+
+    # When the Shelf is inspected
+    find_encoding_damage(vault)
+
+    # Then the note is untouched, byte for byte. A report that repairs something
+    # on the way past is the silent wrongness ADR 0003 refuses.
+    assert path.read_bytes() == before
+
+
+def test_damage_is_found_in_a_file_with_no_frontmatter_at_all(tmp_path):
+    # Given a file in the Shelf directory with no frontmatter block. Obsidian
+    # writes into this directory too, so not every .md here is a Book Note.
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    loose = vault / "loose.md"
+    loose.write_text("Just a body, mentioning Ren� Descartes.\n", encoding="utf-8")
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then the body is still searched. Treating an unparseable file as having no
+    # body made the report depend on a note being parseable, which is backwards:
+    # a file nothing can parse is more likely to hold damage, not less.
+    assert "loose.md" in found
+    assert found["loose.md"].fields["body"] == [
+        "Just a body, mentioning Ren� Descartes."
+    ]
+
+
+def test_damage_is_found_when_the_frontmatter_will_not_parse(tmp_path):
+    # Given a note whose frontmatter is not valid YAML, damaged in the body
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    broken = vault / "broken.md"
+    broken.write_text(
+        "---\ntitle: [unclosed\n---\n\n# La Com�die Humaine\n", encoding="utf-8"
+    )
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then it is reported through what can still be read, rather than skipped
+    assert "broken.md" in found
+    assert found["broken.md"].fields["body"] == ["# La Com�die Humaine"]
+    assert found["broken.md"].identifier is None
+
+
+def test_damage_inside_unparseable_frontmatter_is_reported(tmp_path):
+    # Given a note whose frontmatter will not parse and whose damage is inside
+    # that frontmatter. The filename and body are clean, so nothing else can
+    # report this note.
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "clean-name.md").write_text(
+        '---\ntitle: [unclosed\nauthors:\n  - "S�ren Kierkegaard"\n---\n\nA clean body.\n',
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then it is reported from the raw text. Reading the parsed fields was the
+    # only way frontmatter damage was ever found, so a note whose YAML will not
+    # parse went unreported - which is exactly the note most likely to hold some.
+    assert "clean-name.md" in found
+    assert found["clean-name.md"].fields["frontmatter (unparseable)"] == [
+        '- "S�ren Kierkegaard"'
+    ]
+
+
+def test_an_identifier_is_read_from_frontmatter_that_will_not_parse(tmp_path):
+    # Given a note whose YAML will not parse but which plainly states its
+    # volume id and ISBN, on their own lines, right beside the damage
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "clean-name.md").write_text(
+        '---\ntitle: [unclosed\nauthors:\n  - "S�ren Kierkegaard"\n'
+        'google_books_id: vol1\nisbn: "9780000000001"\n---\n\nA clean body.\n',
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+    damage = found["clean-name.md"]
+
+    # Then the report knows the API could answer for it. Reporting the note as
+    # needing a person, because the block as a whole would not parse, would have
+    # sent someone to look up a book whose id is written above the damage.
+    assert damage.google_books_id == "vol1"
+    assert damage.isbn == "9780000000001"
+    assert damage.identifier == "vol1"
+
+
+def test_a_nested_key_is_not_mistaken_for_the_notes_own(tmp_path):
+    # Given unparseable frontmatter where `isbn:` appears only as a nested key
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "nested.md").write_text(
+        '---\ntitle: [unclosed\nother:\n  isbn: "9780000000001"\n'
+        'authors:\n  - "S�ren Kierkegaard"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then the indented one is not read as the note's. The raw reader is naive
+    # by design, so this pins the one thing naivety must not cost.
+    assert found["nested.md"].isbn is None
+    assert found["nested.md"].identifier is None
+
+
+def test_a_parseable_note_still_reads_its_identifiers_normally(tmp_path):
+    # Given an ordinary damaged note
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault, "ok.md", 'title: "A�B"\ngoogle_books_id: vol9\nisbn: "9780000000001"'
+    )
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then nothing about the raw-text fallback changed the normal path
+    assert found["ok.md"].google_books_id == "vol9"
+    assert found["ok.md"].identifier == "vol9"

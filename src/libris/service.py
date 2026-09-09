@@ -13,12 +13,15 @@ from datetime import date
 from enum import Enum
 from pathlib import Path
 
+import yaml
+
 from .api import BookCandidate, GoogleBooksClient
 from .markdown import (
     BookNote,
     create_book_note,
     list_books,
     set_frontmatter_fields,
+    split_frontmatter,
 )
 from .matching import best_match, normalize_for_match, titles_match
 from .merge import (
@@ -31,6 +34,7 @@ from .note_format import (
     READER_FIELDS,
     is_isbn10,
     normalize_field_value,
+    parse_frontmatter_yaml,
     read_isbn,
     validate_field_value,
 )
@@ -742,6 +746,227 @@ def update_book(
     return UpdateResult(
         note=BookNote.read(note.path) or note, written=written, derived=derived
     )
+
+
+# The replacement character. It is what a decoder writes when it is handed bytes
+# it cannot make sense of, so a note carrying one has already lost the letter
+# that was there - the byte is gone, and no amount of reading the file back will
+# say whether it was ø, ö or something else (#78).
+LOST_CHARACTER = "�"
+
+# Frontmatter fields worth reporting damage in. Deliberately not every field: a
+# lost character in `google_books_id` would matter, but the id is what identifies
+# the book to repair it, so a damaged one is a different problem.
+_DAMAGE_FIELDS = ("title", "authors", "series", "referred_by", "genres")
+
+
+@dataclass
+class EncodingDamage:
+    """A Book Note that has lost a character, and what could put it back.
+
+    The damage cannot be repaired from the note alone. `LOST_CHARACTER` is what
+    survived, not what was there, so the correct spelling has to come from
+    somewhere that still knows it - the API, or the reader.
+    """
+
+    path: Path
+    libris_id: str | None
+    google_books_id: str | None
+    isbn: str | None
+    # Field name to the damaged strings it holds. "filename" and "body" are
+    # included alongside the frontmatter fields, because a reader looking at a
+    # report does not care which of the three the note keeps them in.
+    fields: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def identifier(self) -> str | None:
+        """What can be asked for the correct spelling, preferring the volume id.
+
+        Returns:
+            A Google Books volume id, an ISBN, or None when the note carries
+            neither and only a person can say what the letter was.
+        """
+        return self.google_books_id or self.isbn
+
+    @property
+    def touches_filename(self) -> bool:
+        """Whether repairing this note would mean renaming its file.
+
+        Renaming rewrites the wikilinks that point at a note, which is its own
+        piece of work (#78), so a report separates these rather than mixing them
+        in with the notes that can be repaired in place.
+        """
+        return "filename" in self.fields
+
+    @property
+    def repairable_in_place(self) -> list[str]:
+        """The damaged fields that can be fixed without renaming anything."""
+        return sorted(name for name in self.fields if name != "filename")
+
+
+def _damaged_strings(value: object) -> list[str]:
+    """Pick out the strings in a frontmatter value that have lost a character.
+
+    Args:
+        value: Whatever the frontmatter held - a string, a list of them, or
+            something else entirely.
+
+    Returns:
+        The damaged strings, or an empty list when the value holds none.
+    """
+    if isinstance(value, str):
+        return [value] if LOST_CHARACTER in value else []
+    if isinstance(value, list):
+        return [
+            item for item in value if isinstance(item, str) and LOST_CHARACTER in item
+        ]
+    return []
+
+
+def _raw_frontmatter_value(text: str, key: str) -> str | None:
+    """Read one top-level scalar out of frontmatter that will not parse as YAML.
+
+    Deliberately naive: it looks for the key at the start of a line and takes
+    the rest of it. That is enough for the identifiers, which are short scalars
+    every note writes on one line, and it is the only thing available when the
+    block as a whole cannot be parsed. It is not a YAML parser and must not grow
+    into one - anything needing more than this should be reading `frontmatter`.
+
+    Args:
+        text: The raw frontmatter text, or "" when the note parsed normally.
+        key: The top-level key to read.
+
+    Returns:
+        The value with any surrounding quotes removed, or None when the key is
+        absent or names nothing. Indented keys are ignored: a nested `isbn:` is
+        not the note's own.
+    """
+    prefix = f"{key}:"
+    for line in text.splitlines():
+        if not line.startswith(prefix):
+            continue
+        return line[len(prefix) :].strip().strip("\"'") or None
+    return None
+
+
+def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
+    """Find every Book Note that has lost a character to a bad decode.
+
+    Reads and reports; writes nothing and asks nothing of the network. What the
+    correct spelling should be is deliberately not decided here - that needs the
+    API or a person, and proposing a name for an author without checking is the
+    silent wrongness ADR 0003 refuses.
+
+    The body is searched as well as the frontmatter. On this Shelf every damaged
+    body line is machine-written - a rendered `# Title` heading or a description
+    callout from the API - rather than a reader's own prose, but the report says
+    where the damage is and lets a person judge that rather than assuming it.
+
+    A note that cannot be read is searched anyway, in the shape it can be. With
+    no frontmatter block the whole file counts as body; with a block whose YAML
+    will not parse, the raw frontmatter text is searched line by line, because
+    there are no fields to look through. Neither is hypothetical carelessness:
+    a file nothing can parse is where a lost character is most likely to be,
+    and skipping it would have made the report quietest exactly where it should
+    be loudest.
+
+    Args:
+        vault_path: The Shelf to inspect.
+
+    Returns:
+        One entry per affected note, ordered by filename. Notes that have lost
+        nothing are left out entirely.
+    """
+    damaged: list[EncodingDamage] = []
+
+    for path in sorted(list_books(vault_path)):
+        content = path.read_text(encoding="utf-8")
+        split = split_frontmatter(content)
+
+        frontmatter: dict = {}
+        unparsed_frontmatter = ""
+        if split is None:
+            # No closed frontmatter block, so the whole file is body - the same
+            # answer `merge._extract_body_content` gives. Searching "" here
+            # instead made the report quietly depend on a note being parseable,
+            # which is backwards: a file nothing can parse is more likely to
+            # hold damage, not less.
+            body = content
+        else:
+            body = split[1]
+            try:
+                parsed = parse_frontmatter_yaml(split[0])
+            except yaml.YAMLError:
+                parsed = None
+            if isinstance(parsed, dict):
+                frontmatter = parsed
+            else:
+                # The block is there but nothing can read it as a mapping, so
+                # there are no fields to look through - and reading the fields
+                # was the only way damage in the frontmatter was found. A note
+                # whose YAML will not parse is exactly where a lost character is
+                # likely to be sitting, so the raw text is searched instead.
+                unparsed_frontmatter = split[0]
+
+        fields: dict[str, list[str]] = {}
+
+        if LOST_CHARACTER in path.name:
+            fields["filename"] = [path.name]
+
+        for name in _DAMAGE_FIELDS:
+            found = _damaged_strings(frontmatter.get(name))
+            if found:
+                fields[name] = found
+
+        # Named apart from the fields above, because it says something different:
+        # not "the title lost a character" but "this frontmatter cannot be read,
+        # and these lines of it have lost one".
+        unparsed_lines = [
+            line.strip()
+            for line in unparsed_frontmatter.splitlines()
+            if LOST_CHARACTER in line
+        ]
+        if unparsed_lines:
+            fields["frontmatter (unparseable)"] = unparsed_lines
+
+        # Reported line by line rather than whole: a body is the longest thing a
+        # note holds, and a reader checking 41 of them wants the line.
+        body_lines = [
+            line.strip() for line in body.splitlines() if LOST_CHARACTER in line
+        ]
+        if body_lines:
+            fields["body"] = body_lines
+
+        if not fields:
+            continue
+
+        note = BookNote(path=path, frontmatter=frontmatter)
+
+        # A note whose YAML will not parse still states its identifiers in plain
+        # sight, and they are what decides whether the damage can be repaired
+        # from the API or needs a reader. Reporting such a note as unidentifiable
+        # because the block as a whole would not parse gets that backwards, and
+        # would have sent a person to look up a book whose volume id is written
+        # on the line above the damage.
+        google_books_id = frontmatter.get("google_books_id") or _raw_frontmatter_value(
+            unparsed_frontmatter, "google_books_id"
+        )
+        isbn = note.isbn or read_isbn(
+            _raw_frontmatter_value(unparsed_frontmatter, "isbn")
+        )
+
+        damaged.append(
+            EncodingDamage(
+                path=path,
+                libris_id=note.libris_id
+                or _raw_frontmatter_value(unparsed_frontmatter, "libris_id"),
+                google_books_id=google_books_id,
+                isbn=isbn,
+                fields=fields,
+            )
+        )
+
+    return damaged
 
 
 class DecisionStatus(Enum):

@@ -62,7 +62,7 @@ from .note_format import (
     parse_frontmatter_yaml,
     validate_field_value,
 )
-from .service import apply_decisions
+from .service import LOST_CHARACTER, apply_decisions, find_encoding_damage
 
 # Windows consoles and redirected output default to cp1252, which cannot encode
 # 39 of this Shelf's filenames - they carry U+FFFD where an accent was lost. A
@@ -880,6 +880,112 @@ def enrich(
         raise typer.Exit(code=1)
 
     _enrich_interactive(selected_file)
+
+
+def _excerpt_damage(value: str, width: int = 36) -> str:
+    """Show the neighbourhood of each lost character, not the whole string.
+
+    A damaged author name is short enough to print outright. A damaged
+    description callout is not - one on this Shelf runs to 1,900 characters, and
+    printing it whole buries the very thing the report exists to show.
+
+    Args:
+        value: The damaged string.
+        width: How many characters to show either side of each lost character.
+
+    Returns:
+        The string itself when it is short, otherwise the windows around each
+        lost character, joined by an ellipsis.
+    """
+    if len(value) <= width * 3:
+        return value
+
+    # Overlapping windows are merged rather than printed twice: the description
+    # callout that motivated this holds eight lost characters, several within a
+    # few words of each other.
+    spans: list[list[int]] = []
+    for index, char in enumerate(value):
+        if char != LOST_CHARACTER:
+            continue
+        start = max(0, index - width)
+        end = min(len(value), index + width + 1)
+        if spans and start <= spans[-1][1]:
+            spans[-1][1] = end
+        else:
+            spans.append([start, end])
+
+    windows = [value[start:end].strip() for start, end in spans]
+    lead = "" if spans[0][0] == 0 else "..."
+    tail = "" if spans[-1][1] == len(value) else "..."
+    return lead + " ... ".join(windows) + tail
+
+
+@app.command()
+def doctor(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show every damaged string, not a summary"
+    ),
+):
+    """Report damage on the Shelf that a person needs to decide about.
+
+    Reads and reports. Nothing is written, and nothing is asked of the network:
+    the point is to see the damage before anything proposes a repair for it.
+
+    Currently reports lost characters - a note carrying the replacement
+    character where an accented letter used to be (#78). The letter itself is
+    gone from the file, so the correct spelling has to come from the API or from
+    a reader, and neither belongs in a report.
+    """
+    vault_path = _require_vault_path()
+
+    damaged = find_encoding_damage(vault_path)
+    if not damaged:
+        typer.echo("No lost characters on the Shelf.")
+        return
+
+    in_place = [note for note in damaged if not note.touches_filename]
+    renames = [note for note in damaged if note.touches_filename]
+    unidentifiable = [note for note in damaged if note.identifier is None]
+
+    typer.echo(f"{len(damaged)} note(s) have lost a character.\n")
+
+    where: dict[str, int] = {}
+    for note in damaged:
+        for name in note.fields:
+            where[name] = where.get(name, 0) + 1
+    for name, count in sorted(where.items(), key=lambda kv: -kv[1]):
+        typer.echo(f"  {count:5d}  {name}")
+
+    typer.echo(
+        f"\n{len(damaged) - len(unidentifiable)} of {len(damaged)} carry an "
+        "identifier the correct spelling can be fetched with."
+    )
+    if unidentifiable:
+        typer.echo(
+            f"{len(unidentifiable)} carry neither a volume id nor an ISBN, so "
+            "only a reader can say what the letter was:"
+        )
+        for note in unidentifiable:
+            typer.echo(f"    {note.path.name}")
+
+    typer.echo(
+        f"\n{len(in_place)} can be repaired without renaming a file; "
+        f"{len(renames)} would need a rename, which rewrites the wikilinks "
+        "pointing at them."
+    )
+
+    if not verbose:
+        typer.echo("\nRe-run with --verbose to see every damaged string.")
+        return
+
+    typer.echo("")
+    for note in damaged:
+        typer.echo(f"{note.path.name}")
+        typer.echo(f"  id: {note.identifier or '(none)'}")
+        for name, values in note.fields.items():
+            for value in values:
+                typer.echo(f"  {name}: {_excerpt_damage(value)}")
+        typer.echo("")
 
 
 @app.command()
