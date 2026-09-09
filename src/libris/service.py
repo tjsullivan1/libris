@@ -836,6 +836,14 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
     callout from the API - rather than a reader's own prose, but the report says
     where the damage is and lets a person judge that rather than assuming it.
 
+    A note that cannot be read is searched anyway, in the shape it can be. With
+    no frontmatter block the whole file counts as body; with a block whose YAML
+    will not parse, the raw frontmatter text is searched line by line, because
+    there are no fields to look through. Neither is hypothetical carelessness:
+    a file nothing can parse is where a lost character is most likely to be,
+    and skipping it would have made the report quietest exactly where it should
+    be loudest.
+
     Args:
         vault_path: The Shelf to inspect.
 
@@ -850,6 +858,7 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
         split = split_frontmatter(content)
 
         frontmatter: dict = {}
+        unparsed_frontmatter = ""
         if split is None:
             # No closed frontmatter block, so the whole file is body - the same
             # answer `merge._extract_body_content` gives. Searching "" here
@@ -862,12 +871,16 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
             try:
                 parsed = parse_frontmatter_yaml(split[0])
             except yaml.YAMLError:
-                # Reported through whatever the body and filename hold rather
-                # than skipped. A note whose YAML will not parse still has a
-                # name, and may well have lost a character in it.
                 parsed = None
             if isinstance(parsed, dict):
                 frontmatter = parsed
+            else:
+                # The block is there but nothing can read it as a mapping, so
+                # there are no fields to look through - and reading the fields
+                # was the only way damage in the frontmatter was found. A note
+                # whose YAML will not parse is exactly where a lost character is
+                # likely to be sitting, so the raw text is searched instead.
+                unparsed_frontmatter = split[0]
 
         fields: dict[str, list[str]] = {}
 
@@ -878,6 +891,17 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
             found = _damaged_strings(frontmatter.get(name))
             if found:
                 fields[name] = found
+
+        # Named apart from the fields above, because it says something different:
+        # not "the title lost a character" but "this frontmatter cannot be read,
+        # and these lines of it have lost one".
+        unparsed_lines = [
+            line.strip()
+            for line in unparsed_frontmatter.splitlines()
+            if LOST_CHARACTER in line
+        ]
+        if unparsed_lines:
+            fields["frontmatter (unparseable)"] = unparsed_lines
 
         # Reported line by line rather than whole: a body is the longest thing a
         # note holds, and a reader checking 41 of them wants the line.

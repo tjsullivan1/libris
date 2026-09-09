@@ -1235,3 +1235,26 @@ def test_damage_is_found_when_the_frontmatter_will_not_parse(tmp_path):
     assert "broken.md" in found
     assert found["broken.md"].fields["body"] == ["# La Com�die Humaine"]
     assert found["broken.md"].identifier is None
+
+
+def test_damage_inside_unparseable_frontmatter_is_reported(tmp_path):
+    # Given a note whose frontmatter will not parse and whose damage is inside
+    # that frontmatter. The filename and body are clean, so nothing else can
+    # report this note.
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "clean-name.md").write_text(
+        '---\ntitle: [unclosed\nauthors:\n  - "S�ren Kierkegaard"\n---\n\nA clean body.\n',
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then it is reported from the raw text. Reading the parsed fields was the
+    # only way frontmatter damage was ever found, so a note whose YAML will not
+    # parse went unreported - which is exactly the note most likely to hold some.
+    assert "clean-name.md" in found
+    assert found["clean-name.md"].fields["frontmatter (unparseable)"] == [
+        '- "S�ren Kierkegaard"'
+    ]
