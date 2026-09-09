@@ -49,7 +49,12 @@ from .merge import (
     merge_two_books,
     write_merged_book,
 )
-from .migrate import apply_migration, plan_format_migration, plan_migration
+from .migrate import (
+    apply_migration,
+    plan_format_migration,
+    plan_isbn_migration,
+    plan_migration,
+)
 from .note_format import (
     STATUS_VALUES,
     InvalidFieldValue,
@@ -1194,6 +1199,11 @@ def migrate(
         "--formats",
         help="Migrate only the format field, leaving every other field alone",
     ),
+    isbn: bool = typer.Option(
+        False,
+        "--isbn",
+        help="Restore the leading zero on a short ISBN, leaving every other field alone",
+    ),
 ):
     """Migrate the Shelf to the canonical Book Note shape.
 
@@ -1206,7 +1216,16 @@ def migrate(
         raise typer.Exit(code=1)
 
     typer.echo(f"Planning migration for {vault_path}...")
-    plans = plan_format_migration(vault_path) if formats else plan_migration(vault_path)
+    if formats and isbn:
+        typer.echo("Choose one of --formats or --isbn; they migrate different fields.")
+        raise typer.Exit(code=1)
+
+    if isbn:
+        plans = plan_isbn_migration(vault_path)
+    elif formats:
+        plans = plan_format_migration(vault_path)
+    else:
+        plans = plan_migration(vault_path)
     changing = [plan for plan in plans if plan.changed]
 
     change_counts: dict[str, int] = {}
