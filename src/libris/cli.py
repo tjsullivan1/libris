@@ -268,8 +268,6 @@ def add(
     ),
 ):
     """Search for a book and add it to your Obsidian vault."""
-    import questionary
-
     # Checked before the search, so an invalid status is not reported after a
     # network round trip and a book picker.
     try:
@@ -290,6 +288,8 @@ def add(
         return
 
     choices = [f"{book.title} by {', '.join(book.authors)}" for book in books]
+    import questionary
+
     selected_choice = questionary.select("Select a book to add:", choices=choices).ask()
 
     if not selected_choice:
@@ -440,8 +440,6 @@ def cleanup(
     ),
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
-    import questionary
-
     vault_path = _require_vault_path()
     books = list_books(vault_path)
 
@@ -495,6 +493,8 @@ def cleanup(
                     typer.echo(
                         f"\n  {book_file.name}: {result.status.replace('_', ' ')}"
                     )
+                    import questionary
+
                     if questionary.confirm(
                         f"Enrich {book_file.name} from Google Books?",
                         default=True,
@@ -848,8 +848,6 @@ def enrich(
     ),
 ):
     """Search Google Books to fill in missing data for a book."""
-    import questionary
-
     vault_path = _require_vault_path()
 
     if filename is None:
@@ -859,6 +857,8 @@ def enrich(
             return
 
         choices = [p.name for p in books]
+        import questionary
+
         filename = questionary.autocomplete(
             "Select a book to enrich:",
             choices=choices,
@@ -945,8 +945,6 @@ def merge(
     Without --auto: Interactive mode where you choose which books to merge.
     With --auto: Automatically merge books when ISBN + Google ID match and no metadata conflicts exist.
     """
-    import questionary
-
     vault_path = _require_vault_path()
 
     if decisions is not None:
@@ -957,6 +955,11 @@ def merge(
     if not groups:
         typer.echo("No duplicates found.")
         return
+
+    # Below the two early returns, so `--decisions` and a Shelf with no
+    # duplicates never load the prompt stack. Above the loop rather than beside
+    # the two `confirm` calls inside it, which are in a branch per group.
+    import questionary
 
     total_merged = 0
 
@@ -1197,8 +1200,6 @@ def migrate(
     A dry run by default: summarises what would change, prints a sample of
     diffs, and writes nothing. Review the diff before using --apply.
     """
-    import questionary
-
     vault_path = _require_vault_path()
     if not vault_path.exists():
         typer.echo(f"Shelf does not exist: {vault_path}")
@@ -1244,6 +1245,8 @@ def migrate(
     if not flagged and not changing:
         typer.echo("Nothing to do.")
         return
+
+    import questionary
 
     confirm = questionary.confirm(
         f"Rewrite {len(changing)} notes in {vault_path}?", default=False

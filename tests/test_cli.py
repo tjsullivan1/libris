@@ -574,11 +574,22 @@ def test_the_status_prompt_offers_what_the_library_defines(monkeypatch, tmp_path
 # --- what importing the CLI is allowed to cost (#106) -----------------------
 
 # Every command pays for whatever `libris.cli` imports, before Typer has even
-# chosen one. These three were top-level and cost ~700ms between them, so
-# `libris --version` took 1.9s to print one string. Each is now imported at the
-# point of use. Asserted against a subprocess rather than `sys.modules` in this
-# process, because the test suite has already imported all three itself.
-_DEFERRED = ("questionary", "prompt_toolkit", "httpx", "importlib.metadata")
+# chosen one. Four imports were top-level and cost ~700ms between them, so
+# `libris --version` took the best part of a second to print one string. Each is
+# now imported at the point of use. Asserted against a subprocess rather than
+# `sys.modules` in this process, because the test suite has already imported
+# every one of them itself.
+#
+# `prompt_toolkit` is here because it is what makes `questionary` expensive, and
+# `importlib.metadata` because `ulid` pulls it in - deferring the package's own
+# use of it saved nothing until `ulid` moved too.
+_DEFERRED = (
+    "questionary",
+    "prompt_toolkit",
+    "httpx",
+    "ulid",
+    "importlib.metadata",
+)
 
 
 def test_importing_the_cli_does_not_drag_in_the_heavy_optional_stack():
