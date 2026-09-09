@@ -11,8 +11,49 @@ See ADR 0005, ADR 0009, ADR 0011 and ADR 0012.
 
 import re
 from datetime import date, datetime, time, timezone
+from typing import Any
 
+import yaml
 from ulid import ULID
+
+# `yaml.safe_load` builds its parser in Python. libyaml does the same work in C,
+# and parsing frontmatter is the single largest component of a cold index build:
+# measured over this Shelf's 3,063 notes, 10.67s with the Python loader against
+# 1.57s with the C one (#94).
+#
+# The two are meant to implement the same YAML subset, and the usual places they
+# diverge are date coercion and duplicate keys. Rather than assume, both loaders
+# were run over every note on the real Shelf and compared structurally, types
+# included: 3,063 notes, zero disagreements, with 3,055 `date_added`, 2,200
+# `date_published` and 686 `date_finished` values coerced to `date` identically.
+#
+# CSafeLoader exists only when PyYAML was built against libyaml, which the
+# dependency does not guarantee, so the Python loader remains the fallback.
+_HAVE_LIBYAML = hasattr(yaml, "CSafeLoader")
+
+
+def parse_frontmatter_yaml(text: str) -> Any:
+    """Parse the YAML of a note's frontmatter block.
+
+    Both branches name their loader outright rather than passing one chosen
+    above. `yaml.load` with a loader it cannot see is how an unsafe one gets
+    used by accident, and a reader - or a linter - should be able to tell which
+    loader this is from the call itself.
+
+    Args:
+        text: The YAML between the two `---` fences.
+
+    Returns:
+        Whatever the block holds. A Book Note's is a mapping, but a damaged note
+        can hold anything YAML expresses, so callers check before using it.
+
+    Raises:
+        yaml.YAMLError: If the block cannot be parsed.
+    """
+    if _HAVE_LIBYAML:
+        return yaml.load(text, Loader=yaml.CSafeLoader)
+    return yaml.load(text, Loader=yaml.SafeLoader)
+
 
 IDENTITY_FIELDS = ("libris_id", "title", "authors")
 BIBLIOGRAPHIC_FIELDS = (

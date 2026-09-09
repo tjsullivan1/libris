@@ -8,6 +8,8 @@ its fixtures use the code's schema rather than the vault's.
 These tests build notes shaped like real ones. See #61.
 """
 
+from datetime import date
+
 import pytest
 
 from libris.api import BookCandidate
@@ -541,3 +543,89 @@ def test_a_list_is_still_accepted_for_format(tmp_path):
 
     # Then it is written
     assert read_frontmatter(path)["format"] == ["Physical", "Audiobook"]
+
+
+# --- the frontmatter parser (#94) ------------------------------------------
+
+
+# Frontmatter shaped like the real Shelf's, covering every value type it holds.
+# Date coercion is one of the two places the C and Python YAML loaders are known
+# to diverge, so real dates appear here rather than being taken on trust. The
+# other place is duplicate keys, which no real note carries; that one has its own
+# test below rather than being smuggled into a fixture meant to look like a note.
+_REPRESENTATIVE_FRONTMATTER = """\
+libris_id: lb-2026-0001
+title: A Book
+authors:
+  - "[[An Author]]"
+  - Another Author
+isbn: 9780000000001
+page_count: 321
+date_published: 2019-04-01
+date_added: 2026-09-04
+date_started: 2026-09-01
+date_finished:
+status: Reading
+rating: 4
+format:
+  - Audiobook
+tags: Book
+genres: null
+referred_by: "A friend: with a colon"
+"""
+
+
+def test_the_frontmatter_parser_agrees_with_the_python_loader():
+    # Given frontmatter shaped like the Shelf's, dates and all
+    import yaml
+
+    from libris.note_format import parse_frontmatter_yaml
+
+    # When it is parsed through the Library's parser and through PyYAML's own
+    # pure-Python safe loader
+    ours = parse_frontmatter_yaml(_REPRESENTATIVE_FRONTMATTER)
+    theirs = yaml.load(_REPRESENTATIVE_FRONTMATTER, Loader=yaml.SafeLoader)
+
+    # Then they agree on the values and, separately, on their types. Equality
+    # would catch a date returned as the string that spells it, since those do
+    # not compare equal; what it misses is two types that do - `True == 1` and
+    # `1 == 1.0` - and this Shelf holds 2,898 integer page counts and 888
+    # integer ratings for such a divergence to hide in.
+    assert ours == theirs
+    assert {k: type(v) for k, v in ours.items()} == {
+        k: type(v) for k, v in theirs.items()
+    }
+    assert isinstance(ours["date_published"], date)
+    assert isinstance(ours["rating"], int) and not isinstance(ours["rating"], bool)
+
+
+def test_the_frontmatter_parser_agrees_on_a_repeated_key():
+    # Given frontmatter that names the same key twice - the second of the two
+    # places the loaders are known to diverge, and one no real note takes, so it
+    # is asserted here rather than inferred from the Shelf
+    import yaml
+
+    from libris.note_format import parse_frontmatter_yaml
+
+    repeated = "title: First\nstatus: To Read\ntitle: Second\n"
+
+    # When it is parsed both ways
+    ours = parse_frontmatter_yaml(repeated)
+    theirs = yaml.load(repeated, Loader=yaml.SafeLoader)
+
+    # Then both take the last value, and neither refuses the note
+    assert ours == theirs
+    assert ours["title"] == "Second"
+
+
+def test_the_frontmatter_parser_reports_damage_rather_than_guessing():
+    # Given a frontmatter block that is not YAML
+    import yaml
+
+    from libris.note_format import parse_frontmatter_yaml
+
+    # When it is parsed
+    # Then it raises the error every caller already catches, whichever loader
+    # is compiled in
+    with pytest.raises(yaml.YAMLError):
+        parse_frontmatter_yaml("title: [unclosed\nstatus: To Read\n")

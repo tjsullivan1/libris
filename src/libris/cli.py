@@ -55,6 +55,7 @@ from .note_format import (
     STATUS_VALUES,
     InvalidFieldValue,
     normalize_field_value,
+    parse_frontmatter_yaml,
     validate_field_value,
 )
 from .service import apply_decisions
@@ -599,7 +600,7 @@ def _append_auto_enrich_note(
     split = split_frontmatter(content)
 
     if split is not None:
-        data = yaml.safe_load(split[0])
+        data = parse_frontmatter_yaml(split[0])
         if isinstance(data, dict):
             tags = data.get("tags")
             if isinstance(tags, str):

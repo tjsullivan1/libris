@@ -18,6 +18,7 @@ from .markdown import (
     write_note,
 )
 from .matching import normalize_for_match
+from .note_format import parse_frontmatter_yaml
 
 
 @dataclass
@@ -218,7 +219,7 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
 
     frontmatter_yaml, rest_of_content = split
     try:
-        data = yaml.safe_load(frontmatter_yaml)
+        data = parse_frontmatter_yaml(frontmatter_yaml)
     except yaml.YAMLError:
         # Deliberately no regex fallback. format is a list (ADR 0017), so a
         # line-level substitution would write a Python repr and strand any
