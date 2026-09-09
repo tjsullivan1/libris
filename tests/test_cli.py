@@ -286,9 +286,7 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
         def ask(self):
             return choice
 
-    monkeypatch.setattr(
-        "libris.cli.questionary.select", lambda *args, **kwargs: _Selection()
-    )
+    monkeypatch.setattr("questionary.select", lambda *args, **kwargs: _Selection())
     monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
 
     captured = {}
@@ -454,7 +452,7 @@ def test_add_accepts_more_than_one_format(monkeypatch, tmp_path):
         def ask(self):
             return "Changes by Jim Butcher"
 
-    monkeypatch.setattr("libris.cli.questionary.select", lambda *a, **k: _Selection())
+    monkeypatch.setattr("questionary.select", lambda *a, **k: _Selection())
     monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
 
     captured = {}
@@ -558,7 +556,7 @@ def test_the_status_prompt_offers_what_the_library_defines(monkeypatch, tmp_path
             return self._choices[0]
 
     monkeypatch.setattr(
-        "libris.cli.questionary.select",
+        "questionary.select",
         lambda _message, choices, **kwargs: _Selection(choices),
     )
 
@@ -571,3 +569,47 @@ def test_the_status_prompt_offers_what_the_library_defines(monkeypatch, tmp_path
     # rejects, and to omit "Not To Read" entirely.
     assert offered[-1] == list(STATUS_VALUES)
     assert "Finished" not in offered[-1]
+
+
+# --- what importing the CLI is allowed to cost (#106) -----------------------
+
+# Every command pays for whatever `libris.cli` imports, before Typer has even
+# chosen one. These three were top-level and cost ~700ms between them, so
+# `libris --version` took 1.9s to print one string. Each is now imported at the
+# point of use. Asserted against a subprocess rather than `sys.modules` in this
+# process, because the test suite has already imported all three itself.
+_DEFERRED = ("questionary", "prompt_toolkit", "httpx", "importlib.metadata")
+
+
+def test_importing_the_cli_does_not_drag_in_the_heavy_optional_stack():
+    # Given a fresh interpreter that has imported nothing but the CLI
+    import json
+    import subprocess
+
+    code = (
+        "import sys, json; import libris.cli; "
+        f"print(json.dumps([m for m in {_DEFERRED!r} if m in sys.modules]))"
+    )
+
+    # When it reports which of the deferred modules got pulled in
+    # noqa justified: the command is this interpreter and a literal string built
+    # above from a module-level tuple. Nothing here comes from outside the test.
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    loaded = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # Then none of them did. A top-level import of any of these puts ~700ms back
+    # on every command, including `--help`, so this fails loudly rather than
+    # letting the cost creep back in unnoticed.
+    assert loaded == []
+
+
+def test_the_version_still_reads_from_package_metadata():
+    # Given importlib.metadata is no longer imported at package scope
+    # When the version is asked for
+    version = libris.installed_version()
+
+    # Then it still answers, so deferring the import did not break the thing it
+    # was deferred for.
+    assert isinstance(version, str) and version

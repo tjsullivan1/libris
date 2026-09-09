@@ -5,7 +5,6 @@ import sys
 import time
 from pathlib import Path
 
-import questionary
 import typer
 
 from . import installed_version
@@ -138,6 +137,8 @@ def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
 @app.command()
 def status():
     """Update the status of a book in your vault."""
+    import questionary
+
     vault_path = _require_vault_path()
     books = list_books(vault_path)
 
@@ -267,6 +268,8 @@ def add(
     ),
 ):
     """Search for a book and add it to your Obsidian vault."""
+    import questionary
+
     # Checked before the search, so an invalid status is not reported after a
     # network round trip and a book picker.
     try:
@@ -382,6 +385,8 @@ def clean(
     ),
 ):
     """Select a specific book to clean its frontmatter."""
+    import questionary
+
     vault_path = _require_vault_path()
     books = list_books(vault_path)
 
@@ -435,6 +440,8 @@ def cleanup(
     ),
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
+    import questionary
+
     vault_path = _require_vault_path()
     books = list_books(vault_path)
 
@@ -635,6 +642,8 @@ def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
     If *results* is provided the search step is skipped and those results are
     presented directly for selection.
     """
+    import questionary
+
     if results is None:
         default_query = _build_search_query(file_path.stem)
         query = questionary.text(
@@ -839,6 +848,8 @@ def enrich(
     ),
 ):
     """Search Google Books to fill in missing data for a book."""
+    import questionary
+
     vault_path = _require_vault_path()
 
     if filename is None:
@@ -934,6 +945,8 @@ def merge(
     Without --auto: Interactive mode where you choose which books to merge.
     With --auto: Automatically merge books when ISBN + Google ID match and no metadata conflicts exist.
     """
+    import questionary
+
     vault_path = _require_vault_path()
 
     if decisions is not None:
@@ -1184,6 +1197,8 @@ def migrate(
     A dry run by default: summarises what would change, prints a sample of
     diffs, and writes nothing. Review the diff before using --apply.
     """
+    import questionary
+
     vault_path = _require_vault_path()
     if not vault_path.exists():
         typer.echo(f"Shelf does not exist: {vault_path}")
