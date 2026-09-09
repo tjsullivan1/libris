@@ -25,9 +25,11 @@ from .note_format import (
     MODELLED_FIELDS,
     has_description_callout,
     has_title_heading,
+    is_isbn10,
     mint_libris_id,
     parse_frontmatter_yaml,
     read_formats,
+    read_isbn,
     render_body,
     split_body,
 )
@@ -405,6 +407,142 @@ def plan_format_migration(vault_path: Path) -> list[NoteMigration]:
         One plan per note, including notes that need no change.
     """
     return [plan_note_format_migration(path) for path in list_books(vault_path)]
+
+
+def _render_isbn(value: str) -> str:
+    """Render an isbn line the way the Shelf already writes them.
+
+    Double-quoted, which 2,569 of the 2,704 notes carrying an ISBN already use,
+    and which states outright that the value is text. A restored ISBN begins
+    with the zero that went missing, and while both YAML loaders happen to read
+    a leading-zero digit string as a string today, relying on a resolver rule
+    about octal is how the field became a number in the first place.
+    """
+    return f'isbn: "{value}"'
+
+
+def plan_note_isbn_migration(path: Path) -> NoteMigration:
+    """Plan the ISBN repair for one Book Note (#116).
+
+    Touches `isbn` and nothing else, for the same reason the format migration
+    does: a repair that also restandardises titles is not a repair anyone asked
+    for.
+
+    Restores the leading zero on a nine-character ISBN, and only when the
+    ISBN-10 check digit agrees that the result is a real ISBN. Measured across
+    the Shelf, all 27 such notes pass that check - but it is verified per note
+    rather than assumed, because a value that fails is a value nobody has
+    explained yet.
+
+    Anything else that is not a well-formed ISBN is reported and left alone
+    (ADR 0003): four notes hold an Amazon ASIN in this field, one has a stray
+    trailing character, and one is seven digits and matches nothing.
+
+    Args:
+        path: The Book Note to plan.
+
+    Returns:
+        The plan, unchanged when the note's ISBN needs nothing or cannot be
+        repaired without guessing.
+    """
+    original = path.read_text(encoding="utf-8")
+
+    split = split_frontmatter(original)
+    if split is None:
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=["no parseable frontmatter"],
+        )
+
+    # Carried across rather than recomposed, so `migrated == original` holds for
+    # every note whose ISBN needs nothing - which is all but 27 of them.
+    frontmatter_text, body = split
+
+    try:
+        current = parse_frontmatter_yaml(frontmatter_text)
+    except yaml.YAMLError as exc:
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=[f"frontmatter is not valid YAML: {type(exc).__name__}"],
+        )
+    if not isinstance(current, dict):
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=["frontmatter is not a mapping"],
+        )
+
+    blocks = split_frontmatter_blocks(frontmatter_text)
+    if "isbn" not in current or not any(key == "isbn" for key, _ in blocks):
+        return NoteMigration(path=path, original=original, migrated=original)
+
+    value = read_isbn(current.get("isbn"))
+    if value is None or len(value) == 13:
+        # Nothing to repair. An ISBN-13 is left alone entirely: its check digit
+        # is a different algorithm, and this migration is about a missing zero.
+        return NoteMigration(path=path, original=original, migrated=original)
+
+    if len(value) == 10:
+        if is_isbn10(value):
+            return NoteMigration(path=path, original=original, migrated=original)
+        # Ten characters that fail the check digit are reported and left alone.
+        # Measured across the Shelf this flags exactly four notes, all of them
+        # an Amazon ASIN sitting in the isbn field - data in the wrong place
+        # rather than damage, and not this migration's to move (ADR 0003).
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=[f"isbn is ten characters but fails the check digit: {value}"],
+        )
+
+    if len(value) != 9:
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=[
+                f"isbn is {len(value)} characters and matches no ISBN shape: {value}"
+            ],
+        )
+
+    restored = f"0{value}"
+    if not is_isbn10(restored):
+        # The theory holds for every note on this Shelf, so a note that fails
+        # here is new information rather than an expected miss.
+        return NoteMigration(
+            path=path,
+            original=original,
+            migrated=original,
+            warnings=[f"isbn is nine characters but 0{value} fails the check digit"],
+        )
+
+    rendered = _render_isbn(restored)
+    rebuilt = [(key, rendered if key == "isbn" else raw) for key, raw in blocks]
+    new_frontmatter = "\n".join(raw for _, raw in rebuilt)
+    migrated = f"---\n{new_frontmatter}\n---\n{body}"
+
+    changes = ["isbn: restored leading zero"] if migrated != original else []
+    return NoteMigration(
+        path=path, original=original, migrated=migrated, changes=changes
+    )
+
+
+def plan_isbn_migration(vault_path: Path) -> list[NoteMigration]:
+    """Plan the ISBN repair for every Book Note on the Shelf.
+
+    Args:
+        vault_path: The Shelf to repair.
+
+    Returns:
+        One plan per note, including notes that need no change.
+    """
+    return [plan_note_isbn_migration(path) for path in list_books(vault_path)]
 
 
 def apply_migration(plans: list[NoteMigration]) -> int:

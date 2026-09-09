@@ -29,6 +29,7 @@ from .merge import (
 )
 from .note_format import (
     READER_FIELDS,
+    is_isbn10,
     normalize_field_value,
     read_isbn,
     validate_field_value,
@@ -69,35 +70,6 @@ class AddResult:
     # The Book Notes that stopped the write, when one was stopped. Empty in
     # every other case, including a write that went ahead past them.
     near_matches: list[BookNote] = field(default_factory=list)
-
-
-def is_isbn10(value: str) -> bool:
-    """Check whether a ten-character identifier is a valid ISBN-10.
-
-    Amazon reuses the ISBN-10 as the ASIN for print books but mints its own for
-    Kindle editions, and the two are indistinguishable by shape. The checksum
-    is what separates them, so a Kindle ASIN is never sent as `isbn:`.
-
-    Args:
-        value: The identifier to check.
-
-    Returns:
-        True if the value passes the ISBN-10 check digit.
-    """
-    digits = read_isbn(value)
-    if digits is None or len(digits) != 10:
-        return False
-
-    total = 0
-    for position, char in enumerate(digits):
-        if char.isdigit():
-            digit = int(char)
-        elif char == "X" and position == 9:
-            digit = 10
-        else:
-            return False
-        total += digit * (10 - position)
-    return total % 11 == 0
 
 
 # Amazon states the ASIN in the product URL itself, in one of two shapes. A

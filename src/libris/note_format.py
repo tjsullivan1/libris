@@ -251,6 +251,35 @@ def read_isbn(value: object) -> str | None:
     return cleaned or None
 
 
+def is_isbn10(value: str) -> bool:
+    """Check whether a ten-character identifier is a valid ISBN-10.
+
+    Amazon reuses the ISBN-10 as the ASIN for print books but mints its own for
+    Kindle editions, and the two are indistinguishable by shape. The checksum
+    is what separates them, so callers can treat an ASIN as an ISBN only when
+    it passes the ISBN-10 check digit.
+    Args:
+        value: The identifier to check.
+
+    Returns:
+        True if the value passes the ISBN-10 check digit.
+    """
+    digits = read_isbn(value)
+    if digits is None or len(digits) != 10:
+        return False
+
+    total = 0
+    for position, char in enumerate(digits):
+        if char.isdigit():
+            digit = int(char)
+        elif char == "X" and position == 9:
+            digit = 10
+        else:
+            return False
+        total += digit * (10 - position)
+    return total % 11 == 0
+
+
 def read_formats(value: object) -> list[str]:
     """Read a `format` value into the list of media it means (ADR 0017).
 

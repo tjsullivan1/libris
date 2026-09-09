@@ -6,6 +6,7 @@ from libris.markdown import BookNote
 from libris.migrate import (
     leaked_alias_keys,
     plan_note_format_migration,
+    plan_note_isbn_migration,
     plan_note_migration,
     recover_title,
     reorder_frontmatter,
@@ -439,3 +440,98 @@ def test_frontmatter_that_is_not_a_mapping_is_reported(tmp_path):
     # Then it is reported rather than raising an AttributeError mid-run
     assert plan.changed is False
     assert plan.warnings
+
+
+# --- restoring a missing leading zero on an ISBN (#116) ---------------------
+
+
+def _isbn_note(tmp_path, name, isbn_line):
+    """A Book Note whose isbn line is written exactly as given."""
+    return write_note(
+        tmp_path / name,
+        f"title: A Book\nauthors:\n  - An Author\n{isbn_line}\npage_count: 373",
+        "## Notes\n\nThe reader's own writing.\n",
+    )
+
+
+def test_a_nine_digit_isbn_regains_its_leading_zero(tmp_path):
+    # Given a note whose ISBN is nine digits, written unquoted as YAML numbers
+    # arrive on this Shelf
+    path = _isbn_note(tmp_path, "short.md", "isbn: 786937521")
+
+    # When the ISBN migration plans it
+    plan = plan_note_isbn_migration(path)
+
+    # Then the zero is restored, quoted so the value is unambiguously text
+    assert plan.changed
+    assert plan.changes == ["isbn: restored leading zero"]
+    assert 'isbn: "0786937521"' in plan.migrated
+    assert not plan.warnings
+
+
+def test_the_repair_touches_the_isbn_line_and_nothing_else(tmp_path):
+    # Given the same note
+    path = _isbn_note(tmp_path, "only.md", "isbn: 786937521")
+    original = path.read_text(encoding="utf-8")
+
+    # When it is planned
+    plan = plan_note_isbn_migration(path)
+
+    # Then exactly one line differs. A repair of one field that reflows a
+    # reader's note is the shape of #92 and #99, and this asserts it cannot.
+    before = original.splitlines()
+    after = plan.migrated.splitlines()
+    assert len(before) == len(after)
+    differing = [(a, b) for a, b in zip(before, after) if a != b]
+    assert differing == [("isbn: 786937521", 'isbn: "0786937521"')]
+
+
+def test_a_nine_digit_isbn_the_check_digit_refuses_is_reported_not_repaired(tmp_path):
+    # Given a nine-digit ISBN whose zero-prefixed form fails the check digit
+    path = _isbn_note(tmp_path, "bad.md", "isbn: 786937522")
+    original = path.read_text(encoding="utf-8")
+
+    # When it is planned
+    plan = plan_note_isbn_migration(path)
+
+    # Then nothing is rewritten and a person is told. Every note on the real
+    # Shelf passes, so one that does not is new information rather than an
+    # expected miss (ADR 0003).
+    assert not plan.changed
+    assert plan.migrated == original
+    assert plan.warnings and "check digit" in plan.warnings[0]
+
+
+def test_an_asin_in_the_isbn_field_is_reported_not_repaired(tmp_path):
+    # Given a note holding an Amazon ASIN where an ISBN belongs, as four on the
+    # real Shelf do
+    path = _isbn_note(tmp_path, "asin.md", 'isbn: "B000ELJ9NO"')
+
+    # When it is planned
+    plan = plan_note_isbn_migration(path)
+
+    # Then it is reported and left alone: data in the wrong field is not this
+    # migration's to move.
+    assert not plan.changed
+    assert plan.warnings and "B000ELJ9NO" in plan.warnings[0]
+
+
+def test_isbns_that_are_already_well_formed_are_left_alone(tmp_path):
+    # Given notes holding a valid ISBN-10, a valid ISBN-13, one with the X check
+    # digit, and no ISBN at all
+    cases = {
+        "ten.md": 'isbn: "0786937521"',
+        "thirteen.md": 'isbn: "9781643665504"',
+        "checkx.md": 'isbn: "161145736X"',
+        "none.md": "isbn:",
+    }
+
+    for name, line in cases.items():
+        path = _isbn_note(tmp_path, name, line)
+
+        # When each is planned
+        plan = plan_note_isbn_migration(path)
+
+        # Then nothing changes and nothing is reported
+        assert not plan.changed, name
+        assert not plan.warnings, name
