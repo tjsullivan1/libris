@@ -217,7 +217,7 @@ def test_autoenrich_multiple_with_interactive(tmp_path, monkeypatch):
 
     # Simulate questionary.select choosing the second option
     monkeypatch.setattr(
-        "libris.cli.questionary.select",
+        "questionary.select",
         lambda *a, **kw: type(
             "Ask",
             (),
@@ -255,7 +255,7 @@ def test_autoenrich_interactive_skip(tmp_path, monkeypatch):
 
     # Simulate choosing the skip option
     monkeypatch.setattr(
-        "libris.cli.questionary.select",
+        "questionary.select",
         lambda *a, **kw: type("Ask", (), {"ask": lambda self: "[ Skip this book ]"})(),
     )
 

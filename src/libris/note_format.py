@@ -14,7 +14,6 @@ from datetime import date, datetime, time, timezone
 from typing import Any
 
 import yaml
-from ulid import ULID
 
 # `yaml.safe_load` builds its parser in Python. libyaml does the same work in C,
 # and parsing frontmatter is the single largest component of a cold index build:
@@ -264,6 +263,12 @@ def mint_libris_id(date_added: object) -> str:
     Returns:
         A 26-character ULID string.
     """
+    # Imported here rather than at module scope. `ulid` costs ~167ms, 113ms of
+    # which is the `importlib.metadata` it pulls in, and this module is imported
+    # by everything that touches a note - so every command paid it so that the
+    # few that mint an identity could (#106).
+    from ulid import ULID
+
     moment: datetime | None = None
     if isinstance(date_added, datetime):
         moment = date_added

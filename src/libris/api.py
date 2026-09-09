@@ -10,9 +10,13 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
-import httpx
-
 from .config import get_api_key
+
+# `httpx` is imported inside the two methods that make requests rather than
+# here. Every module that names a `BookCandidate` imports this one - markdown,
+# matching, importer, service - so a top-level import meant that running
+# `libris --help` loaded an HTTP stack it would never use, at ~232ms (#106).
+# The dataclasses and helpers below need nothing from it.
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +211,8 @@ class GoogleBooksClient:
                 not clear.
             httpx.RequestError: If the request could not be made.
         """
+        import httpx
+
         params = {**params, **self._identifying_params()}
 
         with httpx.Client(timeout=self.timeout) as client:
@@ -325,6 +331,8 @@ class GoogleBooksClient:
             and then told the service is down. A Surface reporting that failure
             should name both causes rather than only the outage.
         """
+        import httpx
+
         url = f"{self.BASE_URL}/{quote(google_books_id, safe='')}"
         try:
             data = self._get(url, {})

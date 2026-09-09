@@ -5,7 +5,6 @@ import sys
 import time
 from pathlib import Path
 
-import questionary
 import typer
 
 from . import installed_version
@@ -138,6 +137,8 @@ def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
 @app.command()
 def status():
     """Update the status of a book in your vault."""
+    import questionary
+
     vault_path = _require_vault_path()
     books = list_books(vault_path)
 
@@ -287,6 +288,8 @@ def add(
         return
 
     choices = [f"{book.title} by {', '.join(book.authors)}" for book in books]
+    import questionary
+
     selected_choice = questionary.select("Select a book to add:", choices=choices).ask()
 
     if not selected_choice:
@@ -382,6 +385,8 @@ def clean(
     ),
 ):
     """Select a specific book to clean its frontmatter."""
+    import questionary
+
     vault_path = _require_vault_path()
     books = list_books(vault_path)
 
@@ -488,6 +493,8 @@ def cleanup(
                     typer.echo(
                         f"\n  {book_file.name}: {result.status.replace('_', ' ')}"
                     )
+                    import questionary
+
                     if questionary.confirm(
                         f"Enrich {book_file.name} from Google Books?",
                         default=True,
@@ -635,6 +642,8 @@ def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
     If *results* is provided the search step is skipped and those results are
     presented directly for selection.
     """
+    import questionary
+
     if results is None:
         default_query = _build_search_query(file_path.stem)
         query = questionary.text(
@@ -848,6 +857,8 @@ def enrich(
             return
 
         choices = [p.name for p in books]
+        import questionary
+
         filename = questionary.autocomplete(
             "Select a book to enrich:",
             choices=choices,
@@ -944,6 +955,11 @@ def merge(
     if not groups:
         typer.echo("No duplicates found.")
         return
+
+    # Below the two early returns, so `--decisions` and a Shelf with no
+    # duplicates never load the prompt stack. Above the loop rather than beside
+    # the two `confirm` calls inside it, which are in a branch per group.
+    import questionary
 
     total_merged = 0
 
@@ -1229,6 +1245,8 @@ def migrate(
     if not flagged and not changing:
         typer.echo("Nothing to do.")
         return
+
+    import questionary
 
     confirm = questionary.confirm(
         f"Rewrite {len(changing)} notes in {vault_path}?", default=False
