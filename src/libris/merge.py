@@ -22,6 +22,7 @@ from .note_format import (
     MULTI_VALUED_FIELDS,
     READER_FIELDS,
     SUPERSEDED_IDS_FIELD,
+    read_isbn,
     read_superseded_ids,
 )
 
@@ -304,15 +305,15 @@ def check_auto_merge(
         return False, "Could not read frontmatter", None
 
     # Check ISBN and Google Books ID match
-    primary_isbn = primary_fm.get("isbn")
-    secondary_isbn = secondary_fm.get("isbn")
+    # Through the shared reader rather than str(), so two notes spelling one
+    # ISBN differently - unquoted, or hyphenated - are still the same book (#105).
+    primary_isbn = read_isbn(primary_fm.get("isbn"))
+    secondary_isbn = read_isbn(secondary_fm.get("isbn"))
     primary_gid = primary_fm.get("google_books_id")
     secondary_gid = secondary_fm.get("google_books_id")
 
     # Both ISBN and Google ID must match to auto-merge
-    isbn_match = (
-        primary_isbn and secondary_isbn and str(primary_isbn) == str(secondary_isbn)
-    )
+    isbn_match = primary_isbn and secondary_isbn and primary_isbn == secondary_isbn
     gid_match = primary_gid and secondary_gid and str(primary_gid) == str(secondary_gid)
 
     if not (isbn_match and gid_match):

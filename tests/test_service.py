@@ -1030,3 +1030,62 @@ def test_a_format_of_nothing_recognisable_is_still_refused(tmp_path):
     with pytest.raises(ValueError):
         update_book(tmp_path, note.libris_id, {"format": ["papyrus"]})
     assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == ["Physical"]
+
+
+# --- an ISBN is an identifier, not a number (#105) --------------------------
+
+
+def _note_with_isbn(vault, name, isbn_line):
+    """Write a Book Note whose isbn line is spelled exactly as given."""
+    path = vault / name
+    path.write_text(
+        "---\n"
+        f"libris_id: lb-{name[:4]}\n"
+        "title: A Book\n"
+        "authors:\n"
+        "  - An Author\n"
+        f"{isbn_line}\n"
+        "status: To Read\n"
+        "---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    "isbn_line",
+    [
+        "isbn: 786937521",  # unquoted: YAML hands this back as an int
+        'isbn: "786937521"',
+        "isbn: 786-937-521",  # hyphens are group separators, not information
+        'isbn: "  786937521  "',
+    ],
+    ids=["bare-int", "quoted", "hyphenated", "padded"],
+)
+def test_a_book_is_found_by_isbn_however_the_note_spells_it(tmp_path, isbn_line):
+    # Given a Shelf holding one note, whose ISBN is written in one of the shapes
+    # the real Shelf actually uses
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_isbn(vault, "book.md", isbn_line)
+
+    # When the Library is asked for that ISBN as a string, which is what every
+    # Surface passes
+    found = find_existing(vault, isbn="786937521")
+
+    # Then the note is found. It was not: `786937521 == "786937521"` is False,
+    # so 31 notes on the real Shelf were invisible to this lookup and add_book
+    # would have written a second note for a book already held.
+    assert found is not None
+    assert found.title == "A Book"
+
+
+def test_an_isbn_lookup_still_misses_a_book_the_shelf_does_not_hold(tmp_path):
+    # Given a Shelf holding a different book
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_isbn(vault, "other.md", "isbn: 9780000000001")
+
+    # When a different ISBN is looked up
+    # Then it is a miss, rather than the normalisation making everything match
+    assert find_existing(vault, isbn="786937521") is None

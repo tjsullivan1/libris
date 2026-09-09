@@ -30,6 +30,7 @@ from .merge import (
 from .note_format import (
     READER_FIELDS,
     normalize_field_value,
+    read_isbn,
     validate_field_value,
 )
 from .shelf import index_for
@@ -83,8 +84,8 @@ def is_isbn10(value: str) -> bool:
     Returns:
         True if the value passes the ISBN-10 check digit.
     """
-    digits = value.replace("-", "").replace(" ", "").upper()
-    if len(digits) != 10:
+    digits = read_isbn(value)
+    if digits is None or len(digits) != 10:
         return False
 
     total = 0
@@ -273,8 +274,14 @@ def find_existing(
     wanted_title = normalize_for_match(title) if title else None
     wanted_author = normalize_for_match(authors[0]) if authors else None
 
+    # Both sides go through the same reader. Comparing the raw frontmatter value
+    # against the caller's string meant 31 notes holding an unquoted ISBN could
+    # not be found at all - `786937521 == "786937521"` is False - so `add_book`
+    # would have written a second note for a book already on the Shelf (#105).
+    wanted_isbn = read_isbn(isbn)
+
     for note in index_for(vault_path).notes():
-        if isbn and note.frontmatter.get("isbn") == isbn:
+        if wanted_isbn and note.isbn == wanted_isbn:
             return note
         if (
             google_books_id

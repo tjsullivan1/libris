@@ -629,3 +629,75 @@ def test_the_frontmatter_parser_reports_damage_rather_than_guessing():
     # is compiled in
     with pytest.raises(yaml.YAMLError):
         parse_frontmatter_yaml("title: [unclosed\nstatus: To Read\n")
+
+
+# --- reading an isbn (#105) -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stored,expected",
+    [
+        (9780000000001, "9780000000001"),  # unquoted, so YAML gives an int
+        ("9780000000001", "9780000000001"),
+        ("978-0-00-000000-1", "9780000000001"),  # hyphens are separators
+        ("  9780000000001  ", "9780000000001"),
+        ("161145736x", "161145736X"),  # the ISBN-10 check digit, either case
+        ("161145736X", "161145736X"),
+        (786937521, "786937521"),  # a nine-digit value is still read, not judged
+        ("B000ELJ9NO", "B000ELJ9NO"),  # an ASIN: not an ISBN, but still itself
+        ("‎ 979-8212632836", "9798212632836"),  # a pasted LTR mark
+        ("978 1440629570", "9781440629570"),  # a no-break space
+        (None, None),
+        ("", None),
+        ("   ", None),
+        (True, None),  # bool is an int in Python; `isbn: true` names nothing
+        ([], None),
+    ],
+    ids=[
+        "int",
+        "plain-string",
+        "hyphenated",
+        "padded",
+        "lowercase-x",
+        "uppercase-x",
+        "nine-digits",
+        "asin",
+        "ltr-mark",
+        "no-break-space",
+        "none",
+        "empty",
+        "whitespace",
+        "bool",
+        "wrong-type",
+    ],
+)
+def test_read_isbn_reads_the_identifier_however_it_is_written(stored, expected):
+    # Given an isbn value in one of the shapes the real Shelf holds
+    from libris.note_format import read_isbn
+
+    # When it is read
+    # Then it comes back as the identifier it names, or None when it names none
+    assert read_isbn(stored) == expected
+
+
+def test_two_notes_spelling_one_isbn_differently_read_the_same(tmp_path):
+    # Given the same ISBN written unquoted in one note and hyphenated in another
+    from libris.markdown import BookNote
+    from libris.note_format import read_isbn
+
+    for name, line in [
+        ("bare.md", "isbn: 9780000000001"),
+        ("hyph.md", 'isbn: "978-0-00-000000-1"'),
+    ]:
+        (tmp_path / name).write_text(
+            f"---\ntitle: A Book\n{line}\nstatus: To Read\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    # When both are read through the Book Note accessor
+    bare = BookNote.read(tmp_path / "bare.md")
+    hyphenated = BookNote.read(tmp_path / "hyph.md")
+
+    # Then they name one identifier, which is what makes them one book to
+    # find_existing and to the duplicate check
+    assert bare.isbn == hyphenated.isbn == read_isbn("9780000000001")
