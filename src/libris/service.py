@@ -849,6 +849,80 @@ def _raw_frontmatter_value(text: str, key: str) -> str | None:
     return None
 
 
+@dataclass
+class _ShelfFile:
+    """One file on the Shelf, in the parts a check can look at.
+
+    A damaged note is the point of these checks, so this reads what it can
+    rather than what it should be able to. Every check reads through here, so
+    two of them cannot end up disagreeing about whether a note exists - which is
+    how a collision involving an unparseable note went unreported (#75).
+    """
+
+    path: Path
+    # The parsed mapping, or empty when there is none to parse.
+    frontmatter: dict
+    # The raw frontmatter text, but only when it would not parse to a mapping.
+    # Empty otherwise, so a caller cannot read the same field from both.
+    unparsed_frontmatter: str
+    body: str
+
+    def __iter__(self):
+        """Unpack as (path, frontmatter, unparsed_frontmatter, body)."""
+        return iter((self.path, self.frontmatter, self.unparsed_frontmatter, self.body))
+
+    def value(self, key: str) -> object:
+        """Read a frontmatter field, whether or not the block parsed.
+
+        Args:
+            key: The frontmatter key to read.
+
+        Returns:
+            The parsed value when there is one, otherwise the raw text of that
+            line, otherwise None.
+        """
+        if self.frontmatter:
+            return self.frontmatter.get(key)
+        return _raw_frontmatter_value(self.unparsed_frontmatter, key)
+
+
+def _read_shelf(vault_path: Path):
+    """Read every file on the Shelf, damaged ones included.
+
+    `index_for` cannot be used for this. It drops a note whose frontmatter will
+    not parse - `BookNote.read` returns None - which is right for a Library
+    query and wrong for a check whose subject is damage. A collision involving
+    an unparseable note went unreported for exactly that reason.
+
+    Args:
+        vault_path: The Shelf to read.
+
+    Yields:
+        One `_ShelfFile` per file, in filename order.
+    """
+    for path in sorted(list_books(vault_path)):
+        content = path.read_text(encoding="utf-8")
+        split = split_frontmatter(content)
+
+        if split is None:
+            # No closed frontmatter block, so the whole file is body - the same
+            # answer `merge._extract_body_content` gives.
+            yield _ShelfFile(path, {}, "", content)
+            continue
+
+        try:
+            parsed = parse_frontmatter_yaml(split[0])
+        except yaml.YAMLError:
+            parsed = None
+
+        if isinstance(parsed, dict):
+            yield _ShelfFile(path, parsed, "", split[1])
+        else:
+            # The block is there but nothing reads it as a mapping, so there are
+            # no fields to look through and the raw text is all a check has.
+            yield _ShelfFile(path, {}, split[0], split[1])
+
+
 def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
     """Find every Book Note that has lost a character to a bad decode.
 
@@ -877,37 +951,21 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
         One entry per affected note, ordered by filename. Notes that have lost
         nothing are left out entirely.
     """
+    return _encoding_damage_in(_read_shelf(vault_path))
+
+
+def _encoding_damage_in(files) -> list[EncodingDamage]:
+    """Find the lost characters among already-read Shelf files.
+
+    Args:
+        files: What `_read_shelf` yielded.
+
+    Returns:
+        One entry per affected note.
+    """
     damaged: list[EncodingDamage] = []
 
-    for path in sorted(list_books(vault_path)):
-        content = path.read_text(encoding="utf-8")
-        split = split_frontmatter(content)
-
-        frontmatter: dict = {}
-        unparsed_frontmatter = ""
-        if split is None:
-            # No closed frontmatter block, so the whole file is body - the same
-            # answer `merge._extract_body_content` gives. Searching "" here
-            # instead made the report quietly depend on a note being parseable,
-            # which is backwards: a file nothing can parse is more likely to
-            # hold damage, not less.
-            body = content
-        else:
-            body = split[1]
-            try:
-                parsed = parse_frontmatter_yaml(split[0])
-            except yaml.YAMLError:
-                parsed = None
-            if isinstance(parsed, dict):
-                frontmatter = parsed
-            else:
-                # The block is there but nothing can read it as a mapping, so
-                # there are no fields to look through - and reading the fields
-                # was the only way damage in the frontmatter was found. A note
-                # whose YAML will not parse is exactly where a lost character is
-                # likely to be sitting, so the raw text is searched instead.
-                unparsed_frontmatter = split[0]
-
+    for path, frontmatter, unparsed_frontmatter, body in files:
         fields: dict[str, list[str]] = {}
 
         if LOST_CHARACTER in path.name:
@@ -1021,17 +1079,65 @@ def find_id_collisions(vault_path: Path) -> list[IdCollision]:
         claim it in filename order. Ids held by exactly one note - which is all
         but one of the 3,062 on the real Shelf - are left out.
     """
+    return _id_collisions_in(_read_shelf(vault_path))
+
+
+def _id_collisions_in(files) -> list[IdCollision]:
+    """Find the contested identities among already-read Shelf files.
+
+    Args:
+        files: What `_read_shelf` yielded.
+
+    Returns:
+        One entry per contested id.
+    """
     by_id: dict[str, list[BookNote]] = {}
-    for note in index_for(vault_path).notes():
-        identity = note.libris_id
-        if identity:
-            by_id.setdefault(identity, []).append(note)
+    for shelf_file in files:
+        identity = shelf_file.value("libris_id")
+        if not isinstance(identity, str) or not identity.strip():
+            continue
+        note = BookNote(path=shelf_file.path, frontmatter=shelf_file.frontmatter)
+        by_id.setdefault(identity.strip(), []).append(note)
 
     return [
         IdCollision(libris_id=identity, notes=sorted(notes, key=lambda n: n.path.name))
         for identity, notes in sorted(by_id.items())
         if len(notes) > 1
     ]
+
+
+@dataclass
+class ShelfReport:
+    """Everything `doctor` found, from one pass over the Shelf."""
+
+    collisions: list[IdCollision] = field(default_factory=list)
+    encoding_damage: list[EncodingDamage] = field(default_factory=list)
+
+    @property
+    def is_clean(self) -> bool:
+        """Whether nothing found anything worth a person's attention."""
+        return not self.collisions and not self.encoding_damage
+
+
+def inspect_shelf(vault_path: Path) -> ShelfReport:
+    """Run every check over the Shelf, reading it once.
+
+    Each check is also available on its own, and each reads the Shelf itself
+    when called that way. Running them separately meant reading 3,063 files
+    twice and took nine seconds where one pass takes half that, so anything
+    running all of them - which is `doctor` - comes through here.
+
+    Args:
+        vault_path: The Shelf to inspect.
+
+    Returns:
+        What every check found. Reads and reports; writes nothing.
+    """
+    files = list(_read_shelf(vault_path))
+    return ShelfReport(
+        collisions=_id_collisions_in(files),
+        encoding_damage=_encoding_damage_in(files),
+    )
 
 
 class DecisionStatus(Enum):

@@ -62,12 +62,7 @@ from .note_format import (
     parse_frontmatter_yaml,
     validate_field_value,
 )
-from .service import (
-    LOST_CHARACTER,
-    apply_decisions,
-    find_encoding_damage,
-    find_id_collisions,
-)
+from .service import LOST_CHARACTER, apply_decisions, inspect_shelf
 
 # Windows consoles and redirected output default to cp1252, which cannot encode
 # 39 of this Shelf's filenames - they carry U+FFFD where an accent was lost. A
@@ -1027,10 +1022,13 @@ def doctor(
     """
     vault_path = _require_vault_path()
 
-    collisions = find_id_collisions(vault_path)
-    damaged = find_encoding_damage(vault_path)
+    # One pass for both checks. Called separately they each read the Shelf,
+    # which meant reading 3,063 files twice.
+    report = inspect_shelf(vault_path)
+    collisions = report.collisions
+    damaged = report.encoding_damage
 
-    if not collisions and not damaged:
+    if report.is_clean:
         typer.echo("Nothing on the Shelf needs a decision.")
         return
 

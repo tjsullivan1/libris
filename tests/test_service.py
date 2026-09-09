@@ -1411,3 +1411,53 @@ def test_reporting_a_collision_writes_nothing(tmp_path):
     # Then neither note is touched. Merging or re-minting without being asked is
     # exactly what this must not do.
     assert (first.read_bytes(), second.read_bytes()) == before
+
+
+def test_a_collision_is_found_even_when_a_notes_frontmatter_will_not_parse(tmp_path):
+    # Given two notes contesting one identity, one of which has frontmatter that
+    # will not parse
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "good.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (vault / "broken.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: [unclosed\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    collisions = find_id_collisions(vault)
+
+    # Then both notes are counted. Reading through the index dropped the
+    # unparseable one - BookNote.read returns None - so the collision went
+    # unreported exactly when a note was damaged, which is what this check is
+    # for (#75).
+    assert len(collisions) == 1
+    assert [note.path.name for note in collisions[0].notes] == ["broken.md", "good.md"]
+
+
+def test_every_check_reads_a_damaged_note_the_same_way(tmp_path):
+    # Given one note whose frontmatter will not parse, holding both an identity
+    # and a lost character
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "a.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: [unclosed\n"
+        'authors:\n  - "S�ren Kierkegaard"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    (vault / "b.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: Another\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+    # When both checks run
+    collisions = find_id_collisions(vault)
+    damaged = find_encoding_damage(vault)
+
+    # Then neither check pretends the damaged note is absent. Two checks with
+    # two ideas of how to read a note is what let a collision hide.
+    assert [note.path.name for note in collisions[0].notes] == ["a.md", "b.md"]
+    assert any(entry.path.name == "a.md" for entry in damaged)
