@@ -1197,3 +1197,41 @@ def test_the_report_writes_nothing(tmp_path):
     # Then the note is untouched, byte for byte. A report that repairs something
     # on the way past is the silent wrongness ADR 0003 refuses.
     assert path.read_bytes() == before
+
+
+def test_damage_is_found_in_a_file_with_no_frontmatter_at_all(tmp_path):
+    # Given a file in the Shelf directory with no frontmatter block. Obsidian
+    # writes into this directory too, so not every .md here is a Book Note.
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    loose = vault / "loose.md"
+    loose.write_text("Just a body, mentioning Ren� Descartes.\n", encoding="utf-8")
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then the body is still searched. Treating an unparseable file as having no
+    # body made the report depend on a note being parseable, which is backwards:
+    # a file nothing can parse is more likely to hold damage, not less.
+    assert "loose.md" in found
+    assert found["loose.md"].fields["body"] == [
+        "Just a body, mentioning Ren� Descartes."
+    ]
+
+
+def test_damage_is_found_when_the_frontmatter_will_not_parse(tmp_path):
+    # Given a note whose frontmatter is not valid YAML, damaged in the body
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    broken = vault / "broken.md"
+    broken.write_text(
+        "---\ntitle: [unclosed\n---\n\n# La Com�die Humaine\n", encoding="utf-8"
+    )
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then it is reported through what can still be read, rather than skipped
+    assert "broken.md" in found
+    assert found["broken.md"].fields["body"] == ["# La Com�die Humaine"]
+    assert found["broken.md"].identifier is None

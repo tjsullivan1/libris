@@ -850,12 +850,21 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
         split = split_frontmatter(content)
 
         frontmatter: dict = {}
-        body = ""
-        if split is not None:
+        if split is None:
+            # No closed frontmatter block, so the whole file is body - the same
+            # answer `merge._extract_body_content` gives. Searching "" here
+            # instead made the report quietly depend on a note being parseable,
+            # which is backwards: a file nothing can parse is more likely to
+            # hold damage, not less.
+            body = content
+        else:
             body = split[1]
             try:
                 parsed = parse_frontmatter_yaml(split[0])
             except yaml.YAMLError:
+                # Reported through whatever the body and filename hold rather
+                # than skipped. A note whose YAML will not parse still has a
+                # name, and may well have lost a character in it.
                 parsed = None
             if isinstance(parsed, dict):
                 frontmatter = parsed

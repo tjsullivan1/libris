@@ -649,7 +649,7 @@ def test_doctor_reports_lost_characters_without_touching_anything(
 
     # Then it reports the damage and says a rename would be needed
     assert result.exit_code == 0
-    assert "1 notes have lost a character" in result.output
+    assert "1 note(s) have lost a character" in result.output
     assert "filename" in result.output
     assert "authors" in result.output
     assert "1 would need a rename" in result.output

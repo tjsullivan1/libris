@@ -947,7 +947,7 @@ def doctor(
     renames = [note for note in damaged if note.touches_filename]
     unidentifiable = [note for note in damaged if note.identifier is None]
 
-    typer.echo(f"{len(damaged)} notes have lost a character.\n")
+    typer.echo(f"{len(damaged)} note(s) have lost a character.\n")
 
     where: dict[str, int] = {}
     for note in damaged:
