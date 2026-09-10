@@ -51,13 +51,28 @@ def _named_fields(section: str) -> set[str]:
     return set(re.findall(r"^\|\s*`([a-z_][a-z0-9_]*)`\s*\|", section, re.MULTILINE))
 
 
+def _field_row(field: str) -> str | None:
+    """The Schema table row documenting one field, or None when it has none."""
+    return next(
+        (
+            line
+            for line in _schema_section().splitlines()
+            if line.startswith(f"| `{field}`")
+        ),
+        None,
+    )
+
+
 @pytest.mark.parametrize("field", MODELLED_FIELDS)
 def test_every_modelled_field_appears_in_the_readme(field):
     # Given the canonical shape of a Book Note
-    # Then the README names it. Seven were missing, including `libris_id`, which
-    # is the identity everything else hangs off.
-    assert f"`{field}`" in _schema_section(), (
-        f"{field} is in MODELLED_FIELDS but not in the README's Schema section."
+    # Then the README gives it a row of its own. A substring search over the
+    # section passed on a mention in someone else's prose - `date_added` is
+    # named in the `libris_id` row - so a field could lose its row and still
+    # look documented. The acceptance criterion is "appears under its real
+    # name", which means a row.
+    assert field in _named_fields(_schema_section()), (
+        f"{field} is in MODELLED_FIELDS but has no row in the README's Schema section."
     )
 
 
@@ -79,25 +94,26 @@ def test_the_readme_invents_no_fields():
 @pytest.mark.parametrize("field,values", sorted(FIELD_VOCABULARIES.items()))
 def test_a_field_with_a_closed_vocabulary_states_it(field, values):
     # Given a field whose values the Library defines
-    section = _schema_section()
+    row = _field_row(field)
+    assert row is not None, f"{field} has no row in the README's Schema section."
 
-    # Then the README lists them. A reader consulting this to write a note by
-    # hand needs to know that "Finished" is not a status, which is the mistake
-    # the CLI's own prompt used to make.
+    # Then its own row lists them, each as a bolded token. Two ways of checking
+    # this were wrong before it worked. A plain substring search cannot tell a
+    # value from one containing it - "To Read" is inside "Not To Read". Bolding
+    # fixed that but scanning the whole section did not: dropping **Read** from
+    # the status vocabulary still passed, because the `date_finished` row says
+    # "becomes **Read**". A vocabulary is stated where the field is documented
+    # or it is not stated.
     for value in values:
-        assert value in section, (
-            f"{field} may be {value!r}, and the README does not say so."
+        assert f"**{value}**" in row, (
+            f"{field} may be {value!r}, and its README row does not state it."
         )
 
 
 @pytest.mark.parametrize("field", sorted(MULTI_VALUED_FIELDS & set(MODELLED_FIELDS)))
 def test_a_field_holding_several_values_is_marked_as_such(field):
     # Given a modelled field that holds a list
-    section = _schema_section()
-    row = next(
-        (line for line in section.splitlines() if line.startswith(f"| `{field}`")),
-        None,
-    )
+    row = _field_row(field)
     assert row is not None, f"{field} has no row in the README's Schema section."
 
     # Then its row says so. `status: [Read]` is refused and `format: Audiobook`

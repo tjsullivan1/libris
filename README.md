@@ -371,7 +371,7 @@ written today and a note migrated from 2019 come out the same (ADR 0005).
 | --- | --- |
 | `libris_id` | What identifies this note, and the only thing that does. A ULID, minted from `date_added` so the Shelf sorts in the order it was acquired. It survives a rename and a merge — a note merged away leaves its id on the survivor's `superseded_ids`, so a reference to it still resolves (ADR 0001, ADR 0014). |
 | `title` | The book's title. Libris owns this field; enrichment may fill it, a reader may correct it. |
-| `authors` | A **list**. Some notes write an author as a wikilink to their own note, which is preserved — unwrapping it would delete an edge in the graph. |
+| `authors` | Always a **list**, even for one author. Some notes write an author as a wikilink to their own note, which is preserved — unwrapping it would delete an edge in the graph. |
 
 ### Bibliographic
 
@@ -384,7 +384,7 @@ Filled from Google Books, and describing the edition rather than the reading.
 | `date_published` | |
 | `google_books_id` | The volume this note was enriched from. |
 | `cover_thumbnail` | |
-| `genres` | A **list**. |
+| `genres` | A **list**, or a bare string for a single genre — 187 notes on this Shelf are written that way. |
 | `series` | |
 
 ### Reading
@@ -399,7 +399,7 @@ and only they can say which stands (ADR 0018).
 | `priority` | One of **Low**, **Medium**, **High**. |
 | `rating` | |
 | `format` | A **list**, each one of **Physical**, **Ebook**, **Audiobook** (ADR 0017). |
-| `tags` | A **list**. Every note carries `Book`. |
+| `tags` | Conceptually a **list**, but written as a bare string when it holds one value — 2,239 notes on this Shelf do and 824 use a list, and both read the same. Every note carries `Book`. |
 | `referred_by` | Who suggested it. |
 
 ### Dates
