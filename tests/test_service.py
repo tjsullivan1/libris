@@ -20,6 +20,7 @@ from libris.service import (
     MAX_SEARCH_LIMIT,
     BookNotFound,
     DecisionStatus,
+    IsbnAgreement,
     Outcome,
     add_book,
     apply_decisions,
@@ -27,6 +28,7 @@ from libris.service import (
     find_by_libris_id,
     find_encoding_damage,
     find_existing,
+    find_id_collisions,
     is_isbn10,
     search_library,
     update_book,
@@ -1316,3 +1318,268 @@ def test_a_parseable_note_still_reads_its_identifiers_normally(tmp_path):
     # Then nothing about the raw-text fallback changed the normal path
     assert found["ok.md"].google_books_id == "vol9"
     assert found["ok.md"].identifier == "vol9"
+
+
+# --- Book Notes contesting one identity (#75) -------------------------------
+
+
+def _note_with_id(vault, name, libris_id, title="A Book", isbn=None):
+    """Write a Book Note claiming a given Libris ID."""
+    lines = [f"libris_id: {libris_id}", f"title: {title}", "authors:", "  - An Author"]
+    if isbn:
+        lines.append(f'isbn: "{isbn}"')
+    (vault / name).write_text(
+        "---\n" + "\n".join(lines) + "\n---\n\nBody.\n", encoding="utf-8"
+    )
+    return vault / name
+
+
+def test_two_notes_claiming_one_identity_are_reported(tmp_path):
+    # Given two Book Notes carrying the same Libris ID, as the real Shelf holds
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "b.md", "01M0WQEHRZ6KZK0D3BM7C2YXEM")
+    _note_with_id(vault, "a.md", "01M0WQEHRZ6KZK0D3BM7C2YXEM")
+
+    # When the Shelf is inspected
+    collisions = find_id_collisions(vault)
+
+    # Then the contested identity is reported, with its notes in filename order
+    # so two runs report it the same way
+    assert len(collisions) == 1
+    assert collisions[0].libris_id == "01M0WQEHRZ6KZK0D3BM7C2YXEM"
+    assert [note.path.name for note in collisions[0].notes] == ["a.md", "b.md"]
+
+
+def test_distinct_identities_are_not_reported(tmp_path):
+    # Given notes that each hold their own identity
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "a.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    _note_with_id(vault, "b.md", "01BBBBBBBBBBBBBBBBBBBBBBBB")
+
+    # When the Shelf is inspected
+    # Then nothing is reported
+    assert find_id_collisions(vault) == []
+
+
+def test_notes_without_an_identity_are_not_a_collision(tmp_path):
+    # Given two notes that carry no Libris ID at all
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("a.md", "b.md"):
+        (vault / name).write_text(
+            "---\ntitle: A Book\nauthors:\n  - An Author\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    # When the Shelf is inspected
+    # Then they are not reported as contesting one identity. Sharing "no id" is
+    # a different problem, and ensure_frontmatter_fields already mints one.
+    assert find_id_collisions(vault) == []
+
+
+def test_a_collision_says_whether_the_notes_name_one_book(tmp_path):
+    # Given one identity held by two notes naming the same ISBN, and another
+    # held by two notes naming different ones
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "same1.md", "01AAAAAAAAAAAAAAAAAAAAAAAA", isbn="9780000000001")
+    _note_with_id(vault, "same2.md", "01AAAAAAAAAAAAAAAAAAAAAAAA", isbn="9780000000001")
+    _note_with_id(vault, "diff1.md", "01BBBBBBBBBBBBBBBBBBBBBBBB", isbn="9780000000001")
+    _note_with_id(vault, "diff2.md", "01BBBBBBBBBBBBBBBBBBBBBBBB", isbn="9780000000002")
+
+    # When the Shelf is inspected
+    found = {c.libris_id: c for c in find_id_collisions(vault)}
+
+    # Then the fact that most often decides merge-versus-remint travels with the
+    # collision - without the report making that decision
+    assert found["01AAAAAAAAAAAAAAAAAAAAAAAA"].isbn_agreement is IsbnAgreement.SAME
+    assert found["01BBBBBBBBBBBBBBBBBBBBBBBB"].isbn_agreement is IsbnAgreement.DIFFERENT
+
+
+def test_reporting_a_collision_writes_nothing(tmp_path):
+    # Given two notes contesting an identity
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    first = _note_with_id(vault, "a.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    second = _note_with_id(vault, "b.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    before = (first.read_bytes(), second.read_bytes())
+
+    # When the Shelf is inspected
+    find_id_collisions(vault)
+
+    # Then neither note is touched. Merging or re-minting without being asked is
+    # exactly what this must not do.
+    assert (first.read_bytes(), second.read_bytes()) == before
+
+
+def test_a_collision_is_found_even_when_a_notes_frontmatter_will_not_parse(tmp_path):
+    # Given two notes contesting one identity, one of which has frontmatter that
+    # will not parse
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "good.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (vault / "broken.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: [unclosed\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    collisions = find_id_collisions(vault)
+
+    # Then both notes are counted. Reading through the index dropped the
+    # unparseable one - BookNote.read returns None - so the collision went
+    # unreported exactly when a note was damaged, which is what this check is
+    # for (#75).
+    assert len(collisions) == 1
+    assert [note.path.name for note in collisions[0].notes] == ["broken.md", "good.md"]
+
+
+def test_every_check_reads_a_damaged_note_the_same_way(tmp_path):
+    # Given one note whose frontmatter will not parse, holding both an identity
+    # and a lost character
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "a.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: [unclosed\n"
+        'authors:\n  - "S�ren Kierkegaard"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    (vault / "b.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: Another\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+    # When both checks run
+    collisions = find_id_collisions(vault)
+    damaged = find_encoding_damage(vault)
+
+    # Then neither check pretends the damaged note is absent. Two checks with
+    # two ideas of how to read a note is what let a collision hide.
+    assert [note.path.name for note in collisions[0].notes] == ["a.md", "b.md"]
+    assert any(entry.path.name == "a.md" for entry in damaged)
+
+
+def test_a_collision_reads_a_damaged_notes_isbn_and_title(tmp_path):
+    # Given two notes claiming one identity and plainly naming one ISBN, where
+    # one note's frontmatter will not parse
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "good.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Calendar of Wisdom\n"
+        'isbn: "9781847495631"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    (vault / "broken.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Calendar of Wisdom\n"
+        'authors: [unclosed\nisbn: "9781847495631"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    collision = find_id_collisions(vault)[0]
+
+    # Then the damaged note's scalars are read from its raw text. Reading it as
+    # holding nothing did not merely lose detail - it inverted the answer, and
+    # doctor advised re-minting an id where merging was right.
+    assert collision.titles == ["A Calendar of Wisdom", "A Calendar of Wisdom"]
+    assert collision.isbn_agreement is IsbnAgreement.SAME
+
+
+def test_a_damaged_note_reports_no_authors_rather_than_guessing(tmp_path):
+    # Given a note whose frontmatter will not parse and whose authors are a list
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("a.md", "b.md"):
+        (vault / name).write_text(
+            "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n"
+            'authors: [unclosed\n  - "An Author"\n---\n\nBody.\n',
+            encoding="utf-8",
+        )
+
+    # When the Shelf is inspected
+    collision = find_id_collisions(vault)[0]
+
+    # Then no authors are claimed. A list cannot be read from one raw line, and
+    # reporting none is honest where guessing is not.
+    assert all(note.authors == [] for note in collision.notes)
+
+
+def test_a_missing_isbn_is_unknown_rather_than_disagreement(tmp_path):
+    # Given one identity held by two notes where only one names an ISBN
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "has.md", "01AAAAAAAAAAAAAAAAAAAAAAAA", isbn="9780000000001")
+    _note_with_id(vault, "none.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    # When the Shelf is inspected
+    collision = find_id_collisions(vault)[0]
+
+    # Then the answer is UNKNOWN, not DIFFERENT. A note carrying no ISBN says
+    # nothing about which book it is, and a boolean reported that silence as
+    # disagreement - which read as "these are different books" and would have
+    # sent someone to re-mint an id for two copies of one.
+    assert collision.isbn_agreement is IsbnAgreement.UNKNOWN
+
+
+def test_no_colliding_note_naming_an_isbn_is_also_unknown(tmp_path):
+    # Given two notes contesting an identity, neither naming an ISBN
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "a.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    _note_with_id(vault, "b.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    # When the Shelf is inspected
+    # Then two silences do not agree with each other
+    assert find_id_collisions(vault)[0].isbn_agreement is IsbnAgreement.UNKNOWN
+
+
+def test_a_collision_is_found_when_a_note_never_closes_its_frontmatter(tmp_path):
+    # Given two notes contesting one identity, one of which opens a frontmatter
+    # block and never closes it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "good.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (vault / "unclosed.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: S�ren\n",
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    collisions = find_id_collisions(vault)
+    damaged = {entry.path.name: entry for entry in find_encoding_damage(vault)}
+
+    # Then the unclosed note is counted. `split_frontmatter` returns None for it,
+    # and treating that as "all body" lost the identity stated on its second line.
+    assert len(collisions) == 1
+    assert [note.path.name for note in collisions[0].notes] == [
+        "good.md",
+        "unclosed.md",
+    ]
+
+    # And its damage is filed as frontmatter rather than as the reader's prose,
+    # which is what an unterminated block actually holds
+    assert list(damaged["unclosed.md"].fields) == ["frontmatter (unparseable)"]
+
+
+def test_a_file_with_no_fence_at_all_is_still_all_body(tmp_path):
+    # Given a file that never opens a frontmatter block
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "loose.md").write_text(
+        "Just prose, mentioning Ren� Descartes.\n", encoding="utf-8"
+    )
+
+    # When the Shelf is inspected
+    damaged = {entry.path.name: entry for entry in find_encoding_damage(vault)}
+
+    # Then it is body, not frontmatter. Only a file that opens a fence gets the
+    # benefit of the doubt about what its author meant.
+    assert list(damaged["loose.md"].fields) == ["body"]

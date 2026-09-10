@@ -62,7 +62,14 @@ from .note_format import (
     parse_frontmatter_yaml,
     validate_field_value,
 )
-from .service import LOST_CHARACTER, apply_decisions, find_encoding_damage
+from .service import (
+    LOST_CHARACTER,
+    EncodingDamage,
+    IdCollision,
+    IsbnAgreement,
+    apply_decisions,
+    inspect_shelf,
+)
 
 # Windows consoles and redirected output default to cp1252, which cannot encode
 # 39 of this Shelf's filenames - they carry U+FFFD where an accent was lost. A
@@ -920,29 +927,55 @@ def _excerpt_damage(value: str, width: int = 36) -> str:
     return lead + " ... ".join(windows) + tail
 
 
-@app.command()
-def doctor(
-    verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="Show every damaged string, not a summary"
-    ),
-):
-    """Report damage on the Shelf that a person needs to decide about.
+def _report_id_collisions(collisions: list[IdCollision]) -> None:
+    """Print the Book Notes that claim one Libris ID.
 
-    Reads and reports. Nothing is written, and nothing is asked of the network:
-    the point is to see the damage before anything proposes a repair for it.
-
-    Currently reports lost characters - a note carrying the replacement
-    character where an accented letter used to be (#78). The letter itself is
-    gone from the file, so the correct spelling has to come from the API or from
-    a reader, and neither belongs in a report.
+    Args:
+        collisions: The collisions from `inspect_shelf`, which runs this check
+            and the encoding one over a single pass of the Shelf.
     """
-    vault_path = _require_vault_path()
+    typer.echo(f"{len(collisions)} Libris ID(s) are claimed by more than one note.\n")
+    for collision in collisions:
+        typer.echo(f"  {collision.libris_id}")
+        for note in collision.notes:
+            typer.echo(f"    {note.path.name}")
+        # The fact leads and the implication follows it, marked as the
+        # heuristic it is. ADR 0003 forbids acting on a guess, not saying what
+        # a fact usually means - but a report that only prints "ISBNs match"
+        # makes its reader re-derive the consequence every time.
+        isbns = sorted({note.isbn for note in collision.notes if note.isbn})
+        if collision.isbn_agreement is IsbnAgreement.SAME:
+            typer.echo(f"    Both name ISBN {isbns[0]}.")
+            typer.echo(
+                "      Usually one note copied and edited, where merging is the repair."
+            )
+        elif collision.isbn_agreement is IsbnAgreement.DIFFERENT:
+            typer.echo(f"    They name different ISBNs: {', '.join(isbns)}.")
+            typer.echo(
+                "      Usually two books that ended up sharing an identity, "
+                "where re-minting one id is the repair."
+            )
+        else:
+            # Said as ignorance rather than as disagreement. A note with no ISBN
+            # says nothing about which book it is, and printing "different books"
+            # here would send someone to re-mint an id for two copies of one.
+            typer.echo(
+                "    At least one names no ISBN, so nothing here says whether "
+                "these are one book. Compare them before choosing."
+            )
+    typer.echo(
+        "\nNothing is merged or re-minted here. Which repair is right depends on "
+        "whether these are one book, and only a person can say (ADR 0003)."
+    )
 
-    damaged = find_encoding_damage(vault_path)
-    if not damaged:
-        typer.echo("No lost characters on the Shelf.")
-        return
 
+def _report_encoding_damage(damaged: list[EncodingDamage], verbose: bool) -> None:
+    """Print the notes that have lost a character to a bad decode.
+
+    Args:
+        damaged: The lost characters from `inspect_shelf`.
+        verbose: Whether to print every damaged string as well as the summary.
+    """
     in_place = [note for note in damaged if not note.touches_filename]
     renames = [note for note in damaged if note.touches_filename]
     unidentifiable = [note for note in damaged if note.identifier is None]
@@ -986,6 +1019,48 @@ def doctor(
             for value in values:
                 typer.echo(f"  {name}: {_excerpt_damage(value)}")
         typer.echo("")
+
+
+@app.command()
+def doctor(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show every damaged string, not a summary"
+    ),
+):
+    """Report damage on the Shelf that a person needs to decide about.
+
+    Reads and reports. Nothing is written, and nothing is asked of the network:
+    the point is to see the damage before anything proposes a repair for it.
+
+    Two checks so far, both of which end in a judgement the Library cannot make:
+
+    Contested identities - two Book Notes claiming one Libris ID (#75). Merging
+    is right when they are one book and re-minting is right when they are not,
+    and the identity alone does not say which.
+
+    Lost characters - a note carrying the replacement character where an
+    accented letter used to be (#78). The letter itself is gone from the file,
+    so the correct spelling has to come from the API or from a reader.
+    """
+    vault_path = _require_vault_path()
+
+    # One pass for both checks. Called separately they each read the Shelf,
+    # which meant reading 3,063 files twice.
+    report = inspect_shelf(vault_path)
+    collisions = report.collisions
+    damaged = report.encoding_damage
+
+    if report.is_clean:
+        typer.echo("Nothing on the Shelf needs a decision.")
+        return
+
+    if collisions:
+        _report_id_collisions(collisions)
+
+    if damaged:
+        if collisions:
+            typer.echo("")
+        _report_encoding_damage(damaged, verbose)
 
 
 @app.command()
