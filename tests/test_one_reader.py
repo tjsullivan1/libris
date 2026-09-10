@@ -25,7 +25,12 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "libris"
 # the defect this guards and several modules legitimately do it. What must not
 # spread is code that decides whether some text *is* a fence, because that is
 # the knowledge that drifted nine ways in #101.
-_PARSING_CALLS = {"match", "search", "fullmatch", "sub", "findall", "split", "compile"}
+#
+# The two are told apart by metacharacters: a pattern that reads a fence
+# anchors, escapes or groups, and a string that composes one does none of it.
+# Written with chr(92) rather than a backslash so this file does not trip its
+# own guard.
+_PATTERN_TOKENS = ("^", chr(92) + "s", "(.*", "(?", "[^", chr(92) + "n(")
 
 # Walking the whole Shelf to look for damage is what `_read_shelf` is for.
 # `index_for` is a cached index for Library queries, and `BookNote.read` returns
@@ -65,17 +70,21 @@ def _fence_parsers(source: str) -> list[str]:
             ):
                 found.append(f"line {node.lineno}: compares against a --- fence")
 
-        # `re.match(r"^---...", ...)` and friends.
+        # Every fence-matching pattern in the module, wherever it sits. Checking
+        # only the first argument of `re.match(...)` would miss
+        # `PATTERN = r"^---"` used a hundred lines later - and a guard against a
+        # future author that only catches the naive spelling is not much of one.
+        #
+        # A pattern is told from a composed fence by its metacharacters:
+        # `f"---\n{frontmatter}\n---\n"` writes a note back out and carries
+        # none, while `r"^---\s*\n(.*?)\n---"` reads one and carries several.
         if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in _PARSING_CALLS
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-            and "---" in node.args[0].value
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and "---" in node.value
+            and any(token in node.value for token in _PATTERN_TOKENS)
         ):
-            found.append(f"line {node.lineno}: parses a --- fence with a pattern")
+            found.append(f"line {node.lineno}: holds a --- fence pattern")
 
     return found
 
@@ -107,11 +116,16 @@ def test_a_damage_check_does_not_read_the_shelf_through_the_index():
     offenders = []
     for name in _DAMAGE_CHECKS:
         assert name in functions, f"{name} has been renamed; update ADR 0028's test"
-        called = {
-            node.func.id
-            for node in ast.walk(functions[name])
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        }
+        # Both spellings: `index_for(...)` and `shelf.index_for(...)`. A guard
+        # that only sees the bare name is undone by an import style change.
+        called = set()
+        for call in ast.walk(functions[name]):
+            if not isinstance(call, ast.Call):
+                continue
+            if isinstance(call.func, ast.Name):
+                called.add(call.func.id)
+            elif isinstance(call.func, ast.Attribute):
+                called.add(call.func.attr)
         if "index_for" in called:
             offenders.append(name)
 
