@@ -59,43 +59,29 @@ def _fence_parsers(source: str) -> list[str]:
     tree = ast.parse(source)
 
     for node in ast.walk(tree):
-        # `something == "---"`, or `line.strip() != "---"`.
-        if isinstance(node, ast.Compare):
-            operands = [node.left, *node.comparators]
-            if any(
-                isinstance(operand, ast.Constant)
-                and isinstance(operand.value, str)
-                and operand.value.strip() == "---"
-                for operand in operands
-            ):
-                found.append(f"line {node.lineno}: compares against a --- fence")
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
 
-        # `content.startswith("---")`, `text.split("---")`, `.partition`,
-        # `.removeprefix`, `.find` - none of which is a Compare, and none of
-        # which carries a regex metacharacter, so neither branch below sees
-        # them. Any call handed a bare fence is deciding what a fence is,
-        # whatever the method happens to be called.
-        if isinstance(node, ast.Call) and any(
-            isinstance(argument, ast.Constant)
-            and isinstance(argument.value, str)
-            and argument.value.strip() == "---"
-            for argument in node.args
-        ):
-            found.append(f"line {node.lineno}: passes a bare --- fence to a call")
-
-        # Every fence-matching pattern in the module, wherever it sits. Checking
-        # only the first argument of `re.match(...)` would miss
-        # `PATTERN = r"^---"` used a hundred lines later - and a guard against a
-        # future author that only catches the naive spelling is not much of one.
+        # A fence literal at all. Not "compared against a fence" or "passed to
+        # a call" - those were two spellings of this, and chasing spellings is
+        # how three rounds of review each found one more. A module outside
+        # markdown.py holding `"---"` is already carrying the knowledge ADR 0028
+        # says lives in one place, whatever it goes on to do with it. That also
+        # covers `FENCE = "---"` used a hundred lines later, which no check at
+        # the point of use can see.
         #
-        # A pattern is told from a composed fence by its metacharacters:
-        # `f"---\n{frontmatter}\n---\n"` writes a note back out and carries
-        # none, while `r"^---\s*\n(.*?)\n---"` reads one and carries several.
-        if (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and "---" in node.value
-            and any(token in node.value for token in _PATTERN_TOKENS)
+        # Exactly `"---"`, not stripped to it. A piece of a composed note
+        # carries its layout, newlines and all, and writing a note back out is
+        # not the defect this guards - migrate builds one by concatenation. A
+        # fence being *recognised* never carries the newline.
+        if node.value == "---":
+            found.append(f"line {node.lineno}: holds a --- fence literal")
+            continue
+
+        # A regex that reads a fence carries metacharacters; a string composing
+        # one carries none.
+        if "---" in node.value and any(
+            token in node.value for token in _PATTERN_TOKENS
         ):
             found.append(f"line {node.lineno}: holds a --- fence pattern")
 
