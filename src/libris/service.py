@@ -8,6 +8,7 @@ adapter decides what a failure looks like on the wire.
 
 import math
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -874,10 +875,6 @@ class _ShelfFile:
     unparsed_frontmatter: str
     body: str
 
-    def __iter__(self):
-        """Unpack as (path, frontmatter, unparsed_frontmatter, body)."""
-        return iter((self.path, self.frontmatter, self.unparsed_frontmatter, self.body))
-
     def value(self, key: str) -> object:
         """Read a frontmatter field, whether or not the block parsed.
 
@@ -920,7 +917,7 @@ class _ShelfFile:
         return recovered
 
 
-def _read_shelf(vault_path: Path):
+def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
     """Read every file on the Shelf, damaged ones included.
 
     `index_for` cannot be used for this. It drops a note whose frontmatter will
@@ -999,7 +996,7 @@ def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
     return _encoding_damage_in(_read_shelf(vault_path))
 
 
-def _encoding_damage_in(files) -> list[EncodingDamage]:
+def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
     """Find the lost characters among already-read Shelf files.
 
     Args:
@@ -1010,7 +1007,11 @@ def _encoding_damage_in(files) -> list[EncodingDamage]:
     """
     damaged: list[EncodingDamage] = []
 
-    for path, frontmatter, unparsed_frontmatter, body in files:
+    for shelf_file in files:
+        path = shelf_file.path
+        frontmatter = shelf_file.frontmatter
+        unparsed_frontmatter = shelf_file.unparsed_frontmatter
+        body = shelf_file.body
         fields: dict[str, list[str]] = {}
 
         if LOST_CHARACTER in path.name:
@@ -1149,7 +1150,7 @@ def find_id_collisions(vault_path: Path) -> list[IdCollision]:
     return _id_collisions_in(_read_shelf(vault_path))
 
 
-def _id_collisions_in(files) -> list[IdCollision]:
+def _id_collisions_in(files: Iterable["_ShelfFile"]) -> list[IdCollision]:
     """Find the contested identities among already-read Shelf files.
 
     Args:

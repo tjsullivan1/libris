@@ -779,4 +779,6 @@ def test_doctor_does_not_claim_different_books_when_an_isbn_is_missing(
     # Then it says it does not know, rather than asserting they differ
     assert result.exit_code == 0
     assert "names no ISBN" in result.output
-    assert "different" not in result.output
+    # The specific claim, not the bare word: asserting "different" is absent
+    # would start failing the day any unrelated line of doctor output used it.
+    assert "different ISBNs" not in result.output
