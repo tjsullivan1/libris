@@ -754,3 +754,29 @@ def test_doctor_reports_both_kinds_of_damage_together(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "claimed by more than one note" in result.output
     assert "have lost a character" in result.output
+
+
+def test_doctor_does_not_claim_different_books_when_an_isbn_is_missing(
+    tmp_path, monkeypatch
+):
+    # Given two notes contesting an identity where only one names an ISBN
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "has.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n"
+        'isbn: "9780000000001"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    (vault / "none.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When the doctor runs
+    result = CliRunner().invoke(app, ["doctor"])
+
+    # Then it says it does not know, rather than asserting they differ
+    assert result.exit_code == 0
+    assert "names no ISBN" in result.output
+    assert "different" not in result.output

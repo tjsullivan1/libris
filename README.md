@@ -164,7 +164,7 @@ libris doctor --verbose
 
 Two checks so far, both ending in a judgement Libris will not make for you.
 
-**Contested identities** — two Book Notes claiming one Libris ID. `find_by_libris_id` returns whichever the scan reaches first, so an Intent naming that id can apply to a different book on a different run. Merging is right when the notes are one book and re-minting one id is right when they are not, and the identity alone does not say which — so `doctor` reports whether they name the same ISBN and leaves the call to you.
+**Contested identities** — two Book Notes claiming one Libris ID. `find_by_libris_id` returns whichever the scan reaches first, so an Intent naming that id can apply to a different book on a different run. Merging is right when the notes are one book and re-minting one id is right when they are not, and the identity alone does not say which — so `doctor` reports what the ISBNs say — the same one, different ones, or nothing at all when a note names none — and leaves the call to you.
 
 **Lost characters**: a note carrying `�` where an accented letter used to be. The letter itself is gone from the file, so `doctor` says which notes are affected and what identifies them — it never guesses at the correct spelling, because there is no way to tell `S�ren` from Søren, Sören or Suren without asking the API or a reader.
 

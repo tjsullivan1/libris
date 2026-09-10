@@ -62,7 +62,12 @@ from .note_format import (
     parse_frontmatter_yaml,
     validate_field_value,
 )
-from .service import LOST_CHARACTER, apply_decisions, inspect_shelf
+from .service import (
+    LOST_CHARACTER,
+    IsbnAgreement,
+    apply_decisions,
+    inspect_shelf,
+)
 
 # Windows consoles and redirected output default to cp1252, which cannot encode
 # 39 of this Shelf's filenames - they carry U+FFFD where an accent was lost. A
@@ -932,15 +937,23 @@ def _report_id_collisions(collisions: list) -> None:
         typer.echo(f"  {collision.libris_id}")
         for note in collision.notes:
             typer.echo(f"    {note.path.name}")
-        if collision.share_an_isbn:
+        if collision.isbn_agreement is IsbnAgreement.SAME:
             typer.echo(
                 "    These name the same ISBN, so this is likely one note copied "
                 "and edited - merging is probably right."
             )
-        else:
+        elif collision.isbn_agreement is IsbnAgreement.DIFFERENT:
             typer.echo(
-                "    These name different books, so re-minting one id is probably "
+                "    These name different ISBNs, so re-minting one id is probably "
                 "right rather than merging."
+            )
+        else:
+            # Said as ignorance rather than as disagreement. A note with no ISBN
+            # says nothing about which book it is, and printing "different books"
+            # here would send someone to re-mint an id for two copies of one.
+            typer.echo(
+                "    At least one names no ISBN, so nothing here says whether "
+                "these are one book. Compare them before choosing."
             )
     typer.echo(
         "\nNothing is merged or re-minted here. Which repair is right depends on "

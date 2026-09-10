@@ -1061,6 +1061,19 @@ def _encoding_damage_in(files) -> list[EncodingDamage]:
     return damaged
 
 
+class IsbnAgreement(Enum):
+    """Whether the notes contesting an identity name the same book.
+
+    UNKNOWN is not a shade of DIFFERENT. A note carrying no ISBN says nothing
+    about which book it is, and a report that treats silence as disagreement
+    would send someone to re-mint an id for two copies of one book.
+    """
+
+    SAME = "same"
+    DIFFERENT = "different"
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class IdCollision:
     """Book Notes that claim one identity, and what distinguishes them.
@@ -1081,17 +1094,26 @@ class IdCollision:
         return [note.title or "(untitled)" for note in self.notes]
 
     @property
-    def share_an_isbn(self) -> bool:
-        """Whether every colliding note names the same ISBN.
+    def isbn_agreement(self) -> "IsbnAgreement":
+        """What the colliding notes' ISBNs say about whether they are one book.
+
+        Three answers rather than two, because a boolean cannot tell "these name
+        different books" from "one of these names no book at all", and reporting
+        the second as the first states more than is known - which is the thing
+        ADR 0003 refuses.
 
         A fact rather than a recommendation, but the one that most often decides
-        which repair is right: notes that agree on an ISBN are usually one book
-        copied and lightly edited, where merging is the answer. Notes that do not
-        are two books that ended up sharing an identity, where re-minting one is.
-        Which of those it is remains a person's call (ADR 0003).
+        which repair is right: notes agreeing on an ISBN are usually one book
+        copied and lightly edited, where merging is the answer; notes naming
+        different ones are two books that ended up sharing an identity, where
+        re-minting is. Which it is remains a person's call.
         """
         isbns = {note.isbn for note in self.notes}
-        return len(isbns) == 1 and None not in isbns
+        if None in isbns:
+            return IsbnAgreement.UNKNOWN
+        if len(isbns) == 1:
+            return IsbnAgreement.SAME
+        return IsbnAgreement.DIFFERENT
 
 
 def find_id_collisions(vault_path: Path) -> list[IdCollision]:

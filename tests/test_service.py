@@ -20,6 +20,7 @@ from libris.service import (
     MAX_SEARCH_LIMIT,
     BookNotFound,
     DecisionStatus,
+    IsbnAgreement,
     Outcome,
     add_book,
     apply_decisions,
@@ -1393,8 +1394,8 @@ def test_a_collision_says_whether_the_notes_name_one_book(tmp_path):
 
     # Then the fact that most often decides merge-versus-remint travels with the
     # collision - without the report making that decision
-    assert found["01AAAAAAAAAAAAAAAAAAAAAAAA"].share_an_isbn is True
-    assert found["01BBBBBBBBBBBBBBBBBBBBBBBB"].share_an_isbn is False
+    assert found["01AAAAAAAAAAAAAAAAAAAAAAAA"].isbn_agreement is IsbnAgreement.SAME
+    assert found["01BBBBBBBBBBBBBBBBBBBBBBBB"].isbn_agreement is IsbnAgreement.DIFFERENT
 
 
 def test_reporting_a_collision_writes_nothing(tmp_path):
@@ -1486,7 +1487,7 @@ def test_a_collision_reads_a_damaged_notes_isbn_and_title(tmp_path):
     # holding nothing did not merely lose detail - it inverted the answer, and
     # doctor advised re-minting an id where merging was right.
     assert collision.titles == ["A Calendar of Wisdom", "A Calendar of Wisdom"]
-    assert collision.share_an_isbn is True
+    assert collision.isbn_agreement is IsbnAgreement.SAME
 
 
 def test_a_damaged_note_reports_no_authors_rather_than_guessing(tmp_path):
@@ -1506,3 +1507,32 @@ def test_a_damaged_note_reports_no_authors_rather_than_guessing(tmp_path):
     # Then no authors are claimed. A list cannot be read from one raw line, and
     # reporting none is honest where guessing is not.
     assert all(note.authors == [] for note in collision.notes)
+
+
+def test_a_missing_isbn_is_unknown_rather_than_disagreement(tmp_path):
+    # Given one identity held by two notes where only one names an ISBN
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "has.md", "01AAAAAAAAAAAAAAAAAAAAAAAA", isbn="9780000000001")
+    _note_with_id(vault, "none.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    # When the Shelf is inspected
+    collision = find_id_collisions(vault)[0]
+
+    # Then the answer is UNKNOWN, not DIFFERENT. A note carrying no ISBN says
+    # nothing about which book it is, and a boolean reported that silence as
+    # disagreement - which read as "these are different books" and would have
+    # sent someone to re-mint an id for two copies of one.
+    assert collision.isbn_agreement is IsbnAgreement.UNKNOWN
+
+
+def test_no_colliding_note_naming_an_isbn_is_also_unknown(tmp_path):
+    # Given two notes contesting an identity, neither naming an ISBN
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "a.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    _note_with_id(vault, "b.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    # When the Shelf is inspected
+    # Then two silences do not agree with each other
+    assert find_id_collisions(vault)[0].isbn_agreement is IsbnAgreement.UNKNOWN
