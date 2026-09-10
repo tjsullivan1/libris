@@ -849,6 +849,13 @@ def _raw_frontmatter_value(text: str, key: str) -> str | None:
     return None
 
 
+# What a check may recover from frontmatter that will not parse. Scalars only,
+# each written on one line by every note on the Shelf. A list cannot be read
+# this way, so `authors` is deliberately absent: reporting no authors is honest
+# where guessing at them is not.
+_RECOVERABLE_SCALARS = ("libris_id", "title", "isbn", "google_books_id")
+
+
 @dataclass
 class _ShelfFile:
     """One file on the Shelf, in the parts a check can look at.
@@ -884,6 +891,33 @@ class _ShelfFile:
         if self.frontmatter:
             return self.frontmatter.get(key)
         return _raw_frontmatter_value(self.unparsed_frontmatter, key)
+
+    def as_frontmatter(self) -> dict:
+        """The best mapping available, for a check that needs a `BookNote`.
+
+        Building a `BookNote` from `frontmatter` alone reads a damaged note as
+        holding nothing: no title, no ISBN. That is not merely incomplete, it
+        inverts an answer - two notes that plainly name one ISBN were reported
+        as naming different books, and `doctor` recommended re-minting an id
+        where merging was right.
+
+        Recovering only scalars is the whole of what raw text can honestly give.
+        A list - `authors` - cannot be read from one line, so a damaged note
+        reports no authors rather than a guess at them.
+
+        Returns:
+            The parsed frontmatter when the block parsed, otherwise whichever of
+            the identifying scalars the raw text states outright.
+        """
+        if self.frontmatter or not self.unparsed_frontmatter:
+            return self.frontmatter
+
+        recovered: dict = {}
+        for key in _RECOVERABLE_SCALARS:
+            found = _raw_frontmatter_value(self.unparsed_frontmatter, key)
+            if found is not None:
+                recovered[key] = found
+        return recovered
 
 
 def _read_shelf(vault_path: Path):
@@ -1096,7 +1130,7 @@ def _id_collisions_in(files) -> list[IdCollision]:
         identity = shelf_file.value("libris_id")
         if not isinstance(identity, str) or not identity.strip():
             continue
-        note = BookNote(path=shelf_file.path, frontmatter=shelf_file.frontmatter)
+        note = BookNote(path=shelf_file.path, frontmatter=shelf_file.as_frontmatter())
         by_id.setdefault(identity.strip(), []).append(note)
 
     return [

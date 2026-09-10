@@ -1461,3 +1461,48 @@ def test_every_check_reads_a_damaged_note_the_same_way(tmp_path):
     # two ideas of how to read a note is what let a collision hide.
     assert [note.path.name for note in collisions[0].notes] == ["a.md", "b.md"]
     assert any(entry.path.name == "a.md" for entry in damaged)
+
+
+def test_a_collision_reads_a_damaged_notes_isbn_and_title(tmp_path):
+    # Given two notes claiming one identity and plainly naming one ISBN, where
+    # one note's frontmatter will not parse
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "good.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Calendar of Wisdom\n"
+        'isbn: "9781847495631"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+    (vault / "broken.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Calendar of Wisdom\n"
+        'authors: [unclosed\nisbn: "9781847495631"\n---\n\nBody.\n',
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    collision = find_id_collisions(vault)[0]
+
+    # Then the damaged note's scalars are read from its raw text. Reading it as
+    # holding nothing did not merely lose detail - it inverted the answer, and
+    # doctor advised re-minting an id where merging was right.
+    assert collision.titles == ["A Calendar of Wisdom", "A Calendar of Wisdom"]
+    assert collision.share_an_isbn is True
+
+
+def test_a_damaged_note_reports_no_authors_rather_than_guessing(tmp_path):
+    # Given a note whose frontmatter will not parse and whose authors are a list
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("a.md", "b.md"):
+        (vault / name).write_text(
+            "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n"
+            'authors: [unclosed\n  - "An Author"\n---\n\nBody.\n',
+            encoding="utf-8",
+        )
+
+    # When the Shelf is inspected
+    collision = find_id_collisions(vault)[0]
+
+    # Then no authors are claimed. A list cannot be read from one raw line, and
+    # reporting none is honest where guessing is not.
+    assert all(note.authors == [] for note in collision.notes)

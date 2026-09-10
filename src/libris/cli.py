@@ -924,7 +924,8 @@ def _report_id_collisions(collisions: list) -> None:
     """Print the Book Notes that claim one Libris ID.
 
     Args:
-        collisions: What `find_id_collisions` found.
+        collisions: The collisions from `inspect_shelf`, which runs this check
+            and the encoding one over a single pass of the Shelf.
     """
     typer.echo(f"{len(collisions)} Libris ID(s) are claimed by more than one note.\n")
     for collision in collisions:
@@ -951,7 +952,7 @@ def _report_encoding_damage(damaged: list, verbose: bool) -> None:
     """Print the notes that have lost a character to a bad decode.
 
     Args:
-        damaged: What `find_encoding_damage` found.
+        damaged: The lost characters from `inspect_shelf`.
         verbose: Whether to print every damaged string as well as the summary.
     """
     in_place = [note for note in damaged if not note.touches_filename]
