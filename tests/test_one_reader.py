@@ -70,6 +70,19 @@ def _fence_parsers(source: str) -> list[str]:
             ):
                 found.append(f"line {node.lineno}: compares against a --- fence")
 
+        # `content.startswith("---")`, `text.split("---")`, `.partition`,
+        # `.removeprefix`, `.find` - none of which is a Compare, and none of
+        # which carries a regex metacharacter, so neither branch below sees
+        # them. Any call handed a bare fence is deciding what a fence is,
+        # whatever the method happens to be called.
+        if isinstance(node, ast.Call) and any(
+            isinstance(argument, ast.Constant)
+            and isinstance(argument.value, str)
+            and argument.value.strip() == "---"
+            for argument in node.args
+        ):
+            found.append(f"line {node.lineno}: passes a bare --- fence to a call")
+
         # Every fence-matching pattern in the module, wherever it sits. Checking
         # only the first argument of `re.match(...)` would miss
         # `PATTERN = r"^---"` used a hundred lines later - and a guard against a
