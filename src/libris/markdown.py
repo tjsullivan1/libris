@@ -295,6 +295,10 @@ class FrontmatterUnreadable(ValueError):
 def split_frontmatter(content: str) -> Optional[tuple[str, str]]:
     """Split a note into its frontmatter block and everything after it.
 
+    The one place that knows how a frontmatter fence is written (ADR 0028).
+    Nine hand-rolled splits in three disagreeing dialects preceded it, and a
+    test enforces that a tenth is not added.
+
     Deliberately not a regex. The body is returned exactly as it was found -
     every byte after the line closing the block, blank lines included - because
     an update to one field must not reflow a reader's own writing (ADR 0023).
@@ -313,6 +317,31 @@ def split_frontmatter(content: str) -> Optional[tuple[str, str]]:
         if lines[index].strip() == "---":
             return "".join(lines[1:index]), "".join(lines[index + 1 :])
     return None
+
+
+def unterminated_frontmatter(content: str) -> str | None:
+    """The text of a frontmatter block that was opened and never closed.
+
+    `split_frontmatter` returns None for such a note, because there is no
+    closing fence to split on. That is the right answer for anything writing a
+    note back, and the wrong one for a check whose subject is damaged notes: a
+    note like this states its `libris_id` on the second line, and reading it as
+    prose loses that (#75).
+
+    Lives here rather than at the call site so that how a fence is written stays
+    knowledge this module holds alone (ADR 0028).
+
+    Args:
+        content: The whole file.
+
+    Returns:
+        Everything after the opening fence, or None when the file does not open
+        one - in which case it has no frontmatter rather than a broken block.
+    """
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return None
+    return "".join(lines[1:])
 
 
 def note_newline(path: Path) -> str:
