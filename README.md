@@ -360,16 +360,70 @@ value for "leave this alone" would otherwise erase a field nobody mentioned.
 | The server never connects | Check the command runs on its own: `uv run --directory /path/to/libris libris mcp` should sit there waiting for input rather than exiting. |
 
 ## Schema
-Books are saved as Markdown files with the following frontmatter:
-- `title`
-- `author`
-- `isbn`
-- `page_count`
-- `published_date`
-- `google_books_id`
-- `thumbnail`
-- `genres`
-- `status`
-- `rating`
-- `date_started`
-- `date_finished`
+
+A Book Note is a Markdown file whose frontmatter carries nineteen modelled fields, in four
+groups. The groups are not decoration — they are how `note_format.py` orders them, so a note
+written today and a note migrated from 2019 come out the same (ADR 0005).
+
+### Identity
+
+| Field | |
+| --- | --- |
+| `libris_id` | What identifies this note, and the only thing that does. A ULID, minted from `date_added` so the Shelf sorts in the order it was acquired. It survives a rename and a merge — a note merged away leaves its id on the survivor's `superseded_ids`, so a reference to it still resolves (ADR 0001, ADR 0014). |
+| `title` | The book's title. Libris owns this field; enrichment may fill it, a reader may correct it. |
+| `authors` | Always a **list**, even for one author. Some notes write an author as a wikilink to their own note, which is preserved — unwrapping it would delete an edge in the graph. |
+
+### Bibliographic
+
+Filled from Google Books, and describing the edition rather than the reading.
+
+| Field | |
+| --- | --- |
+| `isbn` | Text, not a number, however it is written. `978-1440629570`, `161145736X` and an unquoted `9781643665504` are all read as the same kind of thing. |
+| `page_count` | |
+| `date_published` | |
+| `google_books_id` | The volume this note was enriched from. |
+| `cover_thumbnail` | |
+| `genres` | A **list**, or a bare string for a single genre — 187 notes on this Shelf are written that way. |
+| `series` | |
+
+### Reading
+
+The reader's own fields. A merge stops and asks about these, and takes the keeper's value
+silently for everything else — two different ratings means somebody rated the same book twice,
+and only they can say which stands (ADR 0018).
+
+| Field | |
+| --- | --- |
+| `status` | One of **To Read**, **Reading**, **Read**, **Not To Read**. |
+| `priority` | One of **Low**, **Medium**, **High**. |
+| `rating` | |
+| `format` | A **list**, each one of **Physical**, **Ebook**, **Audiobook** (ADR 0017). |
+| `tags` | Conceptually a **list**, but written as a bare string when it holds one value — 2,239 notes on this Shelf do and 824 use a list, and both read the same. Every note carries `Book`. |
+| `referred_by` | Who suggested it. |
+
+### Dates
+
+| Field | |
+| --- | --- |
+| `date_added` | Also the source of the `libris_id` timestamp. |
+| `date_started` | Filled when a book becomes **Reading**, if it is empty. |
+| `date_finished` | Filled when a book becomes **Read**, if it is empty. |
+
+Both are only ever filled when empty, so re-marking a dated book leaves the original date
+alone. A re-read is not something the Library models.
+
+### Not modelled, but written
+
+`superseded_ids` appears only on a note that has absorbed another in a merge. It is
+deliberately outside the nineteen: adding it to the canonical shape would write
+`superseded_ids: null` into every note on the Shelf to say nothing.
+
+Fields Libris does not model — ones a plugin added, `aliases` and the like — are preserved
+untouched by every write path.
+
+> This list is checked against `note_format.MODELLED_FIELDS` by a test, because the previous
+> version of it was retyped by hand and drifted: it named `author`, `published_date` and
+> `thumbnail`, none of which exist, and omitted seven that do. Those three names were not
+> only wrong here — the same names in the code made every auto-enrich query title-only, and
+> reported 152 notes as unenriched when 5 were.
