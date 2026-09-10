@@ -149,6 +149,39 @@ def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
     return f"Skipped rename for {filename}: {msg}"
 
 
+def _note_on_the_shelf(vault_path: Path, name: str, books: list[Path]) -> Path:
+    """Resolve a chosen filename to a Book Note, refusing anything that is not one.
+
+    `questionary.autocomplete` offers completions but returns whatever was
+    typed, so a name that is not on the Shelf reaches the caller. Joining that
+    to the Shelf is not merely a typo away from a confusing error: `..` walks
+    out of the vault, and an absolute path replaces it outright -
+    `Path(shelf) / "D:/elsewhere/README.md"` is `D:/elsewhere/README.md`. A
+    mistyped answer could therefore have had Libris write into a file that is
+    not a Book Note at all.
+
+    Checked against the names the Shelf actually holds rather than by
+    normalising the path and testing where it landed. A list of what is allowed
+    cannot be walked out of, and needs no reasoning about how a platform
+    resolves `..`.
+
+    Args:
+        vault_path: The Shelf.
+        name: The filename chosen or typed.
+        books: The Book Notes on the Shelf.
+
+    Returns:
+        The path to that note.
+
+    Raises:
+        typer.Exit: With code 1 when the name is not a note on the Shelf.
+    """
+    if name not in {book.name for book in books}:
+        typer.echo(f"No Book Note called {name!r} is on the Shelf.")
+        raise typer.Exit(code=1)
+    return vault_path / name
+
+
 def _identity_for(path: Path) -> str:
     """The note's Libris ID, minting one when it has none.
 
@@ -209,7 +242,7 @@ def status():
     if not selected_file_name:
         return
 
-    selected_file = vault_path / selected_file_name
+    selected_file = _note_on_the_shelf(vault_path, selected_file_name, books)
 
     # Offered from the Library's own vocabulary rather than a list kept here.
     # This prompt used to offer "Finished", which no note has ever held, and
@@ -474,7 +507,7 @@ def clean(
     if not selected_file_name:
         return
 
-    selected_file = vault_path / selected_file_name
+    selected_file = _note_on_the_shelf(vault_path, selected_file_name, books)
     updated, fm = ensure_frontmatter_fields(selected_file)
     if updated:
         typer.echo(f"Cleaned: {selected_file_name}")
@@ -938,11 +971,9 @@ def enrich(
         if not filename:
             return
 
-    selected_file = vault_path / filename
-
-    if not selected_file.exists():
-        typer.echo(f"File not found: {selected_file}")
-        raise typer.Exit(code=1)
+    # Covers the name typed at the prompt and the one passed as an argument.
+    # The help calls it a filename, not a path, and this is what makes that so.
+    selected_file = _note_on_the_shelf(vault_path, filename, list_books(vault_path))
 
     _enrich_interactive(selected_file)
 

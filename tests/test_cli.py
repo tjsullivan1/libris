@@ -796,17 +796,28 @@ def test_doctor_does_not_claim_different_books_when_an_isbn_is_missing(
 
 
 def _answer_prompts(monkeypatch, filename, new_status):
-    """Stand in for the two prompts `libris status` asks."""
+    """Stand in for the two prompts `libris status` asks.
 
-    def _pick(_message, choices, **kwargs):
-        class _Answer:
-            def ask(self):
-                return filename if filename in choices else new_status
+    Each prompt is patched with its own answer rather than one stand-in that
+    decides by looking at `choices`. The first version did that, and it made
+    the tests below meaningless: a filename deliberately absent from `choices` -
+    which is the whole point of typing something the Shelf does not hold - fell
+    through and answered the *status* prompt instead, so the command never saw
+    the name under test and the assertion passed for the wrong reason.
+    """
 
-        return _Answer()
+    def _answering(value):
+        def _ask(_message, choices=None, **kwargs):
+            class _Answer:
+                def ask(self):
+                    return value
 
-    monkeypatch.setattr("questionary.autocomplete", _pick)
-    monkeypatch.setattr("questionary.select", _pick)
+            return _Answer()
+
+        return _ask
+
+    monkeypatch.setattr("questionary.autocomplete", _answering(filename))
+    monkeypatch.setattr("questionary.select", _answering(new_status))
 
 
 def test_marking_a_book_reading_stamps_the_date_it_was_started(monkeypatch, tmp_path):
@@ -933,3 +944,87 @@ def test_the_readers_own_writing_survives_a_status_change(monkeypatch, tmp_path)
     # Then the body is untouched - indentation, stray "status:" and all. This is
     # #92 and #99 in the one command that now writes through a different path.
     assert path.read_text(encoding="utf-8").endswith(body)
+
+
+# --- a typed answer is not a path (#124 review) -----------------------------
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "../../escaped.md",
+        "nonexistent.md",
+        "Dune - Frank Herbert.md.bak",
+    ],
+    ids=["walks-out", "not-on-the-shelf", "near-miss"],
+)
+def test_status_refuses_a_name_that_is_not_on_the_shelf(monkeypatch, tmp_path, typed):
+    # Given a Shelf with one book, and a file above it that must not be touched
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), vault)
+    outside = tmp_path / "escaped.md"
+    outside.write_text(
+        "---\ntitle: Not a Book Note\n---\n\nLeave me alone.\n", encoding="utf-8"
+    )
+    before = outside.read_bytes()
+
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, typed, "Reading")
+
+    # When someone types it at the prompt, which autocomplete allows because it
+    # offers completions but returns free text
+    result = runner.invoke(app, ["status"])
+
+    # Then nothing is written and it says why. `vault / "../../escaped.md"`
+    # walks out of the Shelf, and an absolute name replaces it outright, so
+    # `_identity_for` could have minted an id into a file that is not a note.
+    assert result.exit_code == 1
+    assert "is on the Shelf" in result.output
+    assert outside.read_bytes() == before
+
+
+def test_status_refuses_an_absolute_path(monkeypatch, tmp_path):
+    # Given a Shelf, and a file elsewhere entirely
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), vault)
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("---\ntitle: Elsewhere\n---\n\nMine.\n", encoding="utf-8")
+    before = outside.read_bytes()
+
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, str(outside), "Reading")
+
+    # When an absolute path is typed
+    result = runner.invoke(app, ["status"])
+
+    # Then it is refused. `Path(shelf) / "/abs/path"` is the absolute path, so
+    # joining discards the Shelf entirely rather than nesting under it.
+    assert result.exit_code == 1
+    assert outside.read_bytes() == before
+
+
+def test_enrich_refuses_a_filename_that_is_not_on_the_shelf(monkeypatch, tmp_path):
+    # Given a Shelf and a file outside it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Dune - Frank Herbert.md").write_text(
+        "---\ntitle: Dune\n---\n\nBody.\n", encoding="utf-8"
+    )
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("---\ntitle: Elsewhere\n---\n\nMine.\n", encoding="utf-8")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When it is passed as the argument, which takes a filename and not a path
+    result = runner.invoke(app, ["enrich", str(outside)])
+
+    # Then it is refused rather than enriched
+    assert result.exit_code == 1
+    assert "is on the Shelf" in result.output
