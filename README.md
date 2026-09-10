@@ -63,7 +63,9 @@ Follow the interactive prompt to select the correct book.
 ```bash
 libris status
 ```
-Select a book from your vault and update its status.
+Start typing to narrow the list — it matches anywhere in the filename, not just the start — then choose one of **To Read**, **Reading**, **Read**, **Not To Read**.
+
+Marking a book **Reading** stamps `date_started`, and **Read** stamps `date_finished`, but only when the field is empty: re-marking a book you have already dated leaves your date alone. Anything Libris fills in for you is printed, so you can correct it while you still remember that you actually started it last Tuesday.
 
 ### 5. List Books
 ```bash

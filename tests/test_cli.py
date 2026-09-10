@@ -1,4 +1,5 @@
 import sys
+from datetime import date
 
 import pytest
 import yaml
@@ -7,6 +8,7 @@ from typer.testing import CliRunner
 import libris
 from libris import config
 from libris.cli import app
+from libris.note_format import mint_libris_id
 
 runner = CliRunner()
 
@@ -559,10 +561,16 @@ def test_the_status_prompt_offers_what_the_library_defines(monkeypatch, tmp_path
         "questionary.select",
         lambda _message, choices, **kwargs: _Selection(choices),
     )
+    # The book is picked with autocomplete now, not a list to scroll (#43), so
+    # both prompts have to be stood in for.
+    monkeypatch.setattr(
+        "questionary.autocomplete",
+        lambda _message, choices, **kwargs: _Selection(choices),
+    )
 
     # When someone updates a book's status
     result = runner.invoke(app, ["status"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
 
     # Then the prompt offers exactly the four values a status may hold. It used
     # to offer "Finished", which no note has ever held and which validation now
@@ -782,3 +790,146 @@ def test_doctor_does_not_claim_different_books_when_an_isbn_is_missing(
     # The specific claim, not the bare word: asserting "different" is absent
     # would start failing the day any unrelated line of doctor output used it.
     assert "different ISBNs" not in result.output
+
+
+# --- `libris status` writes what the MCP tools write (#97, #43) -------------
+
+
+def _answer_prompts(monkeypatch, filename, new_status):
+    """Stand in for the two prompts `libris status` asks."""
+
+    def _pick(_message, choices, **kwargs):
+        class _Answer:
+            def ask(self):
+                return filename if filename in choices else new_status
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.autocomplete", _pick)
+    monkeypatch.setattr("questionary.select", _pick)
+
+
+def test_marking_a_book_reading_stamps_the_date_it_was_started(monkeypatch, tmp_path):
+    # Given a book on the Shelf that has not been started
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note, read_frontmatter
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Reading")
+
+    # When it is marked Reading from the CLI
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+
+    # Then the date is stamped, as it already was through MCP. The same act left
+    # two different notes depending on which Surface did it (#97).
+    frontmatter = read_frontmatter(path)
+    assert frontmatter["status"] == "Reading"
+    assert frontmatter["date_started"] == date.today().isoformat()
+
+    # And the reader is told, because a stamped date is indistinguishable from a
+    # stated one afterwards (ADR 0024).
+    assert "date_started" in result.output
+
+
+def test_marking_a_book_read_stamps_the_date_it_was_finished(monkeypatch, tmp_path):
+    # Given a book on the Shelf
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note, read_frontmatter
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Read")
+
+    # When it is marked Read
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+
+    # Then the finish date is stamped
+    assert read_frontmatter(path)["date_finished"] == date.today().isoformat()
+
+
+def test_a_date_already_set_is_not_overwritten(monkeypatch, tmp_path):
+    # Given a book already marked as started on a day the reader stated
+    from libris.api import BookCandidate
+    from libris.markdown import (
+        create_book_note,
+        read_frontmatter,
+        set_frontmatter_fields,
+    )
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    set_frontmatter_fields(path, {"date_started": "2019-03-12"})
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Reading")
+
+    # When it is marked Reading again
+    assert runner.invoke(app, ["status"]).exit_code == 0
+
+    # Then the reader's own date stands. Re-marking a dated book must not
+    # rewrite it - a re-read is not something the Library models.
+    assert read_frontmatter(path)["date_started"] == "2019-03-12"
+
+
+def test_a_note_without_an_identity_gets_one_rather_than_being_refused(
+    monkeypatch, tmp_path
+):
+    # Given a note written by hand outside Libris, carrying no libris_id
+    from libris.markdown import read_frontmatter
+
+    path = tmp_path / "Handwritten.md"
+    path.write_text(
+        "---\ntitle: Handwritten\nauthors:\n  - Someone\nstatus: To Read\n"
+        "date_added: 2019-03-12\n---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Reading")
+
+    # When its status is updated
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+
+    # Then an identity is minted and the update goes through. `update_book`
+    # addresses a note by identity, and refusing to set a status would be a
+    # strange place for a reader to learn their note lacked one.
+    frontmatter = read_frontmatter(path)
+    assert frontmatter["libris_id"]
+    assert frontmatter["status"] == "Reading"
+
+    # And the minted id derives from date_added, so the Shelf still sorts in the
+    # order it was acquired (ADR 0011).
+    assert frontmatter["libris_id"].startswith(mint_libris_id("2019-03-12")[:10])
+
+
+def test_the_readers_own_writing_survives_a_status_change(monkeypatch, tmp_path):
+    # Given a note whose body is the reader's own
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    body = (
+        "\n## Notes\n\n    an indented block\n\nAnd a line saying status: unreliable.\n"
+    )
+    path.write_text(
+        path.read_text(encoding="utf-8").split("\n---\n")[0] + "\n---\n" + body,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Read")
+
+    # When the status changes
+    assert runner.invoke(app, ["status"]).exit_code == 0
+
+    # Then the body is untouched - indentation, stray "status:" and all. This is
+    # #92 and #99 in the one command that now writes through a different path.
+    assert path.read_text(encoding="utf-8").endswith(body)
