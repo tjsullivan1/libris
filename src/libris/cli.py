@@ -64,6 +64,8 @@ from .note_format import (
 )
 from .service import (
     LOST_CHARACTER,
+    EncodingDamage,
+    IdCollision,
     IsbnAgreement,
     apply_decisions,
     inspect_shelf,
@@ -925,7 +927,7 @@ def _excerpt_damage(value: str, width: int = 36) -> str:
     return lead + " ... ".join(windows) + tail
 
 
-def _report_id_collisions(collisions: list) -> None:
+def _report_id_collisions(collisions: list[IdCollision]) -> None:
     """Print the Book Notes that claim one Libris ID.
 
     Args:
@@ -937,15 +939,21 @@ def _report_id_collisions(collisions: list) -> None:
         typer.echo(f"  {collision.libris_id}")
         for note in collision.notes:
             typer.echo(f"    {note.path.name}")
+        # The fact leads and the implication follows it, marked as the
+        # heuristic it is. ADR 0003 forbids acting on a guess, not saying what
+        # a fact usually means - but a report that only prints "ISBNs match"
+        # makes its reader re-derive the consequence every time.
+        isbns = sorted({note.isbn for note in collision.notes if note.isbn})
         if collision.isbn_agreement is IsbnAgreement.SAME:
+            typer.echo(f"    Both name ISBN {isbns[0]}.")
             typer.echo(
-                "    These name the same ISBN, so this is likely one note copied "
-                "and edited - merging is probably right."
+                "      Usually one note copied and edited, where merging is the repair."
             )
         elif collision.isbn_agreement is IsbnAgreement.DIFFERENT:
+            typer.echo(f"    They name different ISBNs: {', '.join(isbns)}.")
             typer.echo(
-                "    These name different ISBNs, so re-minting one id is probably "
-                "right rather than merging."
+                "      Usually two books that ended up sharing an identity, "
+                "where re-minting one id is the repair."
             )
         else:
             # Said as ignorance rather than as disagreement. A note with no ISBN
@@ -961,7 +969,7 @@ def _report_id_collisions(collisions: list) -> None:
     )
 
 
-def _report_encoding_damage(damaged: list, verbose: bool) -> None:
+def _report_encoding_damage(damaged: list[EncodingDamage], verbose: bool) -> None:
     """Print the notes that have lost a character to a bad decode.
 
     Args:

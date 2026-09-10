@@ -723,7 +723,7 @@ def test_doctor_reports_a_contested_identity(tmp_path, monkeypatch):
     assert "1 Libris ID(s) are claimed by more than one note" in result.output
     assert "01AAAAAAAAAAAAAAAAAAAAAAAA" in result.output
     assert "a.md" in result.output and "b.md" in result.output
-    assert "same ISBN" in result.output
+    assert "Both name ISBN 9780000000001" in result.output
     assert "Nothing is merged or re-minted here" in result.output
 
     # And nothing was written

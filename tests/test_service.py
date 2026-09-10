@@ -1536,3 +1536,50 @@ def test_no_colliding_note_naming_an_isbn_is_also_unknown(tmp_path):
     # When the Shelf is inspected
     # Then two silences do not agree with each other
     assert find_id_collisions(vault)[0].isbn_agreement is IsbnAgreement.UNKNOWN
+
+
+def test_a_collision_is_found_when_a_note_never_closes_its_frontmatter(tmp_path):
+    # Given two notes contesting one identity, one of which opens a frontmatter
+    # block and never closes it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "good.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: A Book\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (vault / "unclosed.md").write_text(
+        "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\ntitle: S�ren\n",
+        encoding="utf-8",
+    )
+
+    # When the Shelf is inspected
+    collisions = find_id_collisions(vault)
+    damaged = {entry.path.name: entry for entry in find_encoding_damage(vault)}
+
+    # Then the unclosed note is counted. `split_frontmatter` returns None for it,
+    # and treating that as "all body" lost the identity stated on its second line.
+    assert len(collisions) == 1
+    assert [note.path.name for note in collisions[0].notes] == [
+        "good.md",
+        "unclosed.md",
+    ]
+
+    # And its damage is filed as frontmatter rather than as the reader's prose,
+    # which is what an unterminated block actually holds
+    assert list(damaged["unclosed.md"].fields) == ["frontmatter (unparseable)"]
+
+
+def test_a_file_with_no_fence_at_all_is_still_all_body(tmp_path):
+    # Given a file that never opens a frontmatter block
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "loose.md").write_text(
+        "Just prose, mentioning Ren� Descartes.\n", encoding="utf-8"
+    )
+
+    # When the Shelf is inspected
+    damaged = {entry.path.name: entry for entry in find_encoding_damage(vault)}
+
+    # Then it is body, not frontmatter. Only a file that opens a fence gets the
+    # benefit of the doubt about what its author meant.
+    assert list(damaged["loose.md"].fields) == ["body"]

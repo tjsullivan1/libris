@@ -939,8 +939,19 @@ def _read_shelf(vault_path: Path):
         split = split_frontmatter(content)
 
         if split is None:
-            # No closed frontmatter block, so the whole file is body - the same
-            # answer `merge._extract_body_content` gives.
+            lines = content.splitlines(keepends=True)
+            if lines and lines[0].strip() == "---":
+                # A block was opened and never closed. There is no principled
+                # place to end it, so everything after the fence is treated as
+                # the frontmatter its author meant to write. That is a guess
+                # about a malformed file, but a better one than calling it all
+                # body: a note like this states its `libris_id` on the second
+                # line, and reading it as prose lost the collision it was in.
+                yield _ShelfFile(path, {}, "".join(lines[1:]), "")
+                continue
+
+            # No fence at all, so the whole file is body - the same answer
+            # `merge._extract_body_content` gives.
             yield _ShelfFile(path, {}, "", content)
             continue
 
