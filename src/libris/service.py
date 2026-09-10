@@ -23,6 +23,7 @@ from .markdown import (
     list_books,
     set_frontmatter_fields,
     split_frontmatter,
+    unterminated_frontmatter,
 )
 from .matching import best_match, normalize_for_match, titles_match
 from .merge import (
@@ -918,7 +919,7 @@ class _ShelfFile:
 
 
 def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
-    """Read every file on the Shelf, damaged ones included.
+    """Read every file on the Shelf, damaged ones included (ADR 0028).
 
     `index_for` cannot be used for this. It drops a note whose frontmatter will
     not parse - `BookNote.read` returns None - which is right for a Library
@@ -936,15 +937,15 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
         split = split_frontmatter(content)
 
         if split is None:
-            lines = content.splitlines(keepends=True)
-            if lines and lines[0].strip() == "---":
+            unterminated = unterminated_frontmatter(content)
+            if unterminated is not None:
                 # A block was opened and never closed. There is no principled
                 # place to end it, so everything after the fence is treated as
                 # the frontmatter its author meant to write. That is a guess
                 # about a malformed file, but a better one than calling it all
                 # body: a note like this states its `libris_id` on the second
                 # line, and reading it as prose lost the collision it was in.
-                yield _ShelfFile(path, {}, "".join(lines[1:]), "")
+                yield _ShelfFile(path, {}, unterminated, "")
                 continue
 
             # No fence at all, so the whole file is body - the same answer
@@ -1074,7 +1075,7 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
 
 
 class IsbnAgreement(Enum):
-    """Whether the notes contesting an identity name the same book.
+    """Whether the notes contesting an identity name the same book (ADR 0029).
 
     UNKNOWN is not a shade of DIFFERENT. A note carrying no ISBN says nothing
     about which book it is, and a report that treats silence as disagreement
