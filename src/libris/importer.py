@@ -197,22 +197,27 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
 
     Returns:
         True when the note was updated, False when its frontmatter could not be
-        read - in which case nothing was written to it.
+        read or the note was gone by the time it was written - in which case
+        nothing was written to it.
     """
     if "status" in updates:
         try:
             update_book_status(path, book.status)
-        except FrontmatterUnreadable:
+        except (FrontmatterUnreadable, FileNotFoundError):
             # Same answer this function already gives for a format update it
             # cannot parse: report the note as untouched rather than guessing
             # at its shape. An import run writes many notes and must not stop
-            # on one it cannot read.
+            # on one it cannot read - nor on one Obsidian or a sync client
+            # moved after the Shelf was scanned (#127 review).
             return False
 
     if "format" not in updates:
         return True
 
-    content = path.read_text(encoding="utf-8")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
     split = split_frontmatter(content)
     if split is None:
         return False

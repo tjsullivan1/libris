@@ -468,6 +468,59 @@ def test_apply_updates_leaves_unparseable_frontmatter_alone(tmp_path):
     assert path.read_text(encoding="utf-8") == original
 
 
+@pytest.mark.parametrize("updates", [["status"], ["format"]])
+def test_apply_updates_skips_a_note_moved_since_the_shelf_was_scanned(
+    tmp_path, updates
+):
+    # Given a note the import matched, then renamed or moved before its update
+    gone = tmp_path / "Dune - Frank Herbert.md"
+    book = ImportBook(
+        candidate=BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        status="Read",
+        format=["Audiobook"],
+    )
+
+    # When the update is applied
+    applied = _apply_updates(gone, book, updates)
+
+    # Then that book is skipped rather than the whole import stopping on a
+    # FileNotFoundError (#127 review), and nothing is created in its place
+    assert applied is False
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_apply_updates_skips_a_note_removed_between_its_read_and_write(
+    tmp_path, monkeypatch
+):
+    # Given a note removed after its status update has read it, before the write.
+    # The YAML is rendered in exactly that gap.
+    import yaml
+
+    from libris.markdown import create_book_note
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    real_dump = yaml.dump
+
+    def _removed_while_rendering(*args, **kwargs):
+        path.unlink(missing_ok=True)
+        return real_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "dump", _removed_while_rendering)
+    book = ImportBook(
+        candidate=BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        status="Read",
+    )
+
+    # When its status is applied
+    applied = _apply_updates(path, book, ["status"])
+
+    # Then it is skipped, and not recreated
+    assert applied is False
+    assert list(tmp_path.glob("*.md")) == []
+
+
 def test_importing_a_finished_book_does_not_stamp_todays_date(tmp_path):
     # Given a Shelf holding a book not yet marked Read
     from libris.api import BookCandidate
