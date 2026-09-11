@@ -1146,7 +1146,7 @@ def doctor(
     Reads and reports. Nothing is written, and nothing is asked of the network:
     the point is to see the damage before anything proposes a repair for it.
 
-    Two checks so far, both of which end in a judgement the Library cannot make:
+    Three checks so far, each ending in a judgement the Library cannot make:
 
     Contested identities - two Book Notes claiming one Libris ID (#75). Merging
     is right when they are one book and re-minting is right when they are not,
