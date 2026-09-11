@@ -1,4 +1,5 @@
 import sys
+from datetime import date
 
 import pytest
 import yaml
@@ -7,6 +8,7 @@ from typer.testing import CliRunner
 import libris
 from libris import config
 from libris.cli import app
+from libris.note_format import mint_libris_id
 
 runner = CliRunner()
 
@@ -559,10 +561,16 @@ def test_the_status_prompt_offers_what_the_library_defines(monkeypatch, tmp_path
         "questionary.select",
         lambda _message, choices, **kwargs: _Selection(choices),
     )
+    # The book is picked with autocomplete now, not a list to scroll (#43), so
+    # both prompts have to be stood in for.
+    monkeypatch.setattr(
+        "questionary.autocomplete",
+        lambda _message, choices, **kwargs: _Selection(choices),
+    )
 
     # When someone updates a book's status
     result = runner.invoke(app, ["status"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
 
     # Then the prompt offers exactly the four values a status may hold. It used
     # to offer "Finished", which no note has ever held and which validation now
@@ -782,3 +790,361 @@ def test_doctor_does_not_claim_different_books_when_an_isbn_is_missing(
     # The specific claim, not the bare word: asserting "different" is absent
     # would start failing the day any unrelated line of doctor output used it.
     assert "different ISBNs" not in result.output
+
+
+# --- `libris status` writes what the MCP tools write (#97, #43) -------------
+
+
+def _answer_prompts(monkeypatch, filename, new_status):
+    """Stand in for the two prompts `libris status` asks.
+
+    Each prompt is patched with its own answer rather than one stand-in that
+    decides by looking at `choices`. The first version did that, and it made
+    the tests below meaningless: a filename deliberately absent from `choices` -
+    which is the whole point of typing something the Shelf does not hold - fell
+    through and answered the *status* prompt instead, so the command never saw
+    the name under test and the assertion passed for the wrong reason.
+    """
+
+    def _answering(value):
+        def _ask(_message, choices=None, **kwargs):
+            class _Answer:
+                def ask(self):
+                    return value
+
+            return _Answer()
+
+        return _ask
+
+    monkeypatch.setattr("questionary.autocomplete", _answering(filename))
+    monkeypatch.setattr("questionary.select", _answering(new_status))
+
+
+def test_marking_a_book_reading_stamps_the_date_it_was_started(monkeypatch, tmp_path):
+    # Given a book on the Shelf that has not been started
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note, read_frontmatter
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Reading")
+
+    # When it is marked Reading from the CLI
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+
+    # Then the date is stamped, as it already was through MCP. The same act left
+    # two different notes depending on which Surface did it (#97).
+    frontmatter = read_frontmatter(path)
+    assert frontmatter["status"] == "Reading"
+    assert frontmatter["date_started"] == date.today().isoformat()
+
+    # And the reader is told, because a stamped date is indistinguishable from a
+    # stated one afterwards (ADR 0024).
+    assert "date_started" in result.output
+
+
+def test_marking_a_book_read_stamps_the_date_it_was_finished(monkeypatch, tmp_path):
+    # Given a book on the Shelf
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note, read_frontmatter
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Read")
+
+    # When it is marked Read
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+
+    # Then the finish date is stamped
+    assert read_frontmatter(path)["date_finished"] == date.today().isoformat()
+
+
+def test_a_date_already_set_is_not_overwritten(monkeypatch, tmp_path):
+    # Given a book already marked as started on a day the reader stated
+    from libris.api import BookCandidate
+    from libris.markdown import (
+        create_book_note,
+        read_frontmatter,
+        set_frontmatter_fields,
+    )
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    set_frontmatter_fields(path, {"date_started": "2019-03-12"})
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Reading")
+
+    # When it is marked Reading again
+    assert runner.invoke(app, ["status"]).exit_code == 0
+
+    # Then the reader's own date stands. Re-marking a dated book must not
+    # rewrite it - a re-read is not something the Library models.
+    assert read_frontmatter(path)["date_started"] == "2019-03-12"
+
+
+def test_a_note_without_an_identity_gets_one_rather_than_being_refused(
+    monkeypatch, tmp_path
+):
+    # Given a note written by hand outside Libris, carrying no libris_id
+    from libris.markdown import read_frontmatter
+
+    path = tmp_path / "Handwritten.md"
+    path.write_text(
+        "---\ntitle: Handwritten\nauthors:\n  - Someone\nstatus: To Read\n"
+        "date_added: 2019-03-12\n---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Reading")
+
+    # When its status is updated
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+
+    # Then an identity is minted and the update goes through. `update_book`
+    # addresses a note by identity, and refusing to set a status would be a
+    # strange place for a reader to learn their note lacked one.
+    frontmatter = read_frontmatter(path)
+    assert frontmatter["libris_id"]
+    assert frontmatter["status"] == "Reading"
+
+    # And the minted id derives from date_added, so the Shelf still sorts in the
+    # order it was acquired (ADR 0011).
+    assert frontmatter["libris_id"].startswith(mint_libris_id("2019-03-12")[:10])
+
+
+def test_the_readers_own_writing_survives_a_status_change(monkeypatch, tmp_path):
+    # Given a note whose body is the reader's own
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    body = (
+        "\n## Notes\n\n    an indented block\n\nAnd a line saying status: unreliable.\n"
+    )
+    path.write_text(
+        path.read_text(encoding="utf-8").split("\n---\n")[0] + "\n---\n" + body,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Read")
+
+    # When the status changes
+    assert runner.invoke(app, ["status"]).exit_code == 0
+
+    # Then the body is untouched - indentation, stray "status:" and all. This is
+    # #92 and #99 in the one command that now writes through a different path.
+    assert path.read_text(encoding="utf-8").endswith(body)
+
+
+# --- a typed answer is not a path (#124 review) -----------------------------
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        "../../escaped.md",
+        "nonexistent.md",
+        "Dune - Frank Herbert.md.bak",
+    ],
+    ids=["walks-out", "not-on-the-shelf", "near-miss"],
+)
+def test_status_refuses_a_name_that_is_not_on_the_shelf(monkeypatch, tmp_path, typed):
+    # Given a Shelf with one book, and a file above it that must not be touched
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), vault)
+    outside = tmp_path / "escaped.md"
+    outside.write_text(
+        "---\ntitle: Not a Book Note\n---\n\nLeave me alone.\n", encoding="utf-8"
+    )
+    before = outside.read_bytes()
+
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, typed, "Reading")
+
+    # When someone types it at the prompt, which autocomplete allows because it
+    # offers completions but returns free text
+    result = runner.invoke(app, ["status"])
+
+    # Then nothing is written and it says why. `vault / "../../escaped.md"`
+    # walks out of the Shelf, and an absolute name replaces it outright, so
+    # `_identity_for` could have minted an id into a file that is not a note.
+    assert result.exit_code == 1
+    assert "is on the Shelf" in result.output
+    assert outside.read_bytes() == before
+
+
+def test_status_refuses_an_absolute_path(monkeypatch, tmp_path):
+    # Given a Shelf, and a file elsewhere entirely
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), vault)
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("---\ntitle: Elsewhere\n---\n\nMine.\n", encoding="utf-8")
+    before = outside.read_bytes()
+
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, str(outside), "Reading")
+
+    # When an absolute path is typed
+    result = runner.invoke(app, ["status"])
+
+    # Then it is refused. `Path(shelf) / "/abs/path"` is the absolute path, so
+    # joining discards the Shelf entirely rather than nesting under it.
+    assert result.exit_code == 1
+    assert outside.read_bytes() == before
+
+
+def test_enrich_refuses_a_filename_that_is_not_on_the_shelf(monkeypatch, tmp_path):
+    # Given a Shelf and a file outside it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Dune - Frank Herbert.md").write_text(
+        "---\ntitle: Dune\n---\n\nBody.\n", encoding="utf-8"
+    )
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("---\ntitle: Elsewhere\n---\n\nMine.\n", encoding="utf-8")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When it is passed as the argument, which takes a filename and not a path
+    result = runner.invoke(app, ["enrich", str(outside)])
+
+    # Then it is refused rather than enriched
+    assert result.exit_code == 1
+    assert "is on the Shelf" in result.output
+
+
+def test_status_refuses_a_note_whose_identity_another_note_claims(
+    monkeypatch, tmp_path
+):
+    # Given two notes claiming one Libris ID, as the real Shelf holds (#75)
+    from libris.markdown import read_frontmatter
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("Aaa First.md", "Zzz Second.md"):
+        (vault / name).write_text(
+            "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\n"
+            f"title: {name[:-3]}\nauthors:\n  - Someone\nstatus: To Read\n---\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, "Zzz Second.md", "Read")
+
+    # When the second of them is picked
+    result = runner.invoke(app, ["status"])
+
+    # Then nothing is written and the clash is named. `update_book` resolves by
+    # identity and `find_by_libris_id` returns the first claimant, so this wrote
+    # to the other note while reporting the one that was picked - a write to the
+    # wrong book announced as a write to the right one (ADR 0003).
+    assert result.exit_code == 1
+    assert "shares its Libris ID" in result.output
+    assert "libris doctor" in result.output
+    for name in ("Aaa First.md", "Zzz Second.md"):
+        assert read_frontmatter(vault / name)["status"] == "To Read"
+
+
+def test_status_refuses_a_note_that_is_a_link_out_of_the_shelf(monkeypatch, tmp_path):
+    # Given a file outside the Shelf, and an in-vault note that is a link to it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text(
+        "---\ntitle: Outside\nauthors:\n  - Someone\nstatus: To Read\n---\n\nMine.\n",
+        encoding="utf-8",
+    )
+    link = vault / "Linked.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("this platform does not permit creating a symlink unprivileged")
+
+    before = outside.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, "Linked.md", "Reading")
+
+    # When it is picked
+    result = runner.invoke(app, ["status"])
+
+    # Then nothing outside the Shelf is written. Checking the name against the
+    # Shelf says the name is there; it says nothing about where the file leads,
+    # and `list_books` follows a symlink when it decides what is a file.
+    assert result.exit_code == 1
+    assert "outside the Shelf" in result.output
+    assert outside.read_bytes() == before
+
+
+def test_the_book_picker_matches_anywhere_in_the_name(monkeypatch, tmp_path):
+    # Given a Shelf
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), vault
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    asked = {}
+
+    def _autocomplete(_message, choices=None, **kwargs):
+        asked.update(kwargs)
+
+        class _Answer:
+            def ask(self):
+                return path.name
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.autocomplete", _autocomplete)
+    monkeypatch.setattr(
+        "questionary.select",
+        lambda _m, choices=None, **k: type("A", (), {"ask": lambda s: "Reading"})(),
+    )
+
+    # When a book is picked
+    assert runner.invoke(app, ["status"]).exit_code == 0
+
+    # Then the prompt matches anywhere in the filename, not only at the start.
+    # Every other test here stubs the prompt and ignores its arguments, so
+    # deleting this option would have left the suite green while #43 quietly
+    # regressed to prefix-only matching - and a Shelf of "The ..." titles is
+    # exactly where that is useless.
+    assert asked.get("match_middle") is True
+
+
+def test_a_shelf_that_is_not_there_is_reported_rather_than_raised(
+    monkeypatch, tmp_path
+):
+    # Given a configured Shelf that has since been deleted
+    gone = tmp_path / "deleted-shelf"
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: gone)
+
+    # When a command that scans it runs
+    result = runner.invoke(app, ["status"])
+
+    # Then it says so. Configured is not the same as present, and every command
+    # otherwise reached its first scan and ended in a traceback naming
+    # os.scandir. `enrich` used to report this and stopped when its own
+    # File-not-found check was replaced by the Shelf membership check.
+    assert result.exit_code == 1
+    assert "The Shelf is not there" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)

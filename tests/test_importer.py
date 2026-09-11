@@ -466,3 +466,33 @@ def test_apply_updates_leaves_unparseable_frontmatter_alone(tmp_path):
     # one nobody can
     assert applied is False
     assert path.read_text(encoding="utf-8") == original
+
+
+def test_importing_a_finished_book_does_not_stamp_todays_date(tmp_path):
+    # Given a Shelf holding a book not yet marked Read
+    from libris.api import BookCandidate
+    from libris.importer import ImportBook, _apply_updates
+    from libris.markdown import create_book_note, read_frontmatter
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+
+    # When an import says it was finished - years ago, as an Audible export does
+    _apply_updates(
+        path,
+        ImportBook(
+            candidate=BookCandidate(title="Dune", authors=["Frank Herbert"]),
+            status="Read",
+        ),
+        ["status"],
+    )
+
+    # Then no date_finished is invented. The importer stays on
+    # update_book_status rather than service.update_book for exactly this
+    # reason: update_book stamps today when a book becomes Read, which is right
+    # for a person saying so now and a falsehood about a book finished in 2019.
+    # Switching this path would otherwise have left the suite green (#97).
+    frontmatter = read_frontmatter(path)
+    assert frontmatter["status"] == "Read"
+    assert not frontmatter.get("date_finished")
