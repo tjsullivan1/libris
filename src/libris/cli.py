@@ -125,11 +125,22 @@ def _require_vault_path() -> Path:
         typer.Exit: With code 1 when no Shelf is configured.
     """
     try:
-        return get_vault_path()
+        vault_path = get_vault_path()
     except VaultNotConfigured:
         typer.echo("No Shelf is configured, so there is nothing to read or write.")
         typer.echo("Set one with: libris config --vault <path>")
         raise typer.Exit(code=1) from None
+
+    # Configured is not the same as present. A Shelf that has been moved,
+    # renamed or deleted since it was set otherwise reaches whichever scan the
+    # command runs first and ends in a traceback naming `os.scandir`. Checked
+    # here because it is the one gate every command already passes through.
+    if not vault_path.is_dir():
+        typer.echo(f"The Shelf is not there: {vault_path}")
+        typer.echo("Set one with: libris config --vault <path>")
+        raise typer.Exit(code=1)
+
+    return vault_path
 
 
 _RENAME_SKIP_MESSAGES = {
@@ -148,6 +159,33 @@ def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
     if msg is None:
         return None
     return f"Skipped rename for {filename}: {msg}"
+
+
+def _books_on_the_shelf(vault_path: Path) -> list[Path]:
+    """The Book Notes on the Shelf, or a clean explanation that it is not there.
+
+    `list_books` scans the directory, so a Shelf that has been moved, renamed or
+    deleted since it was configured makes it raise. Every command here begins by
+    listing the Shelf, and without this each one ends in a traceback naming
+    `os.scandir` rather than saying the vault is gone - which is what `enrich`
+    used to say, and stopped saying when its own `File not found` check was
+    replaced.
+
+    Args:
+        vault_path: The configured Shelf.
+
+    Returns:
+        Every Markdown file on it.
+
+    Raises:
+        typer.Exit: With code 1 when the Shelf cannot be listed.
+    """
+    try:
+        return list_books(vault_path)
+    except OSError:
+        typer.echo(f"The Shelf is not there: {vault_path}")
+        typer.echo("Set one with: libris config --vault <path>")
+        raise typer.Exit(code=1) from None
 
 
 def _note_on_the_shelf(vault_path: Path, name: str, books: list[Path]) -> Path:
@@ -243,7 +281,7 @@ def status():
     import questionary
 
     vault_path = _require_vault_path()
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
 
     if not books:
         typer.echo("No books found in vault.")
@@ -323,7 +361,7 @@ def list_cmd(
     """List all books in your vault."""
     vault_path = _require_vault_path()
     start = time.perf_counter() if timing else None
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
     elapsed = (time.perf_counter() - start) if timing and start is not None else None
 
     if not books:
@@ -529,7 +567,7 @@ def clean(
     import questionary
 
     vault_path = _require_vault_path()
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
 
     if not books:
         typer.echo("No books found in vault.")
@@ -582,7 +620,7 @@ def cleanup(
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
     vault_path = _require_vault_path()
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
 
     if not books:
         typer.echo("No books found in vault.")
@@ -877,7 +915,7 @@ def autoenrich(
     review.
     """
     vault_path = _require_vault_path()
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
 
     if not books:
         typer.echo("No books found in vault.")
@@ -992,7 +1030,7 @@ def enrich(
     vault_path = _require_vault_path()
 
     if filename is None:
-        books = list_books(vault_path)
+        books = _books_on_the_shelf(vault_path)
         if not books:
             typer.echo("No books found in vault.")
             return
@@ -1011,7 +1049,9 @@ def enrich(
 
     # Covers the name typed at the prompt and the one passed as an argument.
     # The help calls it a filename, not a path, and this is what makes that so.
-    selected_file = _note_on_the_shelf(vault_path, filename, list_books(vault_path))
+    selected_file = _note_on_the_shelf(
+        vault_path, filename, _books_on_the_shelf(vault_path)
+    )
 
     _enrich_interactive(selected_file)
 

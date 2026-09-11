@@ -1089,3 +1089,62 @@ def test_status_refuses_a_note_that_is_a_link_out_of_the_shelf(monkeypatch, tmp_
     assert result.exit_code == 1
     assert "outside the Shelf" in result.output
     assert outside.read_bytes() == before
+
+
+def test_the_book_picker_matches_anywhere_in_the_name(monkeypatch, tmp_path):
+    # Given a Shelf
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), vault
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    asked = {}
+
+    def _autocomplete(_message, choices=None, **kwargs):
+        asked.update(kwargs)
+
+        class _Answer:
+            def ask(self):
+                return path.name
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.autocomplete", _autocomplete)
+    monkeypatch.setattr(
+        "questionary.select",
+        lambda _m, choices=None, **k: type("A", (), {"ask": lambda s: "Reading"})(),
+    )
+
+    # When a book is picked
+    assert runner.invoke(app, ["status"]).exit_code == 0
+
+    # Then the prompt matches anywhere in the filename, not only at the start.
+    # Every other test here stubs the prompt and ignores its arguments, so
+    # deleting this option would have left the suite green while #43 quietly
+    # regressed to prefix-only matching - and a Shelf of "The ..." titles is
+    # exactly where that is useless.
+    assert asked.get("match_middle") is True
+
+
+def test_a_shelf_that_is_not_there_is_reported_rather_than_raised(
+    monkeypatch, tmp_path
+):
+    # Given a configured Shelf that has since been deleted
+    gone = tmp_path / "deleted-shelf"
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: gone)
+
+    # When a command that scans it runs
+    result = runner.invoke(app, ["status"])
+
+    # Then it says so. Configured is not the same as present, and every command
+    # otherwise reached its first scan and ended in a traceback naming
+    # os.scandir. `enrich` used to report this and stopped when its own
+    # File-not-found check was replaced by the Shelf membership check.
+    assert result.exit_code == 1
+    assert "The Shelf is not there" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
