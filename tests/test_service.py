@@ -1677,6 +1677,47 @@ def test_a_note_that_is_not_utf8_still_counts_toward_a_contested_identity(tmp_pa
     assert [note.path.name for note in collisions[0].notes] == ["a.md", "b.md"]
 
 
+def test_a_note_that_is_not_utf8_still_reports_a_damaged_filename(tmp_path):
+    # Given a note saved as Latin-1 whose filename has also lost a character
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    damaged = vault / "S�ren.md"
+    damaged.write_bytes("---\ntitle: Søren\n---\n".encode("latin-1"))
+
+    # When the Shelf is inspected
+    report = service.inspect_shelf(vault)
+
+    # Then both are reported. The filename is not decoded by the reader, so its
+    # lost character is real and wants a rename, however the contents are
+    # encoded (#127 review) - but the contents' replacement characters are still
+    # not counted, because the reader put them there.
+    assert report.not_utf8 == [damaged]
+    assert [note.fields for note in report.encoding_damage] == [
+        {"filename": ["S�ren.md"]}
+    ]
+
+
+def test_a_note_gone_between_listing_and_reading_does_not_stop_the_inspection(
+    tmp_path, monkeypatch
+):
+    # Given a Shelf listed with a note that is gone by the time it is read -
+    # Obsidian renaming it, or a sync client moving it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "a.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    real_list = service.list_books
+    monkeypatch.setattr(
+        service, "list_books", lambda path: [*real_list(path), path / "gone.md"]
+    )
+
+    # When the Shelf is inspected
+    report = service.inspect_shelf(vault)
+
+    # Then the rest is inspected, rather than one moved note ending `doctor` in
+    # a FileNotFoundError (#127 review)
+    assert report.is_clean
+
+
 def test_notes_without_an_identity_are_not_a_collision(tmp_path):
     # Given two notes that carry no Libris ID at all
     vault = tmp_path / "shelf"

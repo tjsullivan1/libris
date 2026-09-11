@@ -1029,16 +1029,29 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
     """
     for path in sorted(list_books(vault_path)):
         try:
-            content = path.read_text(encoding="utf-8")
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            # Listed, then gone before it was read - Obsidian renaming it, or a
+            # sync client. The Shelf no longer holds it, and one moved note must
+            # not stop `doctor` for the rest (#127 review).
+            continue
+
+        # Decoded from the one read. Reading again to decode leniently was a
+        # second chance for the file to vanish or be replaced (#127 review).
+        try:
+            content = raw.decode("utf-8")
             not_utf8 = False
         except UnicodeDecodeError:
-            # Read anyway, with each undecodable byte replaced, rather than
+            # Decoded anyway, with each undecodable byte replaced, rather than
             # raised. Raised, one such file stopped `doctor` for the whole Shelf
             # (#127 review) - and a note nothing else can read is exactly what
             # this reader is for. Its ASCII survives, `libris_id` included, so
             # a collision it is part of is still found.
-            content = path.read_text(encoding="utf-8", errors="replace")
+            content = raw.decode("utf-8", errors="replace")
             not_utf8 = True
+        # The same line endings `read_text` would have produced, so nothing
+        # below sees a stray carriage return it did not see before.
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
         split = split_frontmatter(content)
 
         if split is None:
@@ -1114,21 +1127,26 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
     damaged: list[EncodingDamage] = []
 
     for shelf_file in files:
-        if shelf_file.not_utf8:
-            # Every replacement character in it was put there by reading it, and
-            # the letters are still on disk. Reported as lost, it would send a
-            # person to the API for a spelling the file already holds.
-            continue
         path = shelf_file.path
         frontmatter = shelf_file.frontmatter
         unparsed_frontmatter = shelf_file.unparsed_frontmatter
         body = shelf_file.body
         fields: dict[str, list[str]] = {}
 
+        # Checked for every file, whatever its contents are encoded as. A
+        # filename is not decoded by this reader, so a lost character in one is
+        # real damage wanting a rename - and a note can have that and be saved in
+        # another encoding too (#127 review).
         if LOST_CHARACTER in path.name:
             fields["filename"] = [path.name]
 
-        for name in _DAMAGE_FIELDS:
+        # The contents are searched only when they decoded cleanly. In a file
+        # that is not UTF-8, every replacement character was put there by
+        # reading it and the letters are still on disk; reported as lost, they
+        # would send a person to the API for a spelling the file already holds.
+        search_contents = not shelf_file.not_utf8
+
+        for name in _DAMAGE_FIELDS if search_contents else ():
             found = _damaged_strings(frontmatter.get(name))
             if found:
                 fields[name] = found
@@ -1139,7 +1157,7 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
         unparsed_lines = [
             line.strip()
             for line in unparsed_frontmatter.splitlines()
-            if LOST_CHARACTER in line
+            if search_contents and LOST_CHARACTER in line
         ]
         if unparsed_lines:
             fields["frontmatter (unparseable)"] = unparsed_lines
@@ -1147,7 +1165,9 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
         # Reported line by line rather than whole: a body is the longest thing a
         # note holds, and a reader checking 41 of them wants the line.
         body_lines = [
-            line.strip() for line in body.splitlines() if LOST_CHARACTER in line
+            line.strip()
+            for line in body.splitlines()
+            if search_contents and LOST_CHARACTER in line
         ]
         if body_lines:
             fields["body"] = body_lines
