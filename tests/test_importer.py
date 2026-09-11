@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -489,11 +490,15 @@ def test_apply_updates_skips_a_note_moved_since_the_shelf_was_scanned(
     assert list(tmp_path.glob("*.md")) == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows refuses to remove a file another handle holds open",
+)
 def test_apply_updates_skips_a_note_removed_between_its_read_and_write(
     tmp_path, monkeypatch
 ):
     # Given a note removed after its status update has read it, before the write.
-    # The YAML is rendered in exactly that gap.
+    # The YAML is rendered in exactly that gap, with the note held open.
     import yaml
 
     from libris.markdown import create_book_note

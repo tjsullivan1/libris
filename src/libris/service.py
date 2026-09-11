@@ -19,7 +19,6 @@ import yaml
 from .api import BookCandidate, GoogleBooksClient
 from .markdown import (
     BookNote,
-    FrontmatterUnreadable,
     create_book_note,
     list_books,
     set_frontmatter_fields,
@@ -693,7 +692,7 @@ def update_book(
     note = find_by_libris_id(vault_path, libris_id)
     if note is None:
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
-    return _set_reader_fields(note, fields)
+    return _set_reader_fields(note.path, fields, holding=libris_id.strip())
 
 
 def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
@@ -718,24 +717,19 @@ def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
         derived.
 
     Raises:
-        BookNotFound: If there is no file at the path, or it is gone by the time
-            it is written.
+        BookNotFound: If there is no file at the path, or it stops being the
+            file at that path before it is written.
         InvalidFieldValue: If a value is not one the Library defines.
         ValueError: If a field is not the reader's to set, or a value is null.
-        FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
+        FrontmatterUnreadable: If the note's frontmatter cannot be parsed, or
+            the file is not UTF-8.
     """
-    try:
-        note = BookNote.read(path)
-    except FileNotFoundError:
-        # Gone between being picked and being written - Obsidian renaming it,
-        # or a sync client. A miss, the same as an identity nothing holds.
-        raise BookNotFound(f"No Book Note is at {path.name}.") from None
-    if note is None:
-        raise FrontmatterUnreadable(f"{path.name} has no readable frontmatter.")
-    return _set_reader_fields(note, fields)
+    return _set_reader_fields(path, fields)
 
 
-def _set_reader_fields(note: BookNote, fields: dict[str, object]) -> UpdateResult:
+def _set_reader_fields(
+    path: Path, fields: dict[str, object], holding: str | None = None
+) -> UpdateResult:
     """What an update means, however the note was reached (ADR 0008).
 
     The one definition of which fields a Surface may set, how a value is
@@ -743,19 +737,29 @@ def _set_reader_fields(note: BookNote, fields: dict[str, object]) -> UpdateResul
     come through here, so resolving a note differently cannot mean updating it
     differently - which is how #97 happened.
 
+    The values are judged before the note is opened, since none of that depends
+    on the note. What does - whether a date is already there to keep - is
+    decided from the note as read inside the write, so it describes the file the
+    write lands in rather than one read a moment earlier (#127 review).
+
     Args:
-        note: The Book Note to write, as read from disk.
+        path: The Book Note to write.
         fields: Field names and the values to set them to.
+        holding: The identity the note was resolved by, when it was. A file at
+            that path that no longer answers for it is a different note, and is
+            not written.
 
     Returns:
         The updated Book Note, what was written, and anything the Library
         derived.
 
     Raises:
-        BookNotFound: If the file is gone by the time it is written.
+        BookNotFound: If the file is gone, has moved, or no longer holds the
+            identity it was resolved by, by the time it is written.
         InvalidFieldValue: If a value is not one the Library defines.
         ValueError: If a field is not the reader's to set, or a value is null.
-        FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
+        FrontmatterUnreadable: If the note's frontmatter cannot be parsed, or
+            the file is not UTF-8.
     """
     written: dict[str, object] = {}
     for name, value in fields.items():
@@ -801,35 +805,39 @@ def _set_reader_fields(note: BookNote, fields: dict[str, object]) -> UpdateResul
 
     derived: dict[str, object] = {}
     stamp = _STATUS_STAMPS.get(str(fields.get("status", "")))
-    if stamp and stamp not in fields and not note.frontmatter.get(stamp):
-        # Only ever fills an empty field, so re-marking a dated book Read leaves
-        # the original date alone. A re-read is not something the Library models.
-        derived[stamp] = date.today().isoformat()
-        written[stamp] = derived[stamp]
 
-    if written:
-        try:
-            set_frontmatter_fields(note.path, written)
-        except FileNotFoundError:
-            # Found, then gone before the write - Obsidian renaming it, or a sync
-            # client. Either entry point can lose this race: the index answered
-            # for a file that has since moved, or the CLI picked one that has.
-            # Nothing was written, so it is a miss (ADR 0003).
-            raise BookNotFound(f"No Book Note is at {note.path.name}.") from None
+    def _decide(current: dict[str, object]) -> dict[str, object]:
+        if holding is not None:
+            held = BookNote(path=path, frontmatter=current)
+            if held.libris_id != holding and holding not in held.superseded_ids:
+                # The index answered for this path, and something else is there
+                # now - a note renamed away and another saved in its place.
+                raise BookNotFound(f"No Book Note holds the id {holding!r}.")
+        if stamp and stamp not in fields and not current.get(stamp):
+            # Only ever fills an empty field, so re-marking a dated book Read
+            # leaves the original date alone. A re-read is not something the
+            # Library models.
+            derived[stamp] = date.today().isoformat()
+            written[stamp] = derived[stamp]
+        return written
 
     try:
-        after = BookNote.read(note.path)
+        frontmatter = set_frontmatter_fields(path, _decide)
     except FileNotFoundError:
-        after = None
-    if after is None:
-        # The write landed and the file went away, or became unreadable, before
-        # it could be read back. Reporting a miss would say a write that happened
-        # did not, so the answer is the note as it was written.
-        after = BookNote(
-            path=note.path, frontmatter={**note.frontmatter, **written}, body=note.body
-        )
+        # Gone or moved before the write - Obsidian renaming it, or a sync client.
+        # Either entry point can lose this race: the index answered for a file
+        # that has since moved, or the CLI picked one that has. Nothing was
+        # written, so it is a miss (ADR 0003).
+        raise BookNotFound(f"No Book Note is at {path.name}.") from None
 
-    return UpdateResult(note=after, written=written, derived=derived)
+    # The frontmatter the write produced, rather than a read-back: a second read
+    # is a second chance for the file to have gone, and would report a write
+    # that happened as one that did not.
+    return UpdateResult(
+        note=BookNote(path=path, frontmatter=frontmatter),
+        written=written,
+        derived=derived,
+    )
 
 
 # The replacement character. It is what a decoder writes when it is handed bytes

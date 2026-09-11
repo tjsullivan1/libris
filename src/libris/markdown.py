@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional
+from typing import Any, BinaryIO, Callable, Dict, Literal, Optional
 
 import yaml
 from titlecase import titlecase
@@ -415,32 +415,63 @@ def rewrite_note(path: Path, content: str) -> None:
     marking it Read, beside the renamed copy of itself. Opening the existing
     file for update cannot create one.
 
-    The line ending is decided from the same handle that is written, so there is
-    no second open for the file to vanish between.
-
     Args:
         path: The Book Note to rewrite.
         content: The note's full new text.
 
     Raises:
-        FileNotFoundError: If the note is not there to rewrite, or was removed
-            while it was being written. POSIX lets a file be unlinked while it is
-            open, and the bytes then land in a file no name reaches - a write
-            that happened to nothing, so it is reported as one.
+        FileNotFoundError: If the note is not there to rewrite, or stopped being
+            the file at that path before the write finished.
     """
     with path.open("r+b") as handle:
-        encoded = _encode_with_newline(content, _dominant_newline(handle.read()))
-        handle.seek(0)
-        handle.write(encoded)
-        handle.truncate()
-        handle.flush()
-        if os.fstat(handle.fileno()).st_nlink == 0:
-            raise FileNotFoundError(
-                errno.ENOENT, "removed while it was being written", str(path)
-            )
+        _write_through(handle, path, content, handle.read())
 
 
-def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
+def _write_through(handle: BinaryIO, path: Path, content: str, raw: bytes) -> None:
+    """Replace a note's text through the handle it was read from.
+
+    Everything that decided the new text was read through this handle, so the
+    write goes back through it rather than reopening the path - a reopen can
+    reach a different file than the one that was read (#127 review). On Windows
+    the open handle also stops anyone else renaming or removing the note until
+    this returns.
+
+    Args:
+        handle: The note, open for update and positioned anywhere.
+        path: The path the note was opened by.
+        content: The note's full new text.
+        raw: The bytes the handle held when it was read, for the line ending.
+
+    Raises:
+        FileNotFoundError: If `path` no longer names the open file, or the file
+            was unlinked while it was written.
+    """
+    encoded = _encode_with_newline(content, _dominant_newline(raw))
+
+    # POSIX lets another process rename or replace a file this one holds open.
+    # Checked before writing, so a note that has moved is reported with nothing
+    # written, rather than as a write under a name that no longer reaches it.
+    if not os.path.samestat(os.stat(path), os.fstat(handle.fileno())):
+        raise FileNotFoundError(errno.ENOENT, "moved before it was written", str(path))
+
+    handle.seek(0)
+    handle.write(encoded)
+    handle.truncate()
+    handle.flush()
+
+    # Unlinked during the write itself: the bytes went to a file no name reaches,
+    # a write that happened to nothing. A rename in that same instant is not
+    # caught, and needs none - the write reached the note, under its new name.
+    if os.fstat(handle.fileno()).st_nlink == 0:
+        raise FileNotFoundError(
+            errno.ENOENT, "removed while it was being written", str(path)
+        )
+
+
+def set_frontmatter_fields(
+    file_path: Path,
+    updates: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
     """Set named frontmatter fields on a Book Note, leaving the body untouched.
 
     The body is carried across exactly rather than re-rendered. Every other
@@ -451,33 +482,57 @@ def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
     Field order is preserved for keys the note already carries; new keys are
     appended, so an update does not reshuffle a note.
 
+    The note is read, decided on and written through one open handle, so what
+    is written was decided from the file it lands in (#127 review).
+
     Args:
         file_path: The Book Note to write.
-        updates: Field names and the values to set them to.
+        updates: Field names and the values to set them to - or a function
+            handed the note's current frontmatter that returns them, for a
+            write whose values depend on what the note already holds. It may
+            raise to refuse the write, and nothing is written.
+
+    Returns:
+        The frontmatter as it now stands on disk.
 
     Raises:
-        FrontmatterUnreadable: If the file has no parseable frontmatter block.
-            Refused rather than repaired: this is the write path for one field,
-            not the place to rebuild a broken note.
-        FileNotFoundError: If the note is not there, including when it is
-            removed between being read and being written. It is never recreated.
+        FrontmatterUnreadable: If the file has no parseable frontmatter block,
+            or is not UTF-8. Refused rather than repaired: this is the write
+            path for one field, not the place to rebuild a broken note.
+        FileNotFoundError: If the note is not there, or stops being the file at
+            that path before it is written. It is never recreated.
     """
-    content = file_path.read_text(encoding="utf-8")
-    split = split_frontmatter(content)
-    if split is None:
-        raise FrontmatterUnreadable(f"{file_path.name} has no readable frontmatter.")
+    with file_path.open("r+b") as handle:
+        raw = handle.read()
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise FrontmatterUnreadable(
+                f"{file_path.name} is not UTF-8 text."
+            ) from None
 
-    frontmatter_yaml, body = split
-    try:
-        data = parse_frontmatter_yaml(frontmatter_yaml)
-    except yaml.YAMLError as exc:
-        raise FrontmatterUnreadable(f"{file_path.name}: {exc}") from None
-    if not isinstance(data, dict):
-        raise FrontmatterUnreadable(f"{file_path.name} has no frontmatter mapping.")
+        split = split_frontmatter(content)
+        if split is None:
+            raise FrontmatterUnreadable(
+                f"{file_path.name} has no readable frontmatter."
+            )
 
-    data.update(updates)
-    rendered = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-    rewrite_note(file_path, "---\n" + rendered + "\n---\n" + body)
+        frontmatter_yaml, body = split
+        try:
+            data = parse_frontmatter_yaml(frontmatter_yaml)
+        except yaml.YAMLError as exc:
+            raise FrontmatterUnreadable(f"{file_path.name}: {exc}") from None
+        if not isinstance(data, dict):
+            raise FrontmatterUnreadable(f"{file_path.name} has no frontmatter mapping.")
+
+        changes = updates(dict(data)) if callable(updates) else updates
+        if not changes:
+            return data
+
+        data.update(changes)
+        rendered = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+        _write_through(handle, file_path, "---\n" + rendered + "\n---\n" + body, raw)
+    return data
 
 
 def list_books(vault_path: Path):
@@ -771,7 +826,13 @@ def find_duplicates(vault_path: Path) -> list[list[Path]]:
 
 def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
     """Read and return the frontmatter dict from a markdown file, or None."""
-    content = file_path.read_text(encoding="utf-8")
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        # Not UTF-8, so not a note this can parse - the same answer as broken
+        # YAML. Raised, it escaped every Shelf query: one such file on the Shelf
+        # made `search_library` fail for every book (#127 review).
+        return None
     split = split_frontmatter(content)
     if split is None:
         return None

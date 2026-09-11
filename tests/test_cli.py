@@ -978,10 +978,12 @@ def test_status_reads_only_the_note_it_was_asked_about(monkeypatch, tmp_path):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
 
-    # Then no other note was parsed. The command is handed the note, and
-    # resolving it by identity parsed the whole Shelf to find it again - 3,065
-    # parses and 6 to 14 seconds against the real one (#125).
-    assert {Path(p) for p in parsed} == {chosen}
+    # Then no other note was parsed, and the chosen one was written. The command
+    # is handed the note, and resolving it by identity parsed the whole Shelf to
+    # find it again - 3,065 parses and 6 to 14 seconds against the real one
+    # (#125).
+    assert {Path(p) for p in parsed} <= {chosen}
+    assert real(chosen)["status"] == "Reading"
 
 
 def test_the_readers_own_writing_survives_a_status_change(monkeypatch, tmp_path):

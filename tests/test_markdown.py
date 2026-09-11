@@ -231,13 +231,16 @@ def test_a_note_removed_while_it_is_rewritten_is_reported_not_written(
 
     path = tmp_path / "Dune.md"
     path.write_bytes(b"---\ntitle: Dune\n---\n")
-    real = markdown._dominant_newline
+    real = markdown.os.path.samestat
 
-    def _removed_while_open(raw):
+    def _removed_once_checked(first, second):
+        # After the check that the path still names the open file, and before
+        # the write: the one instant that check cannot see.
+        same = real(first, second)
         path.unlink()
-        return real(raw)
+        return same
 
-    monkeypatch.setattr(markdown, "_dominant_newline", _removed_while_open)
+    monkeypatch.setattr(markdown.os.path, "samestat", _removed_once_checked)
 
     # When it is rewritten
     # Then the write is reported as reaching nothing, rather than as a success

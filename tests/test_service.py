@@ -5,6 +5,7 @@ surface and the MCP tools cannot drift apart by reimplementing matching. These
 tests exercise that layer directly, with no HTTP involved.
 """
 
+import sys
 from datetime import date
 
 import pytest
@@ -911,41 +912,156 @@ def test_a_note_gone_before_the_write_is_not_found(tmp_path, monkeypatch, update
     assert list(tmp_path.glob("*.md")) == []
 
 
-def test_a_note_removed_between_its_read_and_its_write_is_not_recreated(
-    tmp_path, monkeypatch, update
-):
-    # Given a note removed after the write has read it and before it writes back.
-    # The YAML is rendered in exactly that gap, so that is where it goes.
+def _during_the_write(monkeypatch, act):
+    """Run `act` after an update has read its note and before it writes back.
+
+    The YAML is rendered in exactly that gap, with the note held open. Windows
+    refuses to rename or remove a file held open, so what these tests do to the
+    note cannot happen there - which is the protection, not a gap in the tests.
+    """
     import yaml
 
-    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
     real_dump = yaml.dump
 
-    def _removed_while_rendering(*args, **kwargs):
-        note.path.unlink(missing_ok=True)
+    def _dump(*args, **kwargs):
+        act()
         return real_dump(*args, **kwargs)
 
-    monkeypatch.setattr(yaml, "dump", _removed_while_rendering)
+    monkeypatch.setattr(yaml, "dump", _dump)
+
+
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows refuses to rename or remove a file another handle holds open",
+)
+
+
+@_POSIX_ONLY
+def test_a_note_removed_during_its_write_is_not_recreated(
+    tmp_path, monkeypatch, update
+):
+    # Given a note removed after the update has read it
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+    _during_the_write(monkeypatch, note.path.unlink)
 
     # When it is updated
     # Then it is a miss, and the note is not put back. Opening the path for
-    # writing created it again under its old name and reported success - beside
-    # the copy Obsidian had just renamed, if that is what moved it (#127 review).
+    # writing created it again under its old name and reported success (#127
+    # review).
     with pytest.raises(BookNotFound):
         update(note, {"status": "Reading"})
     assert list(tmp_path.glob("*.md")) == []
 
 
+@_POSIX_ONLY
+def test_a_note_renamed_during_its_write_is_not_written(tmp_path, monkeypatch, update):
+    # Given a note renamed away after the update has read it - Obsidian renaming
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+    renamed = tmp_path / "Dune (renamed).md"
+    _during_the_write(monkeypatch, lambda: note.path.rename(renamed))
+
+    # When it is updated
+    # Then it is a miss with nothing written, rather than a success reported for
+    # a filename that no longer exists (#127 review)
+    with pytest.raises(BookNotFound):
+        update(note, {"status": "Reading"})
+    assert BookNote.read(renamed).frontmatter["status"] == "To Read"
+    assert not note.path.exists()
+
+
+@_POSIX_ONLY
+def test_a_note_replaced_during_its_write_leaves_the_replacement_alone(
+    tmp_path, monkeypatch, update
+):
+    # Given a note renamed away after the update has read it, and a different
+    # note saved at the same path
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+    replacement = (
+        "---\nlibris_id: 01BBBBBBBBBBBBBBBBBBBBBBBB\ntitle: Other\n"
+        "status: To Read\n---\n\nSomeone else's.\n"
+    )
+
+    def _replace():
+        note.path.rename(tmp_path / "Dune (renamed).md")
+        note.path.write_text(replacement, encoding="utf-8")
+
+    _during_the_write(monkeypatch, _replace)
+
+    # When it is updated
+    # Then neither note is written. What the update decided came from the note
+    # it read; writing it into a file it never read would put one book's status
+    # on another (#127 review).
+    with pytest.raises(BookNotFound):
+        update(note, {"status": "Reading"})
+    assert note.path.read_text(encoding="utf-8") == replacement
+    renamed = BookNote.read(tmp_path / "Dune (renamed).md")
+    assert renamed.frontmatter["status"] == "To Read"
+
+
+def test_an_update_by_identity_refuses_a_file_that_no_longer_holds_it(
+    tmp_path, monkeypatch
+):
+    # Given a note the index resolves, whose file then holds a different note by
+    # the time the update opens it - one renamed away, another saved in its place
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+    replacement = (
+        "---\nlibris_id: 01BBBBBBBBBBBBBBBBBBBBBBBB\ntitle: Other\n"
+        "status: To Read\n---\n\nSomeone else's.\n"
+    )
+    real = service.set_frontmatter_fields
+
+    def _replaced_first(path, updates):
+        path.write_text(replacement, encoding="utf-8")
+        return real(path, updates)
+
+    monkeypatch.setattr(service, "set_frontmatter_fields", _replaced_first)
+
+    # When the identity is updated
+    # Then the other note is not written. The path was only ever where that
+    # identity lived; the identity is what was asked for.
+    with pytest.raises(BookNotFound):
+        update_book(tmp_path, note.libris_id, {"status": "Reading"})
+    assert note.path.read_text(encoding="utf-8") == replacement
+
+
+def test_an_update_by_path_refuses_a_note_that_is_not_utf8(tmp_path):
+    # Given a note saved in another encoding
+    path = tmp_path / "Latin1.md"
+    path.write_bytes("---\ntitle: Søren\nstatus: To Read\n---\n".encode("latin-1"))
+    before = path.read_bytes()
+
+    # When it is updated
+    # Then it is refused as unreadable, the answer `status` knows how to give,
+    # rather than a UnicodeDecodeError (#127 review) - and left exactly as it was
+    with pytest.raises(FrontmatterUnreadable):
+        update_note(path, {"status": "Read"})
+    assert path.read_bytes() == before
+
+
+def test_a_note_that_is_not_utf8_does_not_stop_the_library_answering(tmp_path):
+    # Given a Shelf holding a book, and one note in another encoding
+    _shelve(tmp_path, "Dune", ["Frank Herbert"])
+    (tmp_path / "Latin1.md").write_bytes("---\ntitle: Søren\n---\n".encode("latin-1"))
+
+    # When the Library is searched
+    result = search_library(tmp_path, query="dune")
+
+    # Then the book is found. The decode error escaped the index, so this one
+    # file made every search, lookup and update by identity fail (#127 review).
+    assert _titles(result) == ["Dune"]
+
+
 def test_a_note_gone_after_the_write_still_reports_the_write(
     tmp_path, monkeypatch, update
 ):
-    # Given a note removed the moment after it is written, before it is read back
+    # Given a note removed the moment after it is written
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
     real = service.set_frontmatter_fields
 
     def _removed_after(path, updates):
-        real(path, updates)
+        written = real(path, updates)
         path.unlink()
+        return written
 
     monkeypatch.setattr(service, "set_frontmatter_fields", _removed_after)
 
