@@ -1629,6 +1629,54 @@ def test_distinct_identities_are_not_reported(tmp_path):
     assert find_id_collisions(vault) == []
 
 
+def test_a_note_that_is_not_utf8_is_reported_as_such_not_as_lost_letters(tmp_path):
+    # Given a Shelf holding one note saved as Latin-1, its letters intact on disk
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "a.md", "01AAAAAAAAAAAAAAAAAAAAAAAA")
+    latin1 = vault / "Kierkegaard.md"
+    latin1.write_bytes(
+        "---\ntitle: Either-Or\nauthors:\n  - Søren Kierkegaard\n---\n\nBody.\n".encode(
+            "latin-1"
+        )
+    )
+    before = latin1.read_bytes()
+
+    # When the Shelf is inspected
+    report = service.inspect_shelf(vault)
+
+    # Then it is named as not UTF-8 rather than stopping the inspection - the
+    # decode error ended `doctor` for the whole Shelf (#127 review)
+    assert report.not_utf8 == [latin1]
+    assert not report.is_clean
+
+    # And it is not reported as having lost a character. Reading it put the
+    # replacement characters there; the ø is still in the file, so sending a
+    # person to the API for the spelling would be the wrong repair.
+    assert report.encoding_damage == []
+    assert service.find_encoding_damage(vault) == []
+    assert latin1.read_bytes() == before
+
+
+def test_a_note_that_is_not_utf8_still_counts_toward_a_contested_identity(tmp_path):
+    # Given two notes claiming one Libris ID, one of them saved as Latin-1
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _note_with_id(vault, "a.md", "01M0WQEHRZ6KZK0D3BM7C2YXEM")
+    (vault / "b.md").write_bytes(
+        "---\nlibris_id: 01M0WQEHRZ6KZK0D3BM7C2YXEM\ntitle: Søren\n---\n".encode(
+            "latin-1"
+        )
+    )
+
+    # When the Shelf is inspected
+    collisions = find_id_collisions(vault)
+
+    # Then the collision is found. Its identity is plain ASCII and survives the
+    # decode, so dropping the note would hide a collision it is plainly part of.
+    assert [note.path.name for note in collisions[0].notes] == ["a.md", "b.md"]
+
+
 def test_notes_without_an_identity_are_not_a_collision(tmp_path):
     # Given two notes that carry no Libris ID at all
     vault = tmp_path / "shelf"

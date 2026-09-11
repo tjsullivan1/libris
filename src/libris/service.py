@@ -965,6 +965,11 @@ class _ShelfFile:
     # Empty otherwise, so a caller cannot read the same field from both.
     unparsed_frontmatter: str
     body: str
+    # The file is not UTF-8, and was read with each undecodable byte replaced.
+    # Its replacement characters are this reader's, not damage in the note: the
+    # bytes are intact on disk, so a check for lost characters must not count
+    # them.
+    not_utf8: bool = False
 
     def value(self, key: str) -> object:
         """Read a frontmatter field, whether or not the block parsed.
@@ -1023,7 +1028,17 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
         One `_ShelfFile` per file, in filename order.
     """
     for path in sorted(list_books(vault_path)):
-        content = path.read_text(encoding="utf-8")
+        try:
+            content = path.read_text(encoding="utf-8")
+            not_utf8 = False
+        except UnicodeDecodeError:
+            # Read anyway, with each undecodable byte replaced, rather than
+            # raised. Raised, one such file stopped `doctor` for the whole Shelf
+            # (#127 review) - and a note nothing else can read is exactly what
+            # this reader is for. Its ASCII survives, `libris_id` included, so
+            # a collision it is part of is still found.
+            content = path.read_text(encoding="utf-8", errors="replace")
+            not_utf8 = True
         split = split_frontmatter(content)
 
         if split is None:
@@ -1035,12 +1050,12 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
                 # about a malformed file, but a better one than calling it all
                 # body: a note like this states its `libris_id` on the second
                 # line, and reading it as prose lost the collision it was in.
-                yield _ShelfFile(path, {}, unterminated, "")
+                yield _ShelfFile(path, {}, unterminated, "", not_utf8)
                 continue
 
             # No fence at all, so the whole file is body - the same answer
             # `merge._extract_body_content` gives.
-            yield _ShelfFile(path, {}, "", content)
+            yield _ShelfFile(path, {}, "", content, not_utf8)
             continue
 
         try:
@@ -1049,11 +1064,11 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
             parsed = None
 
         if isinstance(parsed, dict):
-            yield _ShelfFile(path, parsed, "", split[1])
+            yield _ShelfFile(path, parsed, "", split[1], not_utf8)
         else:
             # The block is there but nothing reads it as a mapping, so there are
             # no fields to look through and the raw text is all a check has.
-            yield _ShelfFile(path, {}, split[0], split[1])
+            yield _ShelfFile(path, {}, split[0], split[1], not_utf8)
 
 
 def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
@@ -1099,6 +1114,11 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
     damaged: list[EncodingDamage] = []
 
     for shelf_file in files:
+        if shelf_file.not_utf8:
+            # Every replacement character in it was put there by reading it, and
+            # the letters are still on disk. Reported as lost, it would send a
+            # person to the API for a spelling the file already holds.
+            continue
         path = shelf_file.path
         frontmatter = shelf_file.frontmatter
         unparsed_frontmatter = shelf_file.unparsed_frontmatter
@@ -1271,11 +1291,14 @@ class ShelfReport:
 
     collisions: list[IdCollision] = field(default_factory=list)
     encoding_damage: list[EncodingDamage] = field(default_factory=list)
+    # Notes that are not UTF-8 text. Nothing else in Libris can read them - the
+    # index treats them as unparseable - so this is the one place they surface.
+    not_utf8: list[Path] = field(default_factory=list)
 
     @property
     def is_clean(self) -> bool:
         """Whether nothing found anything worth a person's attention."""
-        return not self.collisions and not self.encoding_damage
+        return not self.collisions and not self.encoding_damage and not self.not_utf8
 
 
 def inspect_shelf(vault_path: Path) -> ShelfReport:
@@ -1296,6 +1319,7 @@ def inspect_shelf(vault_path: Path) -> ShelfReport:
     return ShelfReport(
         collisions=_id_collisions_in(files),
         encoding_damage=_encoding_damage_in(files),
+        not_utf8=[shelf_file.path for shelf_file in files if shelf_file.not_utf8],
     )
 
 

@@ -684,6 +684,31 @@ def test_doctor_says_so_when_the_shelf_is_clean(tmp_path, monkeypatch):
     assert "Nothing on the Shelf needs a decision" in result.output
 
 
+def test_doctor_reports_a_note_that_is_not_utf8(tmp_path, monkeypatch):
+    # Given a Shelf holding one note saved as Latin-1
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Kierkegaard.md"
+    note.write_bytes("---\ntitle: Søren\n---\n\nMine.\n".encode("latin-1"))
+    before = note.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When the doctor runs
+    result = CliRunner().invoke(app, ["doctor"])
+
+    # Then it names the note and the repair, rather than dying on the decode
+    # (#127 review) or calling the Shelf clean
+    assert result.exit_code == 0, result.output
+    assert "1 note(s) are not UTF-8 text" in result.output
+    assert "Kierkegaard.md" in result.output
+    assert "Nothing on the Shelf needs a decision" not in result.output
+
+    # And it does not call the intact letters lost, which would send a person to
+    # the API for a spelling the file still holds
+    assert "lost a character" not in result.output
+    assert note.read_bytes() == before
+
+
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
     # Given a description callout of the length the real Shelf holds, damaged in
     # two places far apart

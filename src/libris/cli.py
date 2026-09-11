@@ -1155,26 +1155,52 @@ def doctor(
     Lost characters - a note carrying the replacement character where an
     accented letter used to be (#78). The letter itself is gone from the file,
     so the correct spelling has to come from the API or from a reader.
+
+    Not UTF-8 - a note saved in another encoding. Its letters are intact, but
+    nothing else in Libris can read it until it is saved as UTF-8, and which
+    encoding it was written in is not something the file says.
     """
     vault_path = _require_vault_path()
 
-    # One pass for both checks. Called separately they each read the Shelf,
-    # which meant reading 3,063 files twice.
+    # One pass for every check. Called separately they each read the Shelf,
+    # which meant reading 3,063 files once per check.
     report = inspect_shelf(vault_path)
-    collisions = report.collisions
-    damaged = report.encoding_damage
 
     if report.is_clean:
         typer.echo("Nothing on the Shelf needs a decision.")
         return
 
-    if collisions:
-        _report_id_collisions(collisions)
+    sections = []
+    if report.collisions:
+        sections.append(lambda: _report_id_collisions(report.collisions))
+    if report.encoding_damage:
+        sections.append(
+            lambda: _report_encoding_damage(report.encoding_damage, verbose)
+        )
+    if report.not_utf8:
+        sections.append(lambda: _report_not_utf8(report.not_utf8))
 
-    if damaged:
-        if collisions:
+    for index, section in enumerate(sections):
+        if index:
             typer.echo("")
-        _report_encoding_damage(damaged, verbose)
+        section()
+
+
+def _report_not_utf8(paths: list[Path]) -> None:
+    """Print the notes that are not UTF-8 text.
+
+    Args:
+        paths: The notes from `inspect_shelf`.
+    """
+    typer.echo(f"{len(paths)} note(s) are not UTF-8 text.\n")
+    for path in paths:
+        typer.echo(f"    {path.name}")
+    typer.echo(
+        "\nTheir letters are intact, but nothing else in Libris can read them: "
+        "search passes over them and `libris status` refuses them. Save each as "
+        "UTF-8 in an editor that can tell which encoding it was written in - the "
+        "file does not say, so Libris does not guess (ADR 0003)."
+    )
 
 
 @app.command()
