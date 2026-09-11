@@ -911,7 +911,44 @@ def test_a_note_without_an_identity_is_updated_rather_than_refused(
     # place for a reader to learn their note lacked an identity - and a write by
     # path does not need one (#125).
     assert result.exit_code == 0, result.output
-    assert read_frontmatter(path)["status"] == "Reading"
+    frontmatter = read_frontmatter(path)
+    assert frontmatter["status"] == "Reading"
+
+    # And none is minted. Setting a status is not the place to decide a note's
+    # identity, and minting existed only to feed a lookup this command no longer
+    # makes.
+    assert "libris_id" not in frontmatter
+
+
+def test_status_reports_a_note_gone_before_the_write(monkeypatch, tmp_path):
+    # Given a picked note that is removed before the write reaches it
+    from libris import service
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    real = service.set_frontmatter_fields
+
+    def _removed_first(target, updates):
+        target.unlink()
+        real(target, updates)
+
+    monkeypatch.setattr(service, "set_frontmatter_fields", _removed_first)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _answer_prompts(monkeypatch, path.name, "Reading")
+
+    # When its status is set
+    result = runner.invoke(app, ["status"])
+
+    # Then the command says so and exits, rather than ending in a traceback
+    # (#127 review). An exception escaping into CliRunner leaves exit code 1
+    # too, so the output is what tells the two apart.
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert f"No Book Note is at {path.name}" in result.output
+    assert not path.exists()
 
 
 def test_status_reads_only_the_note_it_was_asked_about(monkeypatch, tmp_path):

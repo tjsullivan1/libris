@@ -684,7 +684,8 @@ def update_book(
         derived.
 
     Raises:
-        BookNotFound: If no note answers for the identity.
+        BookNotFound: If no note answers for the identity, or its file is gone
+            by the time it is written.
         InvalidFieldValue: If a value is not one the Library defines.
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
@@ -717,7 +718,8 @@ def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
         derived.
 
     Raises:
-        BookNotFound: If there is no file at the path.
+        BookNotFound: If there is no file at the path, or it is gone by the time
+            it is written.
         InvalidFieldValue: If a value is not one the Library defines.
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
@@ -750,6 +752,7 @@ def _set_reader_fields(note: BookNote, fields: dict[str, object]) -> UpdateResul
         derived.
 
     Raises:
+        BookNotFound: If the file is gone by the time it is written.
         InvalidFieldValue: If a value is not one the Library defines.
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
@@ -805,11 +808,28 @@ def _set_reader_fields(note: BookNote, fields: dict[str, object]) -> UpdateResul
         written[stamp] = derived[stamp]
 
     if written:
-        set_frontmatter_fields(note.path, written)
+        try:
+            set_frontmatter_fields(note.path, written)
+        except FileNotFoundError:
+            # Found, then gone before the write - Obsidian renaming it, or a sync
+            # client. Either entry point can lose this race: the index answered
+            # for a file that has since moved, or the CLI picked one that has.
+            # Nothing was written, so it is a miss (ADR 0003).
+            raise BookNotFound(f"No Book Note is at {note.path.name}.") from None
 
-    return UpdateResult(
-        note=BookNote.read(note.path) or note, written=written, derived=derived
-    )
+    try:
+        after = BookNote.read(note.path)
+    except FileNotFoundError:
+        after = None
+    if after is None:
+        # The write landed and the file went away, or became unreadable, before
+        # it could be read back. Reporting a miss would say a write that happened
+        # did not, so the answer is the note as it was written.
+        after = BookNote(
+            path=note.path, frontmatter={**note.frontmatter, **written}, body=note.body
+        )
+
+    return UpdateResult(note=after, written=written, derived=derived)
 
 
 # The replacement character. It is what a decoder writes when it is handed bytes

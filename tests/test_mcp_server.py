@@ -181,6 +181,33 @@ def test_an_unknown_book_comes_back_readable_not_as_a_crash(shelved):
     assert "01J0000000000000000000000A" in text(result)
 
 
+def test_a_book_gone_before_the_write_comes_back_readable(shelved, monkeypatch):
+    # Given a book the index can find, whose file is removed before the write
+    # reaches it - Obsidian renaming it, or a sync client moving it
+    from libris import service
+
+    note = next(
+        n
+        for n in (BookNote.read(p) for p in Path(shelved).glob("*.md"))
+        if n.title == "Dune"
+    )
+    real = service.set_frontmatter_fields
+
+    def _removed_first(path, updates):
+        path.unlink()
+        real(path, updates)
+
+    monkeypatch.setattr(service, "set_frontmatter_fields", _removed_first)
+
+    # When it is updated
+    result = call("update_book", {"libris_id": note.libris_id, "status": "Read"})
+
+    # Then the tool reports a miss in words. A raw FileNotFoundError is not one
+    # of the errors the tool translates (#127 review).
+    assert result.is_error
+    assert note.path.name in text(result)
+
+
 def test_a_value_the_library_rejects_names_what_is_allowed(shelved):
     # Given a status the schema would have caught, sent anyway
     result = call("update_book", {"libris_id": "x", "status": "Finished"})

@@ -890,6 +890,50 @@ def test_an_update_by_path_to_a_file_that_is_gone_is_not_found(tmp_path):
     assert list(tmp_path.glob("*.md")) == []
 
 
+def test_a_note_gone_before_the_write_is_not_found(tmp_path, monkeypatch, update):
+    # Given a note that is found, then removed before the write reaches it - the
+    # index answering for a file that has since moved, or a picked file renamed
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+    real = service.set_frontmatter_fields
+
+    def _removed_first(path, updates):
+        path.unlink()
+        real(path, updates)
+
+    monkeypatch.setattr(service, "set_frontmatter_fields", _removed_first)
+
+    # When it is updated
+    # Then it is a miss rather than a raw FileNotFoundError, which neither
+    # `libris status` nor the MCP tool catches (#127 review), and nothing is
+    # created in its place (ADR 0003)
+    with pytest.raises(BookNotFound):
+        update(note, {"status": "Reading"})
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_a_note_gone_after_the_write_still_reports_the_write(
+    tmp_path, monkeypatch, update
+):
+    # Given a note removed the moment after it is written, before it is read back
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+    real = service.set_frontmatter_fields
+
+    def _removed_after(path, updates):
+        real(path, updates)
+        path.unlink()
+
+    monkeypatch.setattr(service, "set_frontmatter_fields", _removed_after)
+
+    # When it is updated
+    result = update(note, {"status": "Reading"})
+
+    # Then the answer is the write that happened, not a miss. Calling it not
+    # found would tell a person their book was never marked, when it was.
+    assert result.note.frontmatter["status"] == "Reading"
+    assert result.note.frontmatter["date_started"] == date.today().isoformat()
+    assert result.note.libris_id == note.libris_id
+
+
 def test_an_update_by_path_refuses_a_note_it_cannot_parse(tmp_path):
     # Given a note whose frontmatter is broken
     path = tmp_path / "Broken.md"
