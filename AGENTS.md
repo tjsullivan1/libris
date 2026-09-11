@@ -37,7 +37,7 @@ uv sync --frozen              # Install dependencies (use --frozen in CI)
 uv sync --all-extras          # ...plus the server and mcp extras, needed for the WHOLE suite.
                               # Without them those tests skip themselves and the run still
                               # reports green, which is how fifty missing tests hide.
-uv run pytest                 # Run tests (NEVER invoke pytest directly)
+uv run --no-sync pytest       # Run tests (NEVER invoke pytest directly; see below)
 uv run pytest tests/test_api.py::test_search  # Run a single test
 uv run pytest --cov=src/libris               # Run with coverage
 uv run ruff check --fix .     # Lint and auto-fix (run before committing)
@@ -45,6 +45,19 @@ uv run ruff check .           # Lint check only (CI mode)
 uv run ruff format .          # Format
 uv run ruff format --check .  # Format check (CI mode)
 ```
+
+`uv run` without `--no-sync` reinstalls the project first, and that fails whenever a libris
+MCP server is running — it holds `.venv/Scripts/libris.exe` open, and uv cannot replace it:
+
+```
+error: failed to remove file `.venv\Scripts\libris.exe`:
+The process cannot access the file because it is being used by another process.
+```
+
+`--no-sync` skips the reinstall and still tests the working tree, because the project is
+installed editable. Use it. Killing the MCP server also works, at the cost of the
+`mcp__libris__*` tools in whatever session is using them. Add `--all-extras` reasoning still
+applies: CI syncs cleanly, so a missing dependency surfaces there rather than being hidden.
 
 `libris` on your PATH is a `uv tool` snapshot, not the working tree. It goes stale silently:
 after landing a change, `uv tool install . --force` from the repo root refreshes it, and
@@ -86,7 +99,7 @@ uv tool install . --force       # refresh the global command
 
 ## Testing
 
-- **Framework:** pytest, run via `uv run pytest`
+- **Framework:** pytest, run via `uv run --no-sync pytest`
 - **Isolation:** `conftest.py` has an `autouse` fixture that monkeypatches `LIBRIS_CONFIG_DIR` to `tmp_path` — tests never touch real `~/.config/libris`.
 - **Structure:** Given-When-Then (BDD style):
   ```python
@@ -103,6 +116,13 @@ uv tool install . --force       # refresh the global command
   ```
 - **Naming:** Be descriptive — no strict pattern required, but names should clearly convey what's being tested.
 - **Mocking:** Mock external HTTP calls (monkeypatch or `unittest.mock`). No live API calls in tests.
+- **Prove a new test can fail.** Break the thing it protects, run it, watch it fail, then put
+  the thing back. A test written after the code it covers is not evidence until it has failed
+  once. This is not ceremony — it has caught three tests in one week that passed while
+  asserting nothing: one searched the whole README so a field could lose its row unnoticed,
+  one checked `"Read"` as a substring and was satisfied by `"Reading"` elsewhere on the page,
+  and one stubbed two prompts with a single answer chosen by inspecting the offered choices,
+  so the value under test never reached the command at all.
 - **Coverage:** `uv run pytest --cov=src/libris` — aim for high coverage on library modules.
 
 ## Non-Interactive Shell Commands
