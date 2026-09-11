@@ -38,8 +38,8 @@ uv sync --all-extras          # ...plus the server and mcp extras, needed for th
                               # Without them those tests skip themselves and the run still
                               # reports green, which is how fifty missing tests hide.
 uv run --no-sync pytest       # Run tests (NEVER invoke pytest directly; see below)
-uv run pytest tests/test_api.py::test_search  # Run a single test
-uv run pytest --cov=src/libris               # Run with coverage
+uv run --no-sync pytest tests/test_api.py::test_search  # Run a single test
+uv run --no-sync pytest --cov=src/libris               # Run with coverage
 uv run ruff check --fix .     # Lint and auto-fix (run before committing)
 uv run ruff check .           # Lint check only (CI mode)
 uv run ruff format .          # Format
