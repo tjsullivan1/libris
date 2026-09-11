@@ -1,5 +1,6 @@
 """Markdown file operations for book notes (frontmatter, creation, enrichment)."""
 
+import errno
 import os
 import re
 from dataclasses import dataclass
@@ -359,12 +360,30 @@ def note_newline(path: Path) -> str:
         raw = path.read_bytes()
     except OSError:
         return os.linesep
+    return _dominant_newline(raw)
 
+
+def _dominant_newline(raw: bytes) -> str:
+    """The line ending most of a note's lines use, or the platform's if none."""
     crlf = raw.count(b"\r\n")
     bare_lf = raw.count(b"\n") - crlf
     if not crlf and not bare_lf:
         return os.linesep
     return "\r\n" if crlf >= bare_lf else "\n"
+
+
+def _encode_with_newline(content: str, newline: str) -> bytes:
+    """Encode a note's text with one line ending throughout.
+
+    The content is normalised to "\\n" before the ending is applied, because
+    applying "\\r\\n" to text that already holds it is what produced "\\r\\r\\n"
+    on 1,345 notes once already - see the comment in
+    `migrate.plan_format_note_migration`.
+    """
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    if newline != "\n":
+        content = content.replace("\n", newline)
+    return content.encode("utf-8")
 
 
 def write_note(path: Path, content: str) -> None:
@@ -376,20 +395,49 @@ def write_note(path: Path, content: str) -> None:
     all 3,059 of them into LF and showed every line as changed (#100). Writing
     bytes takes the platform out of it.
 
-    The content is normalised to "\\n" before the note's own ending is applied,
-    because applying "\\r\\n" to text that already holds it is what produced
-    "\\r\\r\\n" on 1,345 notes once already - see the comment in
-    `migrate.plan_format_note_migration`.
+    Creates the file when it does not exist. A write that means to change a note
+    already on the Shelf wants `rewrite_note`, which refuses instead.
 
     Args:
         path: The Book Note to write.
         content: The note's full text.
     """
-    newline = note_newline(path)
-    content = content.replace("\r\n", "\n").replace("\r", "\n")
-    if newline != "\n":
-        content = content.replace("\n", newline)
-    path.write_bytes(content.encode("utf-8"))
+    path.write_bytes(_encode_with_newline(content, note_newline(path)))
+
+
+def rewrite_note(path: Path, content: str) -> None:
+    """Replace the text of a Book Note that exists, never creating one.
+
+    `write_note` opens for writing, which creates a missing file. A write that
+    read a note and then found it removed before the write - Obsidian renaming
+    it, a sync client moving it - put the old note back under its old name and
+    reported success (#127 review): a Book Note resurrected by the act of
+    marking it Read, beside the renamed copy of itself. Opening the existing
+    file for update cannot create one.
+
+    The line ending is decided from the same handle that is written, so there is
+    no second open for the file to vanish between.
+
+    Args:
+        path: The Book Note to rewrite.
+        content: The note's full new text.
+
+    Raises:
+        FileNotFoundError: If the note is not there to rewrite, or was removed
+            while it was being written. POSIX lets a file be unlinked while it is
+            open, and the bytes then land in a file no name reaches - a write
+            that happened to nothing, so it is reported as one.
+    """
+    with path.open("r+b") as handle:
+        encoded = _encode_with_newline(content, _dominant_newline(handle.read()))
+        handle.seek(0)
+        handle.write(encoded)
+        handle.truncate()
+        handle.flush()
+        if os.fstat(handle.fileno()).st_nlink == 0:
+            raise FileNotFoundError(
+                errno.ENOENT, "removed while it was being written", str(path)
+            )
 
 
 def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
@@ -411,6 +459,8 @@ def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
         FrontmatterUnreadable: If the file has no parseable frontmatter block.
             Refused rather than repaired: this is the write path for one field,
             not the place to rebuild a broken note.
+        FileNotFoundError: If the note is not there, including when it is
+            removed between being read and being written. It is never recreated.
     """
     content = file_path.read_text(encoding="utf-8")
     split = split_frontmatter(content)
@@ -427,7 +477,7 @@ def set_frontmatter_fields(file_path: Path, updates: Dict[str, Any]) -> None:
 
     data.update(updates)
     rendered = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-    write_note(file_path, "---\n" + rendered + "\n---\n" + body)
+    rewrite_note(file_path, "---\n" + rendered + "\n---\n" + body)
 
 
 def list_books(vault_path: Path):

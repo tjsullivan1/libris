@@ -911,6 +911,31 @@ def test_a_note_gone_before_the_write_is_not_found(tmp_path, monkeypatch, update
     assert list(tmp_path.glob("*.md")) == []
 
 
+def test_a_note_removed_between_its_read_and_its_write_is_not_recreated(
+    tmp_path, monkeypatch, update
+):
+    # Given a note removed after the write has read it and before it writes back.
+    # The YAML is rendered in exactly that gap, so that is where it goes.
+    import yaml
+
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+    real_dump = yaml.dump
+
+    def _removed_while_rendering(*args, **kwargs):
+        note.path.unlink(missing_ok=True)
+        return real_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "dump", _removed_while_rendering)
+
+    # When it is updated
+    # Then it is a miss, and the note is not put back. Opening the path for
+    # writing created it again under its old name and reported success - beside
+    # the copy Obsidian had just renamed, if that is what moved it (#127 review).
+    with pytest.raises(BookNotFound):
+        update(note, {"status": "Reading"})
+    assert list(tmp_path.glob("*.md")) == []
+
+
 def test_a_note_gone_after_the_write_still_reports_the_write(
     tmp_path, monkeypatch, update
 ):
