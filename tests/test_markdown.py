@@ -1,3 +1,4 @@
+import sys
 import time
 from datetime import date
 from pathlib import Path
@@ -186,6 +187,67 @@ def test_update_book_status_refuses_a_note_it_cannot_parse(tmp_path):
     with pytest.raises(FrontmatterUnreadable):
         update_book_status(file_path, "Reading")
     assert file_path.read_text(encoding="utf-8") == original
+
+
+def test_rewriting_a_note_that_is_not_there_creates_nothing(tmp_path):
+    # Given a path where no note is
+    from libris.markdown import rewrite_note
+
+    gone = tmp_path / "Dune - Frank Herbert.md"
+
+    # When it is rewritten
+    # Then it refuses rather than creating it. A rewrite changes a note that
+    # exists; bringing one into being is a different act (#127 review).
+    with pytest.raises(FileNotFoundError):
+        rewrite_note(gone, "---\ntitle: Dune\n---\n")
+    assert not gone.exists()
+
+
+def test_rewriting_a_note_keeps_its_line_endings_and_drops_the_old_tail(tmp_path):
+    # Given a CRLF note longer than what replaces it
+    from libris.markdown import rewrite_note
+
+    path = tmp_path / "Dune.md"
+    path.write_bytes(b"---\r\ntitle: Dune\r\n---\r\n\r\nA long body that will go.\r\n")
+
+    # When it is rewritten with shorter text written in LF
+    rewrite_note(path, "---\ntitle: Dune\n---\n")
+
+    # Then the note's own ending is kept and nothing of the old text survives.
+    # Writing in place over a longer file leaves its tail unless it is cut off.
+    assert path.read_bytes() == b"---\r\ntitle: Dune\r\n---\r\n"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows refuses to remove a file another handle holds open",
+)
+def test_a_note_removed_while_it_is_rewritten_is_reported_not_written(
+    tmp_path, monkeypatch
+):
+    # Given a note that is unlinked while the rewrite holds it open, which POSIX
+    # permits - the bytes then go to a file no name reaches
+    from libris import markdown
+
+    path = tmp_path / "Dune.md"
+    path.write_bytes(b"---\ntitle: Dune\n---\n")
+    real = markdown.os.path.samestat
+
+    def _removed_once_checked(first, second):
+        # After the check that the path still names the open file, and before
+        # the write: the one instant that check cannot see.
+        same = real(first, second)
+        path.unlink()
+        return same
+
+    monkeypatch.setattr(markdown.os.path, "samestat", _removed_once_checked)
+
+    # When it is rewritten
+    # Then the write is reported as reaching nothing, rather than as a success
+    # nobody can ever read back - and the note is not recreated
+    with pytest.raises(FileNotFoundError):
+        markdown.rewrite_note(path, "---\ntitle: Dune\nstatus: Read\n---\n")
+    assert not path.exists()
 
 
 # Line endings are asserted on bytes throughout. `read_text` applies universal

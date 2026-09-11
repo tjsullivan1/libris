@@ -5,20 +5,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import yaml
-
 from .api import BookCandidate
 from .markdown import (
     BookNote,
     FrontmatterUnreadable,
     create_book_note,
     list_books,
-    split_frontmatter,
-    update_book_status,
-    write_note,
+    set_frontmatter_fields,
 )
 from .matching import normalize_for_match
-from .note_format import parse_frontmatter_yaml
+from .note_format import validate_field_value
 
 
 @dataclass
@@ -197,45 +193,40 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
 
     Returns:
         True when the note was updated, False when its frontmatter could not be
-        read - in which case nothing was written to it.
-    """
-    if "status" in updates:
-        try:
-            update_book_status(path, book.status)
-        except FrontmatterUnreadable:
-            # Same answer this function already gives for a format update it
-            # cannot parse: report the note as untouched rather than guessing
-            # at its shape. An import run writes many notes and must not stop
-            # on one it cannot read.
-            return False
+        read, it is not UTF-8, or the note was gone by the time it was written -
+        in which case nothing was written to it.
 
-    if "format" not in updates:
+    Raises:
+        InvalidFieldValue: If the status is not one the Library defines.
+    """
+    changes: dict[str, object] = {}
+    if "status" in updates:
+        # Checked before the note is opened, so a bad value refuses the whole
+        # update rather than surfacing halfway through it. Status only: an
+        # import's format has never been validated here, and this change is
+        # about how the fields land, not which values are allowed.
+        validate_field_value("status", book.status)
+        changes["status"] = book.status
+    if "format" in updates:
+        changes["format"] = book.format
+    if not changes:
         return True
 
-    content = path.read_text(encoding="utf-8")
-    split = split_frontmatter(content)
-    if split is None:
-        return False
-
-    frontmatter_yaml, rest_of_content = split
+    # Every field in one write. Status and format used to be two writes, so a
+    # note that moved or became unreadable between them kept the status and was
+    # reported as skipped - a partial import described as none (#127 review).
+    # `set_frontmatter_fields` also carries the body across untouched (#99) and
+    # never recreates a note that has gone.
     try:
-        data = parse_frontmatter_yaml(frontmatter_yaml)
-    except yaml.YAMLError:
-        # Deliberately no regex fallback. format is a list (ADR 0017), so a
-        # line-level substitution would write a Python repr and strand any
-        # existing block items below it, turning a note we could not parse into
-        # one nobody can. It is left alone instead.
+        set_frontmatter_fields(path, changes)
+    except (FrontmatterUnreadable, FileNotFoundError):
+        # Report the note as untouched rather than guessing at its shape. There
+        # is deliberately no regex fallback for broken YAML: format is a list
+        # (ADR 0017), and a line-level substitution would write a Python repr and
+        # strand the block items below it, turning a note we could not parse into
+        # one nobody can. An import run writes many notes and must not stop on
+        # one it cannot read, nor on one moved after the Shelf was scanned.
         return False
-
-    if not isinstance(data, dict):
-        return False
-
-    data["format"] = book.format
-    new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
-    # The body goes back as it was read. It carries its own leading newlines now
-    # that the split preserves them, so stripping would delete a blank line the
-    # reader put there (#99).
-    write_note(path, f"---\n{new_frontmatter}\n---\n{rest_of_content}")
     return True
 
 

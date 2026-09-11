@@ -30,7 +30,6 @@ from .markdown import (
     list_books,
     read_frontmatter,
     rename_book_file,
-    set_frontmatter_fields,
     split_frontmatter,
     update_frontmatter_from_book,
     write_note,
@@ -58,7 +57,6 @@ from .migrate import (
 from .note_format import (
     STATUS_VALUES,
     InvalidFieldValue,
-    mint_libris_id,
     normalize_field_value,
     parse_frontmatter_yaml,
     validate_field_value,
@@ -70,9 +68,8 @@ from .service import (
     IdCollision,
     IsbnAgreement,
     apply_decisions,
-    find_by_libris_id,
     inspect_shelf,
-    update_book,
+    update_note,
 )
 
 # Windows consoles and redirected output default to cp1252, which cannot encode
@@ -240,41 +237,6 @@ def _note_on_the_shelf(vault_path: Path, name: str, books: list[Path]) -> Path:
     return chosen
 
 
-def _identity_for(path: Path) -> str:
-    """The note's Libris ID, minting one when it has none.
-
-    `service.update_book` addresses a note by identity while `libris status`
-    picks one by filename, so the two have to be bridged somewhere. Every note
-    on the Shelf carries an id, but one added by hand outside Libris would not,
-    and refusing to set its status would be a strange place for a reader to
-    learn that.
-
-    Only the id is written. `ensure_frontmatter_fields` also mints one, but it
-    repairs every other field on the way past - restandardising titles among
-    them - and setting a status is no place to decide that.
-
-    Args:
-        path: The Book Note being updated.
-
-    Returns:
-        The identity it carries, or the one just minted for it.
-
-    Raises:
-        FrontmatterUnreadable: If the note has no frontmatter to read or write.
-    """
-    note = BookNote.read(path)
-    if note is None:
-        raise FrontmatterUnreadable(f"{path.name} has no readable frontmatter.")
-    if note.libris_id:
-        return note.libris_id
-
-    # Derived from `date_added` so the Shelf still sorts in the order it was
-    # acquired, which is the whole reason the id is a ULID (ADR 0011).
-    minted = mint_libris_id(note.frontmatter.get("date_added"))
-    set_frontmatter_fields(path, {"libris_id": minted})
-    return minted
-
-
 @app.command()
 def status():
     """Update the status of a book in your vault."""
@@ -315,27 +277,12 @@ def status():
     # a book Reading through MCP stamped `date_started` and doing it here did
     # not, so the same act left two different notes depending on where it was
     # done (#97).
+    #
+    # By path rather than by identity: this command already holds the note, and
+    # resolving it by id parsed the whole Shelf to find it again - and when two
+    # notes claimed one id (#75), found the other of them (#125).
     try:
-        libris_id = _identity_for(selected_file)
-
-        # `update_book` addresses a note by identity, and `find_by_libris_id`
-        # returns the first note claiming one. Two notes can claim the same id -
-        # that is #75, and the real Shelf holds such a pair - so picking the
-        # second of them would have updated the first while this command
-        # reported the name that was picked. A write to the wrong book,
-        # announced as a write to the right one, is exactly what ADR 0003 is
-        # there to refuse.
-        holder = find_by_libris_id(vault_path, libris_id)
-        if holder is not None and holder.path != selected_file:
-            typer.echo(
-                f"{selected_file.name} shares its Libris ID with "
-                f"{holder.path.name}, so there is no way to tell which of them "
-                "an update means. Nothing was written."
-            )
-            typer.echo("Run `libris doctor` to see the contested identities.")
-            raise typer.Exit(code=1)
-
-        result = update_book(vault_path, libris_id, {"status": new_status})
+        result = update_note(selected_file, {"status": new_status})
     except FrontmatterUnreadable as exc:
         typer.echo(f"{exc} Nothing was written to it.")
         raise typer.Exit(code=1) from None
@@ -1199,7 +1146,7 @@ def doctor(
     Reads and reports. Nothing is written, and nothing is asked of the network:
     the point is to see the damage before anything proposes a repair for it.
 
-    Two checks so far, both of which end in a judgement the Library cannot make:
+    Three checks so far, each ending in a judgement the Library cannot make:
 
     Contested identities - two Book Notes claiming one Libris ID (#75). Merging
     is right when they are one book and re-minting is right when they are not,
@@ -1208,26 +1155,52 @@ def doctor(
     Lost characters - a note carrying the replacement character where an
     accented letter used to be (#78). The letter itself is gone from the file,
     so the correct spelling has to come from the API or from a reader.
+
+    Not UTF-8 - a note saved in another encoding. Its letters are intact, but
+    nothing else in Libris can read it until it is saved as UTF-8, and which
+    encoding it was written in is not something the file says.
     """
     vault_path = _require_vault_path()
 
-    # One pass for both checks. Called separately they each read the Shelf,
-    # which meant reading 3,063 files twice.
+    # One pass for every check. Called separately they each read the Shelf,
+    # which meant reading 3,063 files once per check.
     report = inspect_shelf(vault_path)
-    collisions = report.collisions
-    damaged = report.encoding_damage
 
     if report.is_clean:
         typer.echo("Nothing on the Shelf needs a decision.")
         return
 
-    if collisions:
-        _report_id_collisions(collisions)
+    sections = []
+    if report.collisions:
+        sections.append(lambda: _report_id_collisions(report.collisions))
+    if report.encoding_damage:
+        sections.append(
+            lambda: _report_encoding_damage(report.encoding_damage, verbose)
+        )
+    if report.not_utf8:
+        sections.append(lambda: _report_not_utf8(report.not_utf8))
 
-    if damaged:
-        if collisions:
+    for index, section in enumerate(sections):
+        if index:
             typer.echo("")
-        _report_encoding_damage(damaged, verbose)
+        section()
+
+
+def _report_not_utf8(paths: list[Path]) -> None:
+    """Print the notes that are not UTF-8 text.
+
+    Args:
+        paths: The notes from `inspect_shelf`.
+    """
+    typer.echo(f"{len(paths)} note(s) are not UTF-8 text.\n")
+    for path in paths:
+        typer.echo(f"    {path.name}")
+    typer.echo(
+        "\nTheir letters are intact, but nothing else in Libris can read them: "
+        "search passes over them and `libris status` refuses them. Save each as "
+        "UTF-8 in an editor that can tell which encoding it was written in - the "
+        "file does not say, so Libris does not guess (ADR 0003)."
+    )
 
 
 @app.command()

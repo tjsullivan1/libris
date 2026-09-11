@@ -683,7 +683,8 @@ def update_book(
         derived.
 
     Raises:
-        BookNotFound: If no note answers for the identity.
+        BookNotFound: If no note answers for the identity, or its file is gone
+            by the time it is written.
         InvalidFieldValue: If a value is not one the Library defines.
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
@@ -691,7 +692,75 @@ def update_book(
     note = find_by_libris_id(vault_path, libris_id)
     if note is None:
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
+    return _set_reader_fields(note.path, fields, holding=libris_id.strip())
 
+
+def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
+    """Set fields on a Book Note a Surface already holds.
+
+    The same update as `update_book`, reached by the file rather than by
+    identity. `libris status` is handed a note, and resolving it by identity
+    meant deriving an id from the note only to hand it straight back - which
+    parsed the whole Shelf to find a file it already had (6 to 14 seconds on the
+    real Shelf), and when two notes claimed one id, could land on the other of
+    them (#75, #125). A write by path cannot reach a different note.
+
+    The caller answers for the path being a Book Note on the Shelf; nothing here
+    checks where it leads.
+
+    Args:
+        path: The Book Note to write.
+        fields: Field names and the values to set them to.
+
+    Returns:
+        The updated Book Note, what was written, and anything the Library
+        derived.
+
+    Raises:
+        BookNotFound: If there is no file at the path, or it stops being the
+            file at that path before it is written.
+        InvalidFieldValue: If a value is not one the Library defines.
+        ValueError: If a field is not the reader's to set, or a value is null.
+        FrontmatterUnreadable: If the note's frontmatter cannot be parsed, or
+            the file is not UTF-8.
+    """
+    return _set_reader_fields(path, fields)
+
+
+def _set_reader_fields(
+    path: Path, fields: dict[str, object], holding: str | None = None
+) -> UpdateResult:
+    """What an update means, however the note was reached (ADR 0008).
+
+    The one definition of which fields a Surface may set, how a value is
+    repaired and judged, and what is stamped and disclosed. Both entry points
+    come through here, so resolving a note differently cannot mean updating it
+    differently - which is how #97 happened.
+
+    The values are judged before the note is opened, since none of that depends
+    on the note. What does - whether a date is already there to keep - is
+    decided from the note as read inside the write, so it describes the file the
+    write lands in rather than one read a moment earlier (#127 review).
+
+    Args:
+        path: The Book Note to write.
+        fields: Field names and the values to set them to.
+        holding: The identity the note was resolved by, when it was. A file at
+            that path that no longer answers for it is a different note, and is
+            not written.
+
+    Returns:
+        The updated Book Note, what was written, and anything the Library
+        derived.
+
+    Raises:
+        BookNotFound: If the file is gone, has moved, or no longer holds the
+            identity it was resolved by, by the time it is written.
+        InvalidFieldValue: If a value is not one the Library defines.
+        ValueError: If a field is not the reader's to set, or a value is null.
+        FrontmatterUnreadable: If the note's frontmatter cannot be parsed, or
+            the file is not UTF-8.
+    """
     written: dict[str, object] = {}
     for name, value in fields.items():
         if name not in READER_FIELDS:
@@ -736,17 +805,38 @@ def update_book(
 
     derived: dict[str, object] = {}
     stamp = _STATUS_STAMPS.get(str(fields.get("status", "")))
-    if stamp and stamp not in fields and not note.frontmatter.get(stamp):
-        # Only ever fills an empty field, so re-marking a dated book Read leaves
-        # the original date alone. A re-read is not something the Library models.
-        derived[stamp] = date.today().isoformat()
-        written[stamp] = derived[stamp]
 
-    if written:
-        set_frontmatter_fields(note.path, written)
+    def _decide(current: dict[str, object]) -> dict[str, object]:
+        if holding is not None:
+            held = BookNote(path=path, frontmatter=current)
+            if held.libris_id != holding and holding not in held.superseded_ids:
+                # The index answered for this path, and something else is there
+                # now - a note renamed away and another saved in its place.
+                raise BookNotFound(f"No Book Note holds the id {holding!r}.")
+        if stamp and stamp not in fields and not current.get(stamp):
+            # Only ever fills an empty field, so re-marking a dated book Read
+            # leaves the original date alone. A re-read is not something the
+            # Library models.
+            derived[stamp] = date.today().isoformat()
+            written[stamp] = derived[stamp]
+        return written
 
+    try:
+        frontmatter = set_frontmatter_fields(path, _decide)
+    except FileNotFoundError:
+        # Gone or moved before the write - Obsidian renaming it, or a sync client.
+        # Either entry point can lose this race: the index answered for a file
+        # that has since moved, or the CLI picked one that has. Nothing was
+        # written, so it is a miss (ADR 0003).
+        raise BookNotFound(f"No Book Note is at {path.name}.") from None
+
+    # The frontmatter the write produced, rather than a read-back: a second read
+    # is a second chance for the file to have gone, and would report a write
+    # that happened as one that did not.
     return UpdateResult(
-        note=BookNote.read(note.path) or note, written=written, derived=derived
+        note=BookNote(path=path, frontmatter=frontmatter),
+        written=written,
+        derived=derived,
     )
 
 
@@ -875,6 +965,11 @@ class _ShelfFile:
     # Empty otherwise, so a caller cannot read the same field from both.
     unparsed_frontmatter: str
     body: str
+    # The file is not UTF-8, and was read with each undecodable byte replaced.
+    # Its replacement characters are this reader's, not damage in the note: the
+    # bytes are intact on disk, so a check for lost characters must not count
+    # them.
+    not_utf8: bool = False
 
     def value(self, key: str) -> object:
         """Read a frontmatter field, whether or not the block parsed.
@@ -933,7 +1028,30 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
         One `_ShelfFile` per file, in filename order.
     """
     for path in sorted(list_books(vault_path)):
-        content = path.read_text(encoding="utf-8")
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            # Listed, then gone before it was read - Obsidian renaming it, or a
+            # sync client. The Shelf no longer holds it, and one moved note must
+            # not stop `doctor` for the rest (#127 review).
+            continue
+
+        # Decoded from the one read. Reading again to decode leniently was a
+        # second chance for the file to vanish or be replaced (#127 review).
+        try:
+            content = raw.decode("utf-8")
+            not_utf8 = False
+        except UnicodeDecodeError:
+            # Decoded anyway, with each undecodable byte replaced, rather than
+            # raised. Raised, one such file stopped `doctor` for the whole Shelf
+            # (#127 review) - and a note nothing else can read is exactly what
+            # this reader is for. Its ASCII survives, `libris_id` included, so
+            # a collision it is part of is still found.
+            content = raw.decode("utf-8", errors="replace")
+            not_utf8 = True
+        # The same line endings `read_text` would have produced, so nothing
+        # below sees a stray carriage return it did not see before.
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
         split = split_frontmatter(content)
 
         if split is None:
@@ -945,12 +1063,12 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
                 # about a malformed file, but a better one than calling it all
                 # body: a note like this states its `libris_id` on the second
                 # line, and reading it as prose lost the collision it was in.
-                yield _ShelfFile(path, {}, unterminated, "")
+                yield _ShelfFile(path, {}, unterminated, "", not_utf8)
                 continue
 
             # No fence at all, so the whole file is body - the same answer
             # `merge._extract_body_content` gives.
-            yield _ShelfFile(path, {}, "", content)
+            yield _ShelfFile(path, {}, "", content, not_utf8)
             continue
 
         try:
@@ -959,11 +1077,11 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
             parsed = None
 
         if isinstance(parsed, dict):
-            yield _ShelfFile(path, parsed, "", split[1])
+            yield _ShelfFile(path, parsed, "", split[1], not_utf8)
         else:
             # The block is there but nothing reads it as a mapping, so there are
             # no fields to look through and the raw text is all a check has.
-            yield _ShelfFile(path, {}, split[0], split[1])
+            yield _ShelfFile(path, {}, split[0], split[1], not_utf8)
 
 
 def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
@@ -1015,10 +1133,20 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
         body = shelf_file.body
         fields: dict[str, list[str]] = {}
 
+        # Checked for every file, whatever its contents are encoded as. A
+        # filename is not decoded by this reader, so a lost character in one is
+        # real damage wanting a rename - and a note can have that and be saved in
+        # another encoding too (#127 review).
         if LOST_CHARACTER in path.name:
             fields["filename"] = [path.name]
 
-        for name in _DAMAGE_FIELDS:
+        # The contents are searched only when they decoded cleanly. In a file
+        # that is not UTF-8, every replacement character was put there by
+        # reading it and the letters are still on disk; reported as lost, they
+        # would send a person to the API for a spelling the file already holds.
+        search_contents = not shelf_file.not_utf8
+
+        for name in _DAMAGE_FIELDS if search_contents else ():
             found = _damaged_strings(frontmatter.get(name))
             if found:
                 fields[name] = found
@@ -1029,7 +1157,7 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
         unparsed_lines = [
             line.strip()
             for line in unparsed_frontmatter.splitlines()
-            if LOST_CHARACTER in line
+            if search_contents and LOST_CHARACTER in line
         ]
         if unparsed_lines:
             fields["frontmatter (unparseable)"] = unparsed_lines
@@ -1037,7 +1165,9 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
         # Reported line by line rather than whole: a body is the longest thing a
         # note holds, and a reader checking 41 of them wants the line.
         body_lines = [
-            line.strip() for line in body.splitlines() if LOST_CHARACTER in line
+            line.strip()
+            for line in body.splitlines()
+            if search_contents and LOST_CHARACTER in line
         ]
         if body_lines:
             fields["body"] = body_lines
@@ -1181,11 +1311,14 @@ class ShelfReport:
 
     collisions: list[IdCollision] = field(default_factory=list)
     encoding_damage: list[EncodingDamage] = field(default_factory=list)
+    # Notes that are not UTF-8 text. Nothing else in Libris can read them - the
+    # index treats them as unparseable - so this is the one place they surface.
+    not_utf8: list[Path] = field(default_factory=list)
 
     @property
     def is_clean(self) -> bool:
         """Whether nothing found anything worth a person's attention."""
-        return not self.collisions and not self.encoding_damage
+        return not self.collisions and not self.encoding_damage and not self.not_utf8
 
 
 def inspect_shelf(vault_path: Path) -> ShelfReport:
@@ -1206,6 +1339,7 @@ def inspect_shelf(vault_path: Path) -> ShelfReport:
     return ShelfReport(
         collisions=_id_collisions_in(files),
         encoding_damage=_encoding_damage_in(files),
+        not_utf8=[shelf_file.path for shelf_file in files if shelf_file.not_utf8],
     )
 
 

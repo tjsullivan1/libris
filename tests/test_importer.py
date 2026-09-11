@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -466,6 +467,129 @@ def test_apply_updates_leaves_unparseable_frontmatter_alone(tmp_path):
     # one nobody can
     assert applied is False
     assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("updates", [["status"], ["format"]])
+def test_apply_updates_skips_a_note_moved_since_the_shelf_was_scanned(
+    tmp_path, updates
+):
+    # Given a note the import matched, then renamed or moved before its update
+    gone = tmp_path / "Dune - Frank Herbert.md"
+    book = ImportBook(
+        candidate=BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        status="Read",
+        format=["Audiobook"],
+    )
+
+    # When the update is applied
+    applied = _apply_updates(gone, book, updates)
+
+    # Then that book is skipped rather than the whole import stopping on a
+    # FileNotFoundError (#127 review), and nothing is created in its place
+    assert applied is False
+    assert list(tmp_path.glob("*.md")) == []
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows refuses to remove a file another handle holds open",
+)
+def test_apply_updates_skips_a_note_removed_between_its_read_and_write(
+    tmp_path, monkeypatch
+):
+    # Given a note removed after its status update has read it, before the write.
+    # The YAML is rendered in exactly that gap, with the note held open.
+    import yaml
+
+    from libris.markdown import create_book_note
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    real_dump = yaml.dump
+
+    def _removed_while_rendering(*args, **kwargs):
+        path.unlink(missing_ok=True)
+        return real_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "dump", _removed_while_rendering)
+    book = ImportBook(
+        candidate=BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        status="Read",
+    )
+
+    # When its status is applied
+    applied = _apply_updates(path, book, ["status"])
+
+    # Then it is skipped, and not recreated
+    assert applied is False
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_apply_updates_writes_status_and_format_together(tmp_path, monkeypatch):
+    # Given a note due both a status and a format, the ordinary import case, and
+    # a count of every write that reaches a note
+    from libris import importer, markdown
+    from libris.markdown import create_book_note, read_frontmatter
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    writes = []
+    real_through = markdown._write_through
+    monkeypatch.setattr(
+        markdown,
+        "_write_through",
+        lambda *args: (writes.append("rewrite"), real_through(*args))[1],
+    )
+    real_write_note = markdown.write_note
+    monkeypatch.setattr(
+        importer,
+        "write_note",
+        lambda *args: (writes.append("write_note"), real_write_note(*args))[1],
+        raising=False,
+    )
+    book = ImportBook(
+        candidate=BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        status="Read",
+        format=["Audiobook"],
+    )
+
+    # When both are applied
+    applied = _apply_updates(path, book, ["status", "format"])
+
+    # Then they land in one write. Two writes meant a note that moved or became
+    # unreadable between them kept its new status while the import reported it
+    # skipped - a partial update described as none (#127 review).
+    assert applied is True
+    assert writes == ["rewrite"]
+    frontmatter = read_frontmatter(path)
+    assert frontmatter["status"] == "Read"
+    assert frontmatter["format"] == ["Audiobook"]
+
+
+@pytest.mark.parametrize("updates", [["status"], ["format"], ["status", "format"]])
+def test_apply_updates_skips_a_note_that_is_not_utf8(tmp_path, updates):
+    # Given a note the import matched, saved as Latin-1
+    path = tmp_path / "Dune - Frank Herbert.md"
+    path.write_bytes(
+        "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nstatus: To Read\n"
+        "format: null\n---\n\nSøren says hello.\n".encode("latin-1")
+    )
+    before = path.read_bytes()
+    book = ImportBook(
+        candidate=BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        status="Read",
+        format=["Audiobook"],
+    )
+
+    # When its updates are applied
+    applied = _apply_updates(path, book, updates)
+
+    # Then the book is skipped rather than the import stopping on a
+    # UnicodeDecodeError (#127 review), and the note is untouched
+    assert applied is False
+    assert path.read_bytes() == before
 
 
 def test_importing_a_finished_book_does_not_stamp_todays_date(tmp_path):
