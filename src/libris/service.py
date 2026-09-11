@@ -19,6 +19,7 @@ import yaml
 from .api import BookCandidate, GoogleBooksClient
 from .markdown import (
     BookNote,
+    FrontmatterUnreadable,
     create_book_note,
     list_books,
     set_frontmatter_fields,
@@ -691,7 +692,68 @@ def update_book(
     note = find_by_libris_id(vault_path, libris_id)
     if note is None:
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
+    return _set_reader_fields(note, fields)
 
+
+def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
+    """Set fields on a Book Note a Surface already holds.
+
+    The same update as `update_book`, reached by the file rather than by
+    identity. `libris status` is handed a note, and resolving it by identity
+    meant deriving an id from the note only to hand it straight back - which
+    parsed the whole Shelf to find a file it already had (6 to 14 seconds on the
+    real Shelf), and when two notes claimed one id, could land on the other of
+    them (#75, #125). A write by path cannot reach a different note.
+
+    The caller answers for the path being a Book Note on the Shelf; nothing here
+    checks where it leads.
+
+    Args:
+        path: The Book Note to write.
+        fields: Field names and the values to set them to.
+
+    Returns:
+        The updated Book Note, what was written, and anything the Library
+        derived.
+
+    Raises:
+        BookNotFound: If there is no file at the path.
+        InvalidFieldValue: If a value is not one the Library defines.
+        ValueError: If a field is not the reader's to set, or a value is null.
+        FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
+    """
+    try:
+        note = BookNote.read(path)
+    except FileNotFoundError:
+        # Gone between being picked and being written - Obsidian renaming it,
+        # or a sync client. A miss, the same as an identity nothing holds.
+        raise BookNotFound(f"No Book Note is at {path.name}.") from None
+    if note is None:
+        raise FrontmatterUnreadable(f"{path.name} has no readable frontmatter.")
+    return _set_reader_fields(note, fields)
+
+
+def _set_reader_fields(note: BookNote, fields: dict[str, object]) -> UpdateResult:
+    """What an update means, however the note was reached (ADR 0008).
+
+    The one definition of which fields a Surface may set, how a value is
+    repaired and judged, and what is stamped and disclosed. Both entry points
+    come through here, so resolving a note differently cannot mean updating it
+    differently - which is how #97 happened.
+
+    Args:
+        note: The Book Note to write, as read from disk.
+        fields: Field names and the values to set them to.
+
+    Returns:
+        The updated Book Note, what was written, and anything the Library
+        derived.
+
+    Raises:
+        InvalidFieldValue: If a value is not one the Library defines.
+        ValueError: If a field is not the reader's to set, or a value is null.
+        FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
+    """
     written: dict[str, object] = {}
     for name, value in fields.items():
         if name not in READER_FIELDS:

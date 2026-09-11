@@ -12,7 +12,8 @@ import pytest
 from libris import service
 from libris.api import BookCandidate
 from libris.markdown import (
-    BookNote,  # noqa: F401
+    BookNote,
+    FrontmatterUnreadable,
     create_book_note,
 )
 from libris.note_format import InvalidFieldValue
@@ -32,6 +33,7 @@ from libris.service import (
     is_isbn10,
     search_library,
     update_book,
+    update_note,
 )
 
 
@@ -659,35 +661,52 @@ def _read_back(vault_path, libris_id):
     raise AssertionError(f"no note holds {libris_id}")
 
 
-def test_a_named_field_is_set(tmp_path):
+@pytest.fixture(params=["by identity", "by path"])
+def update(request, tmp_path):
+    """Update a note through each entry point in turn (#125).
+
+    `update_book` and `update_note` differ only in how they find the note, so
+    every rule about what an update means is checked through both. A rule that
+    held for one and not the other would be #97 again, one layer down.
+    """
+
+    def _update(note, fields):
+        if request.param == "by identity":
+            return update_book(tmp_path, note.libris_id, fields)
+        return update_note(note.path, fields)
+
+    return _update
+
+
+def test_a_named_field_is_set(tmp_path, update):
     # Given a book waiting to be read
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
 
     # When its status is moved on
-    update_book(tmp_path, note.libris_id, {"status": "Reading"})
+    update(note, {"status": "Reading"})
 
     # Then the Shelf holds the new value
     assert _read_back(tmp_path, note.libris_id).frontmatter["status"] == "Reading"
 
 
-def test_fields_that_were_not_named_are_left_alone(tmp_path):
+def test_fields_that_were_not_named_are_left_alone(tmp_path, update):
     # Given a book carrying a rating nobody mentioned
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read", rating=5)
 
     # When only the status is set
-    update_book(tmp_path, note.libris_id, {"status": "Reading"})
+    update(note, {"status": "Reading"})
 
     # Then the rating survives. An update names only the fields it changes, so
     # it can never overwrite a field it knows nothing about.
     assert _read_back(tmp_path, note.libris_id).frontmatter["rating"] == 5
 
 
-def test_finishing_a_book_stamps_the_date_and_says_so(tmp_path):
+def test_finishing_a_book_stamps_the_date_and_says_so(tmp_path, update):
     # Given a book being read, with no finish date
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="Reading")
 
     # When it is marked Read without a date
-    result = update_book(tmp_path, note.libris_id, {"status": "Read"})
+    result = update(note, {"status": "Read"})
 
     # Then today is stamped, and reported as something the caller did not ask
     # for - so a person who meant last Tuesday can correct it (ADR 0024)
@@ -696,25 +715,23 @@ def test_finishing_a_book_stamps_the_date_and_says_so(tmp_path):
     assert result.derived == {"date_finished": today}
 
 
-def test_starting_a_book_stamps_the_started_date(tmp_path):
+def test_starting_a_book_stamps_the_started_date(tmp_path, update):
     # Given a book nobody has opened
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
 
     # When it is marked Reading
-    result = update_book(tmp_path, note.libris_id, {"status": "Reading"})
+    result = update(note, {"status": "Reading"})
 
     # Then the start date is stamped and disclosed
     assert result.derived == {"date_started": date.today().isoformat()}
 
 
-def test_an_explicit_date_is_never_overridden(tmp_path):
+def test_an_explicit_date_is_never_overridden(tmp_path, update):
     # Given a book being read
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="Reading")
 
     # When it is marked Read with the date it was actually finished
-    result = update_book(
-        tmp_path, note.libris_id, {"status": "Read", "date_finished": "2026-08-25"}
-    )
+    result = update(note, {"status": "Read", "date_finished": "2026-08-25"})
 
     # Then that date stands and nothing is derived. The stamp is a fallback,
     # never an override (ADR 0024).
@@ -723,14 +740,14 @@ def test_an_explicit_date_is_never_overridden(tmp_path):
     assert result.derived == {}
 
 
-def test_a_date_already_on_the_note_is_not_restamped(tmp_path):
+def test_a_date_already_on_the_note_is_not_restamped(tmp_path, update):
     # Given a book finished years ago
     note = _shelve(
         tmp_path, "Dune", ["Frank Herbert"], status="Read", date_finished="2019-04-01"
     )
 
     # When its status is set to Read once more
-    result = update_book(tmp_path, note.libris_id, {"status": "Read"})
+    result = update(note, {"status": "Read"})
 
     # Then the original date survives. A re-read is not something the Library
     # models, and inventing one here would be scope creep (ADR 0024).
@@ -739,7 +756,7 @@ def test_a_date_already_on_the_note_is_not_restamped(tmp_path):
     assert result.derived == {}
 
 
-def test_a_value_the_library_does_not_define_is_refused(tmp_path):
+def test_a_value_the_library_does_not_define_is_refused(tmp_path, update):
     # Given a status outside the four the Library allows
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
@@ -747,10 +764,10 @@ def test_a_value_the_library_does_not_define_is_refused(tmp_path):
     # Then it is refused. `libris update` offers "Finished" to this day, which
     # is the drift ADR 0022 exists to stop.
     with pytest.raises(InvalidFieldValue):
-        update_book(tmp_path, note.libris_id, {"status": "Finished"})
+        update(note, {"status": "Finished"})
 
 
-def test_a_field_that_is_not_the_readers_is_refused(tmp_path):
+def test_a_field_that_is_not_the_readers_is_refused(tmp_path, update):
     # Given a field describing the edition rather than the reading of it
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
@@ -758,10 +775,10 @@ def test_a_field_that_is_not_the_readers_is_refused(tmp_path):
     # Then it is refused: Libris owns the title (ADR 0012), and bibliographic
     # fields come from enrichment rather than from someone talking.
     with pytest.raises(ValueError):
-        update_book(tmp_path, note.libris_id, {"title": "Doon"})
+        update(note, {"title": "Doon"})
 
 
-def test_a_null_does_not_silently_clear_a_field(tmp_path):
+def test_a_null_does_not_silently_clear_a_field(tmp_path, update):
     # Given a book carrying a rating
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], rating=5)
 
@@ -769,7 +786,7 @@ def test_a_null_does_not_silently_clear_a_field(tmp_path):
     # Then it is refused rather than treated as "clear this". A model emitting
     # null for "unchanged" would otherwise erase a field nobody mentioned.
     with pytest.raises(ValueError):
-        update_book(tmp_path, note.libris_id, {"rating": None})
+        update(note, {"rating": None})
     assert _read_back(tmp_path, note.libris_id).frontmatter["rating"] == 5
 
 
@@ -784,12 +801,12 @@ def test_an_unknown_identity_is_not_found(tmp_path):
     assert len(list(tmp_path.glob("*.md"))) == 1
 
 
-def test_a_multi_valued_field_takes_several_values(tmp_path):
+def test_a_multi_valued_field_takes_several_values(tmp_path, update):
     # Given a book owned on paper and listened to as an audiobook
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
     # When both formats are recorded
-    update_book(tmp_path, note.libris_id, {"format": ["Physical", "Audiobook"]})
+    update(note, {"format": ["Physical", "Audiobook"]})
 
     # Then both stand. Several at once is normal for a Format (ADR 0017).
     assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == [
@@ -816,7 +833,7 @@ def test_a_superseded_identity_still_updates_the_survivor(tmp_path):
     assert _read_back(tmp_path, survivor.libris_id).frontmatter["status"] == "Read"
 
 
-def test_the_body_is_left_exactly_as_it_was(tmp_path):
+def test_the_body_is_left_exactly_as_it_was(tmp_path, update):
     # Given a note whose body holds the reader's own writing, including a line
     # that looks like a frontmatter field
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
@@ -833,12 +850,76 @@ def test_the_body_is_left_exactly_as_it_was(tmp_path):
     note.path.write_text("---" + frontmatter + "---" + chr(10) + body, encoding="utf-8")
 
     # When the status is updated
-    update_book(tmp_path, note.libris_id, {"status": "Read"})
+    update(note, {"status": "Read"})
 
     # Then the body survives exactly, including that line. An MCP write reaches
     # frontmatter and nothing else (ADR 0023), and that line is the shape of the
     # bug in #92.
     assert note.path.read_text(encoding="utf-8").endswith(body)
+
+
+def test_an_update_by_path_writes_the_note_it_was_handed(tmp_path):
+    # Given two notes claiming one Libris ID, as the real Shelf has held (#75)
+    for name in ("Aaa First.md", "Zzz Second.md"):
+        (tmp_path / name).write_text(
+            "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\n"
+            f"title: {name[:-3]}\nauthors:\n  - Someone\nstatus: To Read\n---\n\nMine.\n",
+            encoding="utf-8",
+        )
+
+    # When the second is updated by its path
+    result = update_note(tmp_path / "Zzz Second.md", {"status": "Read"})
+
+    # Then the second is written and the first is not. By identity, this reached
+    # whichever claimant the scan found first (#125).
+    assert result.note.path == tmp_path / "Zzz Second.md"
+    assert BookNote.read(tmp_path / "Zzz Second.md").frontmatter["status"] == "Read"
+    assert BookNote.read(tmp_path / "Aaa First.md").frontmatter["status"] == "To Read"
+
+
+def test_an_update_by_path_to_a_file_that_is_gone_is_not_found(tmp_path):
+    # Given a path where a note was picked and has since gone - renamed in
+    # Obsidian, or moved by a sync client
+    gone = tmp_path / "Dune - Frank Herbert.md"
+
+    # When it is updated
+    # Then it is a miss, the same as an identity nothing holds, and nothing is
+    # created in its place (ADR 0003)
+    with pytest.raises(BookNotFound):
+        update_note(gone, {"status": "Read"})
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_an_update_by_path_refuses_a_note_it_cannot_parse(tmp_path):
+    # Given a note whose frontmatter is broken
+    path = tmp_path / "Broken.md"
+    path.write_text("---\ntitle: [unclosed\n---\n\nMine.\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    # When it is updated
+    # Then it is refused and left exactly as it was. By identity such a note is
+    # simply not found, because the index skips it; by path it is in hand, so
+    # the reason is the one worth giving.
+    with pytest.raises(FrontmatterUnreadable):
+        update_note(path, {"status": "Read"})
+    assert path.read_bytes() == before
+
+
+def test_an_update_by_path_does_not_consult_the_shelf(tmp_path, monkeypatch):
+    # Given a note, and a Shelf index that fails if anything asks it
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+
+    def _refuse(_vault_path):
+        raise AssertionError("an update by path built the Shelf index")
+
+    monkeypatch.setattr(service, "index_for", _refuse)
+
+    # When it is updated by path
+    update_note(note.path, {"status": "Reading"})
+
+    # Then it is written without the whole Shelf being parsed to find a note the
+    # caller already had - 6 to 14 seconds on the real Shelf (#125)
+    assert BookNote.read(note.path).frontmatter["status"] == "Reading"
 
 
 # --- adding over a Near Match (ADR 0026) ---
@@ -925,7 +1006,7 @@ def test_confirming_writes_even_over_a_near_match(tmp_path):
     assert len(list(tmp_path.glob("*.md"))) == 2
 
 
-def test_an_empty_string_does_not_clear_a_field(tmp_path):
+def test_an_empty_string_does_not_clear_a_field(tmp_path, update):
     # Given a book carrying a start date
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], date_started="2019-04-01")
 
@@ -934,12 +1015,12 @@ def test_an_empty_string_does_not_clear_a_field(tmp_path):
     # the empty string is the quiet one, and it passes every vocabulary check
     # because the field has no vocabulary.
     with pytest.raises(ValueError):
-        update_book(tmp_path, note.libris_id, {"date_started": ""})
+        update(note, {"date_started": ""})
     written = _read_back(tmp_path, note.libris_id).frontmatter["date_started"]
     assert str(written) == "2019-04-01"
 
 
-def test_an_empty_list_does_not_clear_a_multi_valued_field(tmp_path):
+def test_an_empty_list_does_not_clear_a_multi_valued_field(tmp_path, update):
     # Given a book recorded in two formats
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], format=["Physical", "Ebook"])
 
@@ -948,19 +1029,19 @@ def test_an_empty_list_does_not_clear_a_multi_valued_field(tmp_path):
     # validation entry by entry because there are no entries, and then
     # normalize_field_value turns it into None - a clear nobody asked for.
     with pytest.raises(ValueError):
-        update_book(tmp_path, note.libris_id, {"format": []})
+        update(note, {"format": []})
     assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == [
         "Physical",
         "Ebook",
     ]
 
 
-def test_a_rating_of_zero_is_a_value_not_an_absence(tmp_path):
+def test_a_rating_of_zero_is_a_value_not_an_absence(tmp_path, update):
     # Given a book with no rating
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
     # When it is rated zero
-    update_book(tmp_path, note.libris_id, {"rating": 0})
+    update(note, {"rating": 0})
 
     # Then it is written. Emptiness is tested by type rather than truthiness,
     # because a zero and a False are things a reader can mean.
@@ -988,7 +1069,7 @@ def test_listing_by_filter_does_not_tokenize_every_note(tmp_path, monkeypatch):
     assert calls == []
 
 
-def test_a_format_written_as_a_bare_string_is_repaired_not_refused(tmp_path):
+def test_a_format_written_as_a_bare_string_is_repaired_not_refused(tmp_path, update):
     # Given a note whose format is a bare string, which two notes on the real
     # Shelf hold and which Obsidian can write at any time (ADR 0017)
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
@@ -998,7 +1079,7 @@ def test_a_format_written_as_a_bare_string_is_repaired_not_refused(tmp_path):
     )
 
     # When a second format is recorded
-    update_book(tmp_path, note.libris_id, {"format": ["Physical", "Audiobook"]})
+    update(note, {"format": ["Physical", "Audiobook"]})
 
     # Then the write lands
     assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == [
@@ -1007,12 +1088,12 @@ def test_a_format_written_as_a_bare_string_is_repaired_not_refused(tmp_path):
     ]
 
 
-def test_a_format_is_repaired_before_it_is_judged(tmp_path):
+def test_a_format_is_repaired_before_it_is_judged(tmp_path, update):
     # Given a format in a shape and case the Library repairs elsewhere
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
     # When it arrives that way
-    update_book(tmp_path, note.libris_id, {"format": ["physical", "EBOOK"]})
+    update(note, {"format": ["physical", "EBOOK"]})
 
     # Then it is repaired and written, rather than refused for a spelling the
     # Library corrects on every other pass. Validating before normalizing judged
@@ -1023,7 +1104,7 @@ def test_a_format_is_repaired_before_it_is_judged(tmp_path):
     ]
 
 
-def test_a_format_of_nothing_recognisable_is_still_refused(tmp_path):
+def test_a_format_of_nothing_recognisable_is_still_refused(tmp_path, update):
     # Given a format holding no value the Library defines
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"], format=["Physical"])
 
@@ -1031,7 +1112,7 @@ def test_a_format_of_nothing_recognisable_is_still_refused(tmp_path):
     # Then it is refused rather than normalized away to nothing. Repairing before
     # judging must not become a second route to clearing a field.
     with pytest.raises(ValueError):
-        update_book(tmp_path, note.libris_id, {"format": ["papyrus"]})
+        update(note, {"format": ["papyrus"]})
     assert _read_back(tmp_path, note.libris_id).frontmatter["format"] == ["Physical"]
 
 

@@ -1,5 +1,6 @@
 import sys
 from datetime import date
+from pathlib import Path
 
 import pytest
 import yaml
@@ -8,7 +9,6 @@ from typer.testing import CliRunner
 import libris
 from libris import config
 from libris.cli import app
-from libris.note_format import mint_libris_id
 
 runner = CliRunner()
 
@@ -889,7 +889,7 @@ def test_a_date_already_set_is_not_overwritten(monkeypatch, tmp_path):
     assert read_frontmatter(path)["date_started"] == "2019-03-12"
 
 
-def test_a_note_without_an_identity_gets_one_rather_than_being_refused(
+def test_a_note_without_an_identity_is_updated_rather_than_refused(
     monkeypatch, tmp_path
 ):
     # Given a note written by hand outside Libris, carrying no libris_id
@@ -906,18 +906,45 @@ def test_a_note_without_an_identity_gets_one_rather_than_being_refused(
 
     # When its status is updated
     result = runner.invoke(app, ["status"])
+
+    # Then the update goes through. Refusing to set a status would be a strange
+    # place for a reader to learn their note lacked an identity - and a write by
+    # path does not need one (#125).
+    assert result.exit_code == 0, result.output
+    assert read_frontmatter(path)["status"] == "Reading"
+
+
+def test_status_reads_only_the_note_it_was_asked_about(monkeypatch, tmp_path):
+    # Given a Shelf of several books, and a record of every note parsed
+    from libris import markdown
+    from libris.api import BookCandidate
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    paths = [
+        markdown.create_book_note(
+            BookCandidate(title=title, authors=["Someone"]), vault
+        )
+        for title in ("Dune", "Piranesi", "Mercy", "Hild")
+    ]
+    chosen = paths[1]
+
+    parsed = []
+    real = markdown.read_frontmatter
+    monkeypatch.setattr(
+        markdown, "read_frontmatter", lambda path: (parsed.append(path), real(path))[1]
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, chosen.name, "Reading")
+
+    # When one of them has its status set
+    result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
 
-    # Then an identity is minted and the update goes through. `update_book`
-    # addresses a note by identity, and refusing to set a status would be a
-    # strange place for a reader to learn their note lacked one.
-    frontmatter = read_frontmatter(path)
-    assert frontmatter["libris_id"]
-    assert frontmatter["status"] == "Reading"
-
-    # And the minted id derives from date_added, so the Shelf still sorts in the
-    # order it was acquired (ADR 0011).
-    assert frontmatter["libris_id"].startswith(mint_libris_id("2019-03-12")[:10])
+    # Then no other note was parsed. The command is handed the note, and
+    # resolving it by identity parsed the whole Shelf to find it again - 3,065
+    # parses and 6 to 14 seconds against the real one (#125).
+    assert {Path(p) for p in parsed} == {chosen}
 
 
 def test_the_readers_own_writing_survives_a_status_change(monkeypatch, tmp_path):
@@ -981,7 +1008,7 @@ def test_status_refuses_a_name_that_is_not_on_the_shelf(monkeypatch, tmp_path, t
 
     # Then nothing is written and it says why. `vault / "../../escaped.md"`
     # walks out of the Shelf, and an absolute name replaces it outright, so
-    # `_identity_for` could have minted an id into a file that is not a note.
+    # the status could have been written into a file that is not a note.
     assert result.exit_code == 1
     assert "is on the Shelf" in result.output
     assert outside.read_bytes() == before
@@ -1030,7 +1057,7 @@ def test_enrich_refuses_a_filename_that_is_not_on_the_shelf(monkeypatch, tmp_pat
     assert "is on the Shelf" in result.output
 
 
-def test_status_refuses_a_note_whose_identity_another_note_claims(
+def test_status_writes_the_note_picked_when_another_claims_its_identity(
     monkeypatch, tmp_path
 ):
     # Given two notes claiming one Libris ID, as the real Shelf holds (#75)
@@ -1050,15 +1077,15 @@ def test_status_refuses_a_note_whose_identity_another_note_claims(
     # When the second of them is picked
     result = runner.invoke(app, ["status"])
 
-    # Then nothing is written and the clash is named. `update_book` resolves by
-    # identity and `find_by_libris_id` returns the first claimant, so this wrote
-    # to the other note while reporting the one that was picked - a write to the
-    # wrong book announced as a write to the right one (ADR 0003).
-    assert result.exit_code == 1
-    assert "shares its Libris ID" in result.output
-    assert "libris doctor" in result.output
-    for name in ("Aaa First.md", "Zzz Second.md"):
-        assert read_frontmatter(vault / name)["status"] == "To Read"
+    # Then the note picked is the note written. Resolved by identity, this wrote
+    # to the first claimant while reporting the one that was picked - a write to
+    # the wrong book announced as a write to the right one (ADR 0003). #124
+    # refused the write to stop that; writing by path cannot land elsewhere, so
+    # there is nothing left to refuse (#125).
+    assert result.exit_code == 0, result.output
+    assert "Zzz Second.md" in result.output
+    assert read_frontmatter(vault / "Zzz Second.md")["status"] == "Read"
+    assert read_frontmatter(vault / "Aaa First.md")["status"] == "To Read"
 
 
 def test_status_refuses_a_note_that_is_a_link_out_of_the_shelf(monkeypatch, tmp_path):
