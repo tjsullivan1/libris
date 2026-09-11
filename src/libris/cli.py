@@ -30,8 +30,8 @@ from .markdown import (
     list_books,
     read_frontmatter,
     rename_book_file,
+    set_frontmatter_fields,
     split_frontmatter,
-    update_book_status,
     update_frontmatter_from_book,
     write_note,
 )
@@ -58,17 +58,21 @@ from .migrate import (
 from .note_format import (
     STATUS_VALUES,
     InvalidFieldValue,
+    mint_libris_id,
     normalize_field_value,
     parse_frontmatter_yaml,
     validate_field_value,
 )
 from .service import (
     LOST_CHARACTER,
+    BookNotFound,
     EncodingDamage,
     IdCollision,
     IsbnAgreement,
     apply_decisions,
+    find_by_libris_id,
     inspect_shelf,
+    update_book,
 )
 
 # Windows consoles and redirected output default to cp1252, which cannot encode
@@ -121,11 +125,22 @@ def _require_vault_path() -> Path:
         typer.Exit: With code 1 when no Shelf is configured.
     """
     try:
-        return get_vault_path()
+        vault_path = get_vault_path()
     except VaultNotConfigured:
         typer.echo("No Shelf is configured, so there is nothing to read or write.")
         typer.echo("Set one with: libris config --vault <path>")
         raise typer.Exit(code=1) from None
+
+    # Configured is not the same as present. A Shelf that has been moved,
+    # renamed or deleted since it was set otherwise reaches whichever scan the
+    # command runs first and ends in a traceback naming `os.scandir`. Checked
+    # here because it is the one gate every command already passes through.
+    if not vault_path.is_dir():
+        typer.echo(f"The Shelf is not there: {vault_path}")
+        typer.echo("Set one with: libris config --vault <path>")
+        raise typer.Exit(code=1)
+
+    return vault_path
 
 
 _RENAME_SKIP_MESSAGES = {
@@ -146,27 +161,146 @@ def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
     return f"Skipped rename for {filename}: {msg}"
 
 
+def _books_on_the_shelf(vault_path: Path) -> list[Path]:
+    """The Book Notes on the Shelf, or a clean explanation that it is not there.
+
+    `list_books` scans the directory, so a Shelf that has been moved, renamed or
+    deleted since it was configured makes it raise. Every command here begins by
+    listing the Shelf, and without this each one ends in a traceback naming
+    `os.scandir` rather than saying the vault is gone - which is what `enrich`
+    used to say, and stopped saying when its own `File not found` check was
+    replaced.
+
+    Args:
+        vault_path: The configured Shelf.
+
+    Returns:
+        Every Markdown file on it.
+
+    Raises:
+        typer.Exit: With code 1 when the Shelf cannot be listed.
+    """
+    try:
+        return list_books(vault_path)
+    except OSError:
+        typer.echo(f"The Shelf is not there: {vault_path}")
+        typer.echo("Set one with: libris config --vault <path>")
+        raise typer.Exit(code=1) from None
+
+
+def _note_on_the_shelf(vault_path: Path, name: str, books: list[Path]) -> Path:
+    """Resolve a chosen filename to a Book Note, refusing anything that is not one.
+
+    `questionary.autocomplete` offers completions but returns whatever was
+    typed, so a name that is not on the Shelf reaches the caller. Joining that
+    to the Shelf is not merely a typo away from a confusing error: `..` walks
+    out of the vault, and an absolute path replaces it outright -
+    `Path(shelf) / "D:/elsewhere/README.md"` is `D:/elsewhere/README.md`. A
+    mistyped answer could therefore have had Libris write into a file that is
+    not a Book Note at all.
+
+    Checked against the names the Shelf actually holds rather than by
+    normalising the path and testing where it landed. A list of what is allowed
+    cannot be walked out of, and needs no reasoning about how a platform
+    resolves `..`.
+
+    Args:
+        vault_path: The Shelf.
+        name: The filename chosen or typed.
+        books: The Book Notes on the Shelf.
+
+    Returns:
+        The path to that note.
+
+    Raises:
+        typer.Exit: With code 1 when the name is not a note on the Shelf.
+    """
+    if name not in {book.name for book in books}:
+        typer.echo(f"No Book Note called {name!r} is on the Shelf.")
+        raise typer.Exit(code=1)
+
+    chosen = vault_path / name
+
+    # Membership says the *name* is on the Shelf; it says nothing about where
+    # the file leads. `list_books` uses `entry.is_file()`, which follows a
+    # symlink, so an in-vault `Book.md` pointing at a file elsewhere is on the
+    # Shelf by name while every write to it lands outside the vault. The two
+    # checks cover different things and neither replaces the other.
+    try:
+        inside = chosen.resolve().is_relative_to(vault_path.resolve())
+    except OSError:
+        inside = False
+    if not inside:
+        typer.echo(
+            f"{name} leads outside the Shelf, so nothing was written to it. "
+            "A Book Note has to be a file in the vault, not a link to one."
+        )
+        raise typer.Exit(code=1)
+
+    return chosen
+
+
+def _identity_for(path: Path) -> str:
+    """The note's Libris ID, minting one when it has none.
+
+    `service.update_book` addresses a note by identity while `libris status`
+    picks one by filename, so the two have to be bridged somewhere. Every note
+    on the Shelf carries an id, but one added by hand outside Libris would not,
+    and refusing to set its status would be a strange place for a reader to
+    learn that.
+
+    Only the id is written. `ensure_frontmatter_fields` also mints one, but it
+    repairs every other field on the way past - restandardising titles among
+    them - and setting a status is no place to decide that.
+
+    Args:
+        path: The Book Note being updated.
+
+    Returns:
+        The identity it carries, or the one just minted for it.
+
+    Raises:
+        FrontmatterUnreadable: If the note has no frontmatter to read or write.
+    """
+    note = BookNote.read(path)
+    if note is None:
+        raise FrontmatterUnreadable(f"{path.name} has no readable frontmatter.")
+    if note.libris_id:
+        return note.libris_id
+
+    # Derived from `date_added` so the Shelf still sorts in the order it was
+    # acquired, which is the whole reason the id is a ULID (ADR 0011).
+    minted = mint_libris_id(note.frontmatter.get("date_added"))
+    set_frontmatter_fields(path, {"libris_id": minted})
+    return minted
+
+
 @app.command()
 def status():
     """Update the status of a book in your vault."""
     import questionary
 
     vault_path = _require_vault_path()
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
 
     if not books:
         typer.echo("No books found in vault.")
         return
 
+    # Autocomplete rather than a list to scroll, as `clean` and `enrich`
+    # already use. A flat select of 3,063 filenames is not something anyone can
+    # find a book in (#43).
     choices = [p.name for p in books]
-    selected_file_name = questionary.select(
-        "Select a book to update:", choices=choices
+    selected_file_name = questionary.autocomplete(
+        "Select a book to update:",
+        choices=choices,
+        match_middle=True,
     ).ask()
 
     if not selected_file_name:
         return
 
-    selected_file = vault_path / selected_file_name
+    selected_file = _note_on_the_shelf(vault_path, selected_file_name, books)
 
     # Offered from the Library's own vocabulary rather than a list kept here.
     # This prompt used to offer "Finished", which no note has ever held, and
@@ -176,13 +310,46 @@ def status():
     if not new_status:
         return
 
+    # Through the service layer, so this Surface and the MCP tools cannot
+    # disagree about what setting a status means (ADR 0008). They did: marking
+    # a book Reading through MCP stamped `date_started` and doing it here did
+    # not, so the same act left two different notes depending on where it was
+    # done (#97).
     try:
-        update_book_status(selected_file, new_status)
+        libris_id = _identity_for(selected_file)
+
+        # `update_book` addresses a note by identity, and `find_by_libris_id`
+        # returns the first note claiming one. Two notes can claim the same id -
+        # that is #75, and the real Shelf holds such a pair - so picking the
+        # second of them would have updated the first while this command
+        # reported the name that was picked. A write to the wrong book,
+        # announced as a write to the right one, is exactly what ADR 0003 is
+        # there to refuse.
+        holder = find_by_libris_id(vault_path, libris_id)
+        if holder is not None and holder.path != selected_file:
+            typer.echo(
+                f"{selected_file.name} shares its Libris ID with "
+                f"{holder.path.name}, so there is no way to tell which of them "
+                "an update means. Nothing was written."
+            )
+            typer.echo("Run `libris doctor` to see the contested identities.")
+            raise typer.Exit(code=1)
+
+        result = update_book(vault_path, libris_id, {"status": new_status})
     except FrontmatterUnreadable as exc:
         typer.echo(f"{exc} Nothing was written to it.")
         raise typer.Exit(code=1) from None
+    except (InvalidFieldValue, BookNotFound) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
 
     typer.echo(f"Updated: {selected_file_name} -> {new_status}")
+
+    # A stamped date is indistinguishable from a stated one afterwards, so the
+    # reader is told now, while they can still say it was last Tuesday
+    # (ADR 0024).
+    for name, value in result.derived.items():
+        typer.echo(f"  Also set {name}: {value}")
 
 
 @app.command(name="list")
@@ -194,7 +361,7 @@ def list_cmd(
     """List all books in your vault."""
     vault_path = _require_vault_path()
     start = time.perf_counter() if timing else None
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
     elapsed = (time.perf_counter() - start) if timing and start is not None else None
 
     if not books:
@@ -400,7 +567,7 @@ def clean(
     import questionary
 
     vault_path = _require_vault_path()
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
 
     if not books:
         typer.echo("No books found in vault.")
@@ -416,7 +583,7 @@ def clean(
     if not selected_file_name:
         return
 
-    selected_file = vault_path / selected_file_name
+    selected_file = _note_on_the_shelf(vault_path, selected_file_name, books)
     updated, fm = ensure_frontmatter_fields(selected_file)
     if updated:
         typer.echo(f"Cleaned: {selected_file_name}")
@@ -453,7 +620,7 @@ def cleanup(
 ):
     """Ensure all books in the vault have the correct frontmatter fields."""
     vault_path = _require_vault_path()
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
 
     if not books:
         typer.echo("No books found in vault.")
@@ -748,7 +915,7 @@ def autoenrich(
     review.
     """
     vault_path = _require_vault_path()
-    books = list_books(vault_path)
+    books = _books_on_the_shelf(vault_path)
 
     if not books:
         typer.echo("No books found in vault.")
@@ -863,7 +1030,7 @@ def enrich(
     vault_path = _require_vault_path()
 
     if filename is None:
-        books = list_books(vault_path)
+        books = _books_on_the_shelf(vault_path)
         if not books:
             typer.echo("No books found in vault.")
             return
@@ -880,11 +1047,11 @@ def enrich(
         if not filename:
             return
 
-    selected_file = vault_path / filename
-
-    if not selected_file.exists():
-        typer.echo(f"File not found: {selected_file}")
-        raise typer.Exit(code=1)
+    # Covers the name typed at the prompt and the one passed as an argument.
+    # The help calls it a filename, not a path, and this is what makes that so.
+    selected_file = _note_on_the_shelf(
+        vault_path, filename, _books_on_the_shelf(vault_path)
+    )
 
     _enrich_interactive(selected_file)
 
