@@ -1028,3 +1028,64 @@ def test_enrich_refuses_a_filename_that_is_not_on_the_shelf(monkeypatch, tmp_pat
     # Then it is refused rather than enriched
     assert result.exit_code == 1
     assert "is on the Shelf" in result.output
+
+
+def test_status_refuses_a_note_whose_identity_another_note_claims(
+    monkeypatch, tmp_path
+):
+    # Given two notes claiming one Libris ID, as the real Shelf holds (#75)
+    from libris.markdown import read_frontmatter
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("Aaa First.md", "Zzz Second.md"):
+        (vault / name).write_text(
+            "---\nlibris_id: 01AAAAAAAAAAAAAAAAAAAAAAAA\n"
+            f"title: {name[:-3]}\nauthors:\n  - Someone\nstatus: To Read\n---\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, "Zzz Second.md", "Read")
+
+    # When the second of them is picked
+    result = runner.invoke(app, ["status"])
+
+    # Then nothing is written and the clash is named. `update_book` resolves by
+    # identity and `find_by_libris_id` returns the first claimant, so this wrote
+    # to the other note while reporting the one that was picked - a write to the
+    # wrong book announced as a write to the right one (ADR 0003).
+    assert result.exit_code == 1
+    assert "shares its Libris ID" in result.output
+    assert "libris doctor" in result.output
+    for name in ("Aaa First.md", "Zzz Second.md"):
+        assert read_frontmatter(vault / name)["status"] == "To Read"
+
+
+def test_status_refuses_a_note_that_is_a_link_out_of_the_shelf(monkeypatch, tmp_path):
+    # Given a file outside the Shelf, and an in-vault note that is a link to it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text(
+        "---\ntitle: Outside\nauthors:\n  - Someone\nstatus: To Read\n---\n\nMine.\n",
+        encoding="utf-8",
+    )
+    link = vault / "Linked.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("this platform does not permit creating a symlink unprivileged")
+
+    before = outside.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, "Linked.md", "Reading")
+
+    # When it is picked
+    result = runner.invoke(app, ["status"])
+
+    # Then nothing outside the Shelf is written. Checking the name against the
+    # Shelf says the name is there; it says nothing about where the file leads,
+    # and `list_books` follows a symlink when it decides what is a file.
+    assert result.exit_code == 1
+    assert "outside the Shelf" in result.output
+    assert outside.read_bytes() == before

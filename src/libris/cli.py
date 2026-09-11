@@ -70,6 +70,7 @@ from .service import (
     IdCollision,
     IsbnAgreement,
     apply_decisions,
+    find_by_libris_id,
     inspect_shelf,
     update_book,
 )
@@ -179,7 +180,26 @@ def _note_on_the_shelf(vault_path: Path, name: str, books: list[Path]) -> Path:
     if name not in {book.name for book in books}:
         typer.echo(f"No Book Note called {name!r} is on the Shelf.")
         raise typer.Exit(code=1)
-    return vault_path / name
+
+    chosen = vault_path / name
+
+    # Membership says the *name* is on the Shelf; it says nothing about where
+    # the file leads. `list_books` uses `entry.is_file()`, which follows a
+    # symlink, so an in-vault `Book.md` pointing at a file elsewhere is on the
+    # Shelf by name while every write to it lands outside the vault. The two
+    # checks cover different things and neither replaces the other.
+    try:
+        inside = chosen.resolve().is_relative_to(vault_path.resolve())
+    except OSError:
+        inside = False
+    if not inside:
+        typer.echo(
+            f"{name} leads outside the Shelf, so nothing was written to it. "
+            "A Book Note has to be a file in the vault, not a link to one."
+        )
+        raise typer.Exit(code=1)
+
+    return chosen
 
 
 def _identity_for(path: Path) -> str:
@@ -259,6 +279,24 @@ def status():
     # done (#97).
     try:
         libris_id = _identity_for(selected_file)
+
+        # `update_book` addresses a note by identity, and `find_by_libris_id`
+        # returns the first note claiming one. Two notes can claim the same id -
+        # that is #75, and the real Shelf holds such a pair - so picking the
+        # second of them would have updated the first while this command
+        # reported the name that was picked. A write to the wrong book,
+        # announced as a write to the right one, is exactly what ADR 0003 is
+        # there to refuse.
+        holder = find_by_libris_id(vault_path, libris_id)
+        if holder is not None and holder.path != selected_file:
+            typer.echo(
+                f"{selected_file.name} shares its Libris ID with "
+                f"{holder.path.name}, so there is no way to tell which of them "
+                "an update means. Nothing was written."
+            )
+            typer.echo("Run `libris doctor` to see the contested identities.")
+            raise typer.Exit(code=1)
+
         result = update_book(vault_path, libris_id, {"status": new_status})
     except FrontmatterUnreadable as exc:
         typer.echo(f"{exc} Nothing was written to it.")
