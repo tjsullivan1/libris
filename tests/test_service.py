@@ -1542,6 +1542,50 @@ def test_a_note_naming_no_identifier_is_not_proposed_for(tmp_path):
     assert client.asked == []
 
 
+def test_a_sentinel_volume_id_is_not_something_to_ask_about(tmp_path):
+    # Given a note recording that Google Books has no such book. 41 notes on the
+    # real Shelf carry this, and 47 carry `_not_a_book`; both are answers
+    # somebody wrote down, not missing ids.
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault,
+        "absent.md",
+        'title: "S�ren"\ngoogle_books_id: _not_found_in_google_books_api',
+    )
+    damage = find_encoding_damage(vault)[0]
+    client = _StubClient(BookCandidate(title="Søren", authors=[]))
+
+    # Then it is not an identifier, and the API is never asked. Read literally
+    # it is a malformed id, which Google answers with 503 rather than 404 - so
+    # asking costs three retries to be told what the note already said.
+    assert damage.identifier is None
+    assert service.propose_encoding_repair(damage, client) is None
+    assert client.asked == []
+
+
+def test_a_sentinel_volume_id_still_leaves_an_isbn_worth_asking(tmp_path):
+    # Given a note whose volume id is a sentinel but which names an ISBN
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault,
+        "by-isbn.md",
+        'title: "S�ren"\ngoogle_books_id: _not_a_book\nisbn: "9780000000001"',
+    )
+    damage = find_encoding_damage(vault)[0]
+    client = _StubClient(BookCandidate(title="Søren", authors=[]))
+
+    # When a repair is sought
+    proposal = service.propose_encoding_repair(damage, client)
+
+    # Then the ISBN is what gets asked, rather than the sentinel. A book Google
+    # Books holds no volume for may still be findable by its ISBN.
+    assert damage.identifier == "9780000000001"
+    assert client.asked == ["isbn:9780000000001"]
+    assert [item.proposed for item in proposal.fields] == ["Søren"]
+
+
 def test_a_volume_that_agrees_with_nothing_offers_nothing(tmp_path):
     # Given a note whose recorded volume describes a different book
     vault = tmp_path / "shelf"

@@ -18,6 +18,7 @@ import yaml
 
 from .api import BookCandidate, GoogleBooksClient
 from .markdown import (
+    EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
     create_book_note,
     edit_note,
@@ -875,11 +876,23 @@ class EncodingDamage:
     def identifier(self) -> str | None:
         """What can be asked for the correct spelling, preferring the volume id.
 
+        A sentinel id is not one. `_not_found_in_google_books_api` records that
+        someone already looked and the API does not have this book, and
+        `_not_a_book` that it is not one - 41 and 47 notes on this Shelf carry
+        them. Read literally they are malformed ids, which Google answers with
+        503 rather than 404, so asking costs three retries and a backoff to be
+        told what the note already said.
+
         Returns:
             A Google Books volume id, an ISBN, or None when the note carries
             neither and only a person can say what the letter was.
         """
-        return self.google_books_id or self.isbn
+        volume_id = self.google_books_id
+        if volume_id in EXCLUDED_GOOGLE_BOOKS_IDS:
+            # The ISBN still stands: a book Google Books has no volume for may
+            # be findable by its ISBN.
+            volume_id = None
+        return volume_id or self.isbn
 
     @property
     def touches_filename(self) -> bool:
@@ -1406,9 +1419,14 @@ def propose_encoding_repair(
         return None
 
     client = client or GoogleBooksClient()
-    if damage.google_books_id:
-        source = client.get_volume(damage.google_books_id)
+    volume_id = damage.google_books_id
+    if volume_id and volume_id not in EXCLUDED_GOOGLE_BOOKS_IDS:
+        source = client.get_volume(volume_id)
     else:
+        # A sentinel id reaches here only when the note also names an ISBN,
+        # because `identifier` refuses it above. Asking for the sentinel itself
+        # is a malformed lookup: three retries and a backoff to be told what the
+        # note already recorded.
         found = client.search(f"isbn:{damage.isbn}")
         source = found[0] if found else None
 

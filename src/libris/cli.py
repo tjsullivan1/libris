@@ -20,6 +20,7 @@ from .config import (
 )
 from .importer import SUPPORTED_FORMATS, run_import
 from .markdown import (
+    EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
     FrontmatterUnreadable,
     RenameResult,
@@ -1225,6 +1226,11 @@ def _suggestions_for(
     import httpx
 
     if damage.identifier is None:
+        if damage.google_books_id in EXCLUDED_GOOGLE_BOOKS_IDS:
+            # Said as what the note records rather than as a failure: someone
+            # looked this book up and wrote down that Google Books has not got
+            # it, which is an answer, not a gap.
+            return {}, "the note records that Google Books has no such book"
         return {}, "the note names no volume"
 
     try:

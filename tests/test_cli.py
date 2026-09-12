@@ -836,6 +836,38 @@ def test_repair_refuses_an_answer_that_still_carries_the_damage(monkeypatch, tmp
     assert "left 1 alone" in result.output
 
 
+def test_repair_says_when_a_note_records_that_google_books_lacks_the_book(
+    monkeypatch, tmp_path
+):
+    # Given a damaged note carrying the sentinel someone wrote after looking the
+    # book up and finding Google Books has not got it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Absent.md"
+    note.write_text(
+        '---\ntitle: "S�ren"\ngoogle_books_id: _not_found_in_google_books_api\n'
+        "---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _never(self, gid):
+        raise AssertionError(f"asked Google Books about the sentinel id {gid!r}")
+
+    monkeypatch.setattr("libris.cli.GoogleBooksClient.get_volume", _never)
+    _answer_text(monkeypatch, "Søren")
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then it reports what the note records rather than spending three retries
+    # and a backoff on a malformed lookup, and the reader still supplies the
+    # letter
+    assert result.exit_code == 0, result.output
+    assert "records that Google Books has no such book" in result.output
+    assert "title: Søren" in note.read_text(encoding="utf-8")
+
+
 def test_repair_offers_a_note_with_no_identifier_without_asking_the_api(
     monkeypatch, tmp_path
 ):
