@@ -468,37 +468,36 @@ def _write_through(handle: BinaryIO, path: Path, content: str, raw: bytes) -> No
         )
 
 
-def set_frontmatter_fields(
+def edit_note(
     file_path: Path,
-    updates: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
-) -> dict[str, Any]:
-    """Set named frontmatter fields on a Book Note, leaving the body untouched.
-
-    The body is carried across exactly rather than re-rendered. Every other
-    write path here reconstructs a note - `ensure_frontmatter_fields` re-dumps
-    the YAML and reflows the body on every pass - which is right for a repair
-    pass and wrong for setting a status.
-
-    Field order is preserved for keys the note already carries; new keys are
-    appended, so an update does not reshuffle a note.
+    decide: Callable[[dict[str, Any], str], tuple[dict[str, Any], str | None]],
+) -> tuple[dict[str, Any], str]:
+    """Change a Book Note's frontmatter and body in one write.
 
     The note is read, decided on and written through one open handle, so what
-    is written was decided from the file it lands in (#127 review).
+    is written was decided from the file it lands in (#127 review), and a change
+    that touches both halves cannot half-land. Repairing a lost character needs
+    exactly that: the title and the `# Title` heading rendered from it are the
+    same damage in two places (#78).
+
+    Field order is preserved for keys the note already carries; new keys are
+    appended, so an edit does not reshuffle a note. A body left alone is carried
+    across byte for byte rather than re-rendered (ADR 0023).
 
     Args:
         file_path: The Book Note to write.
-        updates: Field names and the values to set them to - or a function
-            handed the note's current frontmatter that returns them, for a
-            write whose values depend on what the note already holds. It may
-            raise to refuse the write, and nothing is written.
+        decide: Handed the note's frontmatter and body as they stand, returning
+            the fields to set and the body to write - or None for the body to
+            leave it alone. It may raise to refuse the write, and nothing is
+            written.
 
     Returns:
-        The frontmatter as it now stands on disk.
+        The frontmatter and body as they now stand on disk.
 
     Raises:
         FrontmatterUnreadable: If the file has no parseable frontmatter block,
             or is not UTF-8. Refused rather than repaired: this is the write
-            path for one field, not the place to rebuild a broken note.
+            path for named fields, not the place to rebuild a broken note.
         FileNotFoundError: If the note is not there, or stops being the file at
             that path before it is written. It is never recreated.
     """
@@ -525,13 +524,50 @@ def set_frontmatter_fields(
         if not isinstance(data, dict):
             raise FrontmatterUnreadable(f"{file_path.name} has no frontmatter mapping.")
 
-        changes = updates(dict(data)) if callable(updates) else updates
-        if not changes:
-            return data
+        changes, new_body = decide(dict(data), body)
+        if not changes and new_body is None:
+            return data, body
 
-        data.update(changes)
+        data.update(changes or {})
+        if new_body is not None:
+            body = new_body
         rendered = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
         _write_through(handle, file_path, "---\n" + rendered + "\n---\n" + body, raw)
+    return data, body
+
+
+def set_frontmatter_fields(
+    file_path: Path,
+    updates: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    """Set named frontmatter fields on a Book Note, leaving the body untouched.
+
+    The body is carried across exactly rather than re-rendered. Every other
+    write path here reconstructs a note - `ensure_frontmatter_fields` re-dumps
+    the YAML and reflows the body on every pass - which is right for a repair
+    pass and wrong for setting a status.
+
+    Args:
+        file_path: The Book Note to write.
+        updates: Field names and the values to set them to - or a function
+            handed the note's current frontmatter that returns them, for a
+            write whose values depend on what the note already holds. It may
+            raise to refuse the write, and nothing is written.
+
+    Returns:
+        The frontmatter as it now stands on disk.
+
+    Raises:
+        FrontmatterUnreadable: If the file has no parseable frontmatter block,
+            or is not UTF-8.
+        FileNotFoundError: If the note is not there, or stops being the file at
+            that path before it is written. It is never recreated.
+    """
+
+    def _decide(data: dict[str, Any], _body: str) -> tuple[dict[str, Any], None]:
+        return (updates(data) if callable(updates) else updates), None
+
+    data, _ = edit_note(file_path, _decide)
     return data
 
 

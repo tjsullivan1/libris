@@ -20,6 +20,7 @@ from .config import (
 )
 from .importer import SUPPORTED_FORMATS, run_import
 from .markdown import (
+    EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
     FrontmatterUnreadable,
     RenameResult,
@@ -65,10 +66,16 @@ from .service import (
     LOST_CHARACTER,
     BookNotFound,
     EncodingDamage,
+    EncodingRepair,
+    FieldRepair,
     IdCollision,
     IsbnAgreement,
+    accept_correction,
     apply_decisions,
+    apply_encoding_repair,
+    find_encoding_damage,
     inspect_shelf,
+    propose_encoding_repair,
     update_note,
 )
 
@@ -1201,6 +1208,140 @@ def _report_not_utf8(paths: list[Path]) -> None:
         "UTF-8 in an editor that can tell which encoding it was written in - the "
         "file does not say, so Libris does not guess (ADR 0003)."
     )
+
+
+def _suggestions_for(
+    damage: EncodingDamage, client: GoogleBooksClient
+) -> tuple[dict[str, str], str | None]:
+    """Ask the volume a note names what it can offer, and say if it could not.
+
+    Args:
+        damage: The note's damage, as reported.
+        client: The Google Books client to ask.
+
+    Returns:
+        The suggestion for each damaged string the volume accounts for, and a
+        line explaining why there are none - which is the usual case.
+    """
+    import httpx
+
+    if damage.identifier is None:
+        if damage.google_books_id in EXCLUDED_GOOGLE_BOOKS_IDS:
+            # Said as what the note records rather than as a failure: someone
+            # looked this book up and wrote down that Google Books has not got
+            # it, which is an answer, not a gap.
+            return {}, "the note records that Google Books has no such book"
+        return {}, "the note names no volume"
+
+    try:
+        proposal = propose_encoding_repair(damage, client)
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        # One note's failure is not the run's, and a malformed id answers 503
+        # rather than 404 - three notes on this Shelf carry a sentinel id that
+        # looks exactly like an outage (#78).
+        return {}, f"could not ask Google Books ({type(exc).__name__})"
+
+    if proposal is None:
+        return {}, "Google Books has no such volume"
+    if proposal.is_empty:
+        return {}, "the volume says nothing that fits"
+    return {
+        item.damaged: item.proposed for item in proposal.fields + proposal.body
+    }, None
+
+
+@app.command()
+def repair(
+    limit: int = typer.Option(
+        0, "--limit", help="Stop after considering this many notes (0 for all)"
+    ),
+):
+    """Put back characters lost to a bad decode, one string at a time (#78).
+
+    The letter is gone from the file, so someone has to supply it. Measured
+    against the real Shelf, the volumes Libris can ask account for 3 of 57
+    damaged strings - the rest are plain to a reader (`Po Ch?-i` is Po Chü-i)
+    and to nothing else. So this shows each damaged string and takes the
+    correction from you, offering the volume's answer as the default in the few
+    cases it fits.
+
+    An empty answer leaves that string alone. Nothing is written that still
+    carries a replacement character, and nothing is written without your typing
+    it: guessing at an author's name is the silent wrongness ADR 0003 refuses.
+
+    Filenames are left alone. Renaming a note rewrites the wikilinks pointing at
+    it, which is its own piece of work.
+    """
+    import questionary
+
+    vault_path = _require_vault_path()
+    damaged = find_encoding_damage(vault_path)
+    if not damaged:
+        typer.echo("No note has lost a character.")
+        return
+
+    in_place = [note for note in damaged if note.repairable_in_place]
+    typer.echo(
+        f"{len(damaged)} note(s) have lost a character; {len(in_place)} have "
+        "damage outside the filename, which is what this repairs.\n"
+    )
+
+    client = GoogleBooksClient()
+    repaired = untouched = 0
+
+    for damage in in_place[: limit or None]:
+        suggestions, why_not = _suggestions_for(damage, client)
+
+        typer.echo(f"{damage.path.name}")
+        if why_not:
+            typer.echo(f"  {why_not}; the spelling has to come from you.")
+
+        fields: list[FieldRepair] = []
+        body: list[FieldRepair] = []
+        for name, values in damage.fields.items():
+            if name == "filename":
+                continue
+            for value in values:
+                suggested = suggestions.get(value)
+                typer.echo(f"  {name}: {_excerpt_damage(value)}")
+                if suggested:
+                    typer.echo(f"    the volume says: {_excerpt_damage(suggested)}")
+
+                typed = questionary.text(
+                    "    corrected (empty to leave it):",
+                    default=suggested or value,
+                ).ask()
+
+                corrected = accept_correction(value, typed or "")
+                if corrected is None:
+                    continue
+                repair_item = FieldRepair(name, value, corrected)
+                (body if name == "body" else fields).append(repair_item)
+
+        if not fields and not body:
+            typer.echo("  Left alone. Nothing written.\n")
+            untouched += 1
+            continue
+
+        try:
+            apply_encoding_repair(
+                EncodingRepair(damage=damage, fields=fields, body=body)
+            )
+        except (BookNotFound, FrontmatterUnreadable) as exc:
+            typer.echo(f"  {exc} Nothing was written to it.\n")
+            untouched += 1
+            continue
+
+        typer.echo(f"  Repaired {len(fields) + len(body)} string(s).\n")
+        repaired += 1
+
+    typer.echo(f"Repaired {repaired} note(s); left {untouched} alone.")
+    renames = [note for note in damaged if note.touches_filename]
+    if renames:
+        typer.echo(
+            f"{len(renames)} still have damage in the filename. Renaming rewrites "
+            "the wikilinks pointing at a note, so it is left for that work."
+        )
 
 
 @app.command()
