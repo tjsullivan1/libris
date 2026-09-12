@@ -174,6 +174,39 @@ Notes whose *filename* carries the damage are counted separately: renaming a not
 
 **Not UTF-8**: a note saved in another encoding, such as Latin-1. Unlike a lost character, its letters are still in the file, but nothing else in Libris can read it: search passes over it and `libris status` refuses it. `doctor` lists these notes on their own, separate from lost characters, since their fix is saving the file as UTF-8 rather than looking up a spelling. The file doesn't record which encoding it was written in, so `doctor` doesn't guess. A note like this still counts toward a contested identity, because its Libris ID survives the decode.
 
+### 13. Put back a lost character
+
+`doctor` finds the damage; `repair` puts the letters back. It shows each damaged string and takes the correction from you, one string at a time.
+
+```bash
+libris repair
+
+# Try it on a handful first
+libris repair --limit 5
+```
+
+```
+41 note(s) have lost a character; 41 have damage outside the filename, which is what this repairs.
+
+Chinese Poems - Po Ch�-i.md
+  the volume says nothing that fits; the spelling has to come from you.
+  authors: Po Ch�-i
+    corrected (empty to leave it): Po Chü-i
+
+Ch'an and Zen Teaching - Lu K'uan Y�, ed..md
+  authors: Lu K'uan Y�, ed.
+    the volume says: Lu K'uan Yü, ed.
+    corrected (empty to leave it): Lu K'uan Yü, ed.
+```
+
+**You supply the letter, because almost nothing else can.** Measured against this Shelf: of 57 damaged strings, the volumes Google Books returns account for **three**. The rest are beyond it — the vault's author values carry life dates the API never states (`S�ren Kierkegaard (1813-1855)`), some volumes name a different author entirely (`Po Ch�-i` resolves to `Anonymous`), four volumes serve text carrying the replacement character themselves, and three notes carry `_not_found_in_google_books_api` where an id should be. Where a volume does fit, its spelling is offered as the default, so accepting it is one keystroke.
+
+An empty answer leaves that string alone, and an answer still carrying `�` is refused rather than written back as a repair.
+
+Frontmatter and body are written together in one pass, because a damaged title and the `# Title` heading rendered from it are the same damage in two places.
+
+Filenames are left alone. Renaming a note rewrites the wikilinks pointing at it, which is its own piece of work.
+
 ## Browser extension
 
 Clip the book on an Amazon or Goodreads page straight into your Library. The extension talks to a
