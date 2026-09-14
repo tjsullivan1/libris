@@ -1274,7 +1274,7 @@ def repair(
         min=0,
         help="Stop after considering this many notes (0 for all)",
     ),
-):
+) -> None:
     """Put back characters lost to a bad decode, one string at a time (#78).
 
     The letter is gone from the file, so someone has to supply it. Measured
@@ -1311,17 +1311,19 @@ def repair(
     for damage in in_place[: limit or None]:
         typer.echo(f"{damage.path.name}")
 
-        hand_only = damage.fields.get(_HAND_REPAIR_ONLY, [])
-        if hand_only:
+        if damage.fields.get(_HAND_REPAIR_ONLY):
+            # The whole note, not just its frontmatter: nothing can be written to
+            # a note whose frontmatter will not parse, so prompting for its body
+            # took answers that were then thrown away (#129 second review).
             typer.echo(
-                f"  its frontmatter will not parse, so {len(hand_only)} damaged "
-                "line(s) there need repairing by hand."
+                "  its frontmatter will not parse, so it needs repairing by hand. "
+                "Left alone.\n"
             )
+            untouched += 1
+            continue
 
         promptable = {
-            name: values
-            for name, values in damage.fields.items()
-            if name not in ("filename", _HAND_REPAIR_ONLY)
+            name: values for name, values in damage.fields.items() if name != "filename"
         }
         if not promptable:
             typer.echo("  Nothing here can be written. Left alone.\n")
@@ -1335,7 +1337,12 @@ def repair(
         fields: list[FieldRepair] = []
         body: list[FieldRepair] = []
         for name, values in promptable.items():
+            # Counted before the prompt, so a skipped string still takes its
+            # place and a later twin's answer lands on that twin.
+            seen: dict[str, int] = {}
             for value in values:
+                occurrence = seen.get(value, 0)
+                seen[value] = occurrence + 1
                 suggested = suggestions.get((name, value))
                 typer.echo(f"  {name}: {_excerpt_damage(value)}")
                 if suggested:
@@ -1349,7 +1356,7 @@ def repair(
                 corrected = accept_correction(value, typed or "")
                 if corrected is None:
                     continue
-                repair_item = FieldRepair(name, value, corrected)
+                repair_item = FieldRepair(name, value, corrected, occurrence)
                 (body if name == "body" else fields).append(repair_item)
 
         if not fields and not body:
@@ -1358,7 +1365,7 @@ def repair(
             continue
 
         try:
-            wrote = apply_encoding_repair(
+            applied = apply_encoding_repair(
                 EncodingRepair(damage=damage, fields=fields, body=body)
             )
         except (BookNotFound, FrontmatterUnreadable) as exc:
@@ -1366,7 +1373,7 @@ def repair(
             untouched += 1
             continue
 
-        if not wrote:
+        if not applied:
             # Counted as repaired, this reported a write that never happened
             # (#129 review).
             typer.echo(
@@ -1375,7 +1382,9 @@ def repair(
             untouched += 1
             continue
 
-        typer.echo(f"  Repaired {len(fields) + len(body)} string(s).\n")
+        # What was written, not what was asked: an answer for a string fixed by
+        # hand since the report was built changes nothing (#129 second review).
+        typer.echo(f"  Repaired {applied} string(s).\n")
         repaired += 1
 
     typer.echo(f"Repaired {repaired} note(s); left {untouched} alone.")

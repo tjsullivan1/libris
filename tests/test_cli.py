@@ -1021,6 +1021,85 @@ def test_repair_names_the_status_when_google_books_fails(monkeypatch, tmp_path):
     assert "HTTP 503" in result.output
 
 
+# --- #129 second review -----------------------------------------------------
+
+
+def test_repair_does_not_prompt_any_part_of_a_note_whose_frontmatter_breaks(
+    monkeypatch, tmp_path
+):
+    # Given a note whose frontmatter will not parse, damaged there and in its
+    # body too
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Broken.md").write_text(
+        "---\ntitle: [S�ren\n---\n\n## Notes\n\nDiscours de la m�thode\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _never(message, default="", **_kwargs):
+        raise AssertionError(f"prompted for {default!r}, which cannot be written")
+
+    monkeypatch.setattr("questionary.text", _never)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then the body is not prompted either. No edit to a note whose frontmatter
+    # will not parse can be written, so its answer would be thrown away (#129
+    # second review).
+    assert result.exit_code == 0, result.output
+    assert "by hand" in result.output
+
+
+def test_repair_reports_the_strings_it_changed_not_the_answers_it_took(
+    monkeypatch, tmp_path
+):
+    # Given a note with two damaged strings, both answered, of which the write
+    # manages only one
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Note.md").write_text(
+        '---\ntitle: "S�ren"\nauthors:\n  - "S�ren Kierkegaard"\n'
+        "---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_text(monkeypatch, lambda default: default.replace("�", "ø"))
+    monkeypatch.setattr("libris.cli.apply_encoding_repair", lambda repair: 1)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the count is what was written, not what was asked (#129 second review)
+    assert "Repaired 1 string(s)" in result.output
+
+
+def test_repair_puts_a_later_twins_answer_on_that_twin(monkeypatch, tmp_path):
+    # Given two identical damaged authors, and a reader who skips the first
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Twins.md"
+    note.write_text(
+        '---\ntitle: Poems\nauthors:\n  - "V�lez"\n  - "V�lez"\n'
+        "---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    answers = iter(["", "Vález"])
+    _answer_text(monkeypatch, lambda default: next(answers))
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the answer lands on the author it was typed for
+    from libris.markdown import read_frontmatter
+
+    assert read_frontmatter(note)["authors"] == ["V�lez", "Vález"]
+
+
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
     # Given a description callout of the length the real Shelf holds, damaged in
     # two places far apart

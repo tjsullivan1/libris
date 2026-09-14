@@ -1248,11 +1248,17 @@ def fits_lost_characters(damaged: str, candidate: str) -> bool:
 
 @dataclass
 class FieldRepair:
-    """One damaged string and what the API says it should be."""
+    """One damaged string and what it should be."""
 
     field: str
     damaged: str
     proposed: str
+    # Which of the identical damaged strings in this field this answer is for,
+    # counting from zero in the order the report lists them - skipped ones
+    # included. Two authors or two lines can lose the same character in the
+    # same place and still mean different things, and an answer matched by text
+    # alone landed on the first of them (#129 second review).
+    occurrence: int = 0
 
 
 @dataclass
@@ -1284,13 +1290,16 @@ class EncodingRepair:
         A person deserves to know which damage a repair leaves behind rather
         than discovering it in the next report.
         """
-        offered = {repair.damaged for repair in self.fields + self.body}
+        # Keyed by field as well as text: a title and an author can hold the
+        # same damaged string, and repairing one said nothing about the other
+        # (#129 second review).
+        offered = {(repair.field, repair.damaged) for repair in self.fields + self.body}
         return [
             value
             for name, values in self.damage.fields.items()
             if name != "filename"
             for value in values
-            if value not in offered
+            if (name, value) not in offered
         ]
 
 
@@ -1384,7 +1393,10 @@ def _proposed_body_repairs(
         return repairs
     body = split[1]
 
-    first_heading = _FIRST_H1.search(body)
+    # `match` on the body as it opens, not `search`: the first H1 anywhere is a
+    # reader's own heading in a note that was never given a title heading
+    # (#129 second review).
+    first_heading = _FIRST_H1.match(body.lstrip("\r\n"))
     title_heading = first_heading.group(0).strip() if first_heading else None
     _prose, description = split_body(body)
     description_lines = {line.strip() for line in (description or "").splitlines()}
@@ -1465,7 +1477,27 @@ def propose_encoding_repair(
     )
 
 
-def apply_encoding_repair(repair: EncodingRepair) -> bool:
+def _nth_match(entries: list[object], target: str, occurrence: int) -> int | None:
+    """The position of the given occurrence of a value in a list, if it is there.
+
+    Args:
+        entries: The list as the note holds it.
+        target: The value to find.
+        occurrence: Which match, counting from zero.
+
+    Returns:
+        Its index, or None when the list holds fewer matches than that.
+    """
+    seen = 0
+    for index, entry in enumerate(entries):
+        if entry == target:
+            if seen == occurrence:
+                return index
+            seen += 1
+    return None
+
+
+def apply_encoding_repair(repair: EncodingRepair) -> int:
     """Write one confirmed repair, frontmatter and body together.
 
     Called only after a person has said yes to this note's proposal. The
@@ -1476,85 +1508,105 @@ def apply_encoding_repair(repair: EncodingRepair) -> bool:
         repair: The proposal a person confirmed.
 
     Returns:
-        True when something was written. False when nothing was: the proposal
-        was empty, or the note no longer holds any string it was reported to -
-        the reader fixed it by hand after the report was built.
+        How many damaged strings were replaced. Zero when nothing was written:
+        the proposal was empty, or the note no longer holds any string it was
+        reported to. Fewer than the answers given when some had been fixed by
+        hand since the report was built - counting the answers instead reported
+        repairs that never happened (#129 second review).
 
     Raises:
         BookNotFound: If the note is gone, or moved, by the time it is written.
         FrontmatterUnreadable: If its frontmatter cannot be parsed.
     """
     if repair.is_empty:
-        return False
+        return 0
 
-    wrote = False
+    applied = 0
 
     def _decide(
         current: dict[str, object], body: str
     ) -> tuple[dict[str, object], str | None]:
-        nonlocal wrote
+        nonlocal applied
+        applied = 0
         changes: dict[str, object] = {}
 
-        # Read once and corrected in place, so every damaged author lands. Each
-        # correction rebuilding the list from `current` meant the last one
-        # overwrote the rest (#129 review). Matched against what the file holds
-        # now, so an author edited meanwhile is not replaced by a stale report.
-        original_authors = current.get("authors")
-        if isinstance(original_authors, str):
-            original_authors = [original_authors]
-        authors = list(original_authors) if isinstance(original_authors, list) else None
+        # Every list field is corrected element by element - authors and genres
+        # alike. Only authors was handled as a list, so a genre answer compared
+        # a string to a list, matched nothing, and was dropped (#129 second
+        # review). Positions come from the list as the note holds it now, so an
+        # entry edited since the report is not replaced by a stale answer.
+        originals: dict[str, list[object]] = {}
+        working: dict[str, list[object]] = {}
 
         for item in repair.fields:
-            if item.field == "authors":
-                if authors is None:
-                    continue
-                for index, entry in enumerate(authors):
-                    if entry == item.damaged:
-                        authors[index] = item.proposed
-                        break
-            elif item.field not in changes and current.get(item.field) == item.damaged:
+            value = current.get(item.field)
+            if isinstance(value, list):
+                original = originals.setdefault(item.field, list(value))
+                entries = working.setdefault(item.field, list(value))
+                index = _nth_match(original, item.damaged, item.occurrence)
+                if index is not None:
+                    entries[index] = item.proposed
+                    applied += 1
+            elif (
+                item.occurrence == 0
+                and item.field not in changes
+                and value == item.damaged
+            ):
+                # A scalar - including an author written as a bare string, which
+                # keeps its shape rather than becoming a list.
                 changes[item.field] = item.proposed
+                applied += 1
 
-        if authors is not None and authors != original_authors:
-            changes["authors"] = authors
+        for name, entries in working.items():
+            if entries != originals[name]:
+                changes[name] = entries
 
         new_body: str | None = None
         if repair.body:
-            # Answers queued per damaged line, in document order - the order the
-            # report lists them and the reader answered them. Two identical
-            # damaged lines can mean different things, and keying by text alone
-            # gave both the last answer (#129 review).
-            pending: dict[str, list[str]] = {}
-            for item in repair.body:
-                pending.setdefault(item.damaged, []).append(item.proposed)
+            # Each answer is for one damaged line: the given occurrence of that
+            # text in the order the report lists them, skipped ones included.
+            # Queued by text alone, skipping the first of two identical lines put
+            # the second's answer on the first (#129 second review).
+            wanted = {
+                (item.damaged, item.occurrence): item.proposed for item in repair.body
+            }
+            seen: dict[str, int] = {}
 
             repaired_lines = []
             for line in body.splitlines(keepends=True):
                 content = line.rstrip("\r\n")
                 ending = line[len(content) :]
-                answers = pending.get(content.strip())
-                if not answers:
+                key = content.strip()
+                if LOST_CHARACTER not in key:
                     repaired_lines.append(line)
                     continue
+
+                occurrence = seen.get(key, 0)
+                seen[key] = occurrence + 1
+                proposed = wanted.get((key, occurrence))
+                if proposed is None:
+                    repaired_lines.append(line)
+                    continue
+
                 # Only the text changes. The indentation made that line a code
                 # block or a nested quote, and losing it changes what the note
                 # renders - the damage #99 fixed once already.
                 lead = content[: len(content) - len(content.lstrip())]
                 trail = content[len(content.rstrip()) :]
-                repaired_lines.append(lead + answers.pop(0) + trail + ending)
+                repaired_lines.append(lead + proposed + trail + ending)
+                applied += 1
 
             rebuilt = "".join(repaired_lines)
             if rebuilt != body:
                 new_body = rebuilt
 
-        wrote = bool(changes) or new_body is not None
         return changes, new_body
 
     try:
         edit_note(repair.damage.path, _decide)
     except FileNotFoundError:
         raise BookNotFound(f"No Book Note is at {repair.damage.path.name}.") from None
-    return wrote
+    return applied
 
 
 class IsbnAgreement(Enum):
