@@ -1216,6 +1216,12 @@ def _report_not_utf8(paths: list[Path]) -> None:
     )
 
 
+_SENTINEL_REASONS = {
+    "_not_found_in_google_books_api": "the note records that Google Books has no such book",
+    "_not_a_book": "the note records that it is not a book",
+}
+
+
 def _suggestions_for(
     damage: EncodingDamage, client: GoogleBooksClient
 ) -> tuple[dict[tuple[str, str, int], str], str | None]:
@@ -1238,10 +1244,14 @@ def _suggestions_for(
 
     if damage.identifier is None:
         if damage.google_books_id in EXCLUDED_GOOGLE_BOOKS_IDS:
-            # Said as what the note records rather than as a failure: someone
-            # looked this book up and wrote down that Google Books has not got
-            # it, which is an answer, not a gap.
-            return {}, "the note records that Google Books has no such book"
+            # Said as what the note records rather than as a failure - and what
+            # each sentinel records, because they are different answers:
+            # `_not_found_in_google_books_api` that the book was looked up and
+            # Google Books has not got it, `_not_a_book` that it is not a book
+            # (#129 fifth review).
+            return {}, _SENTINEL_REASONS.get(
+                damage.google_books_id, "the note records that it has no volume"
+            )
         return {}, "the note names no volume"
 
     try:
@@ -1396,8 +1406,12 @@ def repair(
     if renames:
         typer.echo(
             f"{len(renames)} still have damage in the filename. Renaming rewrites "
-            "the wikilinks pointing at a note, so it is left for that work."
+            "the wikilinks pointing at a note, so it is left for that work:"
         )
+        # Named, not only counted: #78 asks for the notes wanting a rename to be
+        # recorded, and a count cannot be acted on (#129 fifth review).
+        for note in renames:
+            typer.echo(f"  {note.path.name}")
 
 
 @app.command()

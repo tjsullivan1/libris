@@ -6,6 +6,7 @@ module knows about HTTP, and it raises rather than returning status codes: the
 adapter decides what a failure looks like on the wire.
 """
 
+import hashlib
 import math
 import re
 from collections.abc import Iterable, Iterator
@@ -20,6 +21,7 @@ from .api import BookCandidate, GoogleBooksClient
 from .markdown import (
     EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
+    NoteChanged,
     create_book_note,
     edit_note,
     list_books,
@@ -878,6 +880,11 @@ class EncodingDamage:
     # a repair, and the reader was asked for answers that were then refused
     # (#129 third review).
     writable: bool = True
+    # The SHA-256 of the note's bytes when this report was read. A repair is
+    # applied only to the note as reported; anything else refuses it (#129
+    # fifth review). None for a report built some other way, which is applied
+    # unchecked.
+    fingerprint: str | None = None
 
     @property
     def identifier(self) -> str | None:
@@ -996,6 +1003,9 @@ class _ShelfFile:
     # and for one whose frontmatter is the empty mapping `{}`; only the second
     # can be written to (#129 fourth review).
     has_mapping: bool = False
+    # The SHA-256 of the bytes read, so a repair decided from this reading can
+    # prove the note has not changed before writing it (#129 fifth review).
+    fingerprint: str = ""
 
     def value(self, key: str) -> object:
         """Read a frontmatter field, whether or not the block parsed.
@@ -1062,6 +1072,8 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
             # not stop `doctor` for the rest (#127 review).
             continue
 
+        fingerprint = hashlib.sha256(raw).hexdigest()
+
         # Decoded from the one read. Reading again to decode leniently was a
         # second chance for the file to vanish or be replaced (#127 review).
         try:
@@ -1089,12 +1101,14 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
                 # about a malformed file, but a better one than calling it all
                 # body: a note like this states its `libris_id` on the second
                 # line, and reading it as prose lost the collision it was in.
-                yield _ShelfFile(path, {}, unterminated, "", not_utf8)
+                yield _ShelfFile(
+                    path, {}, unterminated, "", not_utf8, fingerprint=fingerprint
+                )
                 continue
 
             # No fence at all, so the whole file is body - the same answer
             # `merge._extract_body_content` gives.
-            yield _ShelfFile(path, {}, "", content, not_utf8)
+            yield _ShelfFile(path, {}, "", content, not_utf8, fingerprint=fingerprint)
             continue
 
         try:
@@ -1103,11 +1117,21 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
             parsed = None
 
         if isinstance(parsed, dict):
-            yield _ShelfFile(path, parsed, "", split[1], not_utf8, has_mapping=True)
+            yield _ShelfFile(
+                path,
+                parsed,
+                "",
+                split[1],
+                not_utf8,
+                has_mapping=True,
+                fingerprint=fingerprint,
+            )
         else:
             # The block is there but nothing reads it as a mapping, so there are
             # no fields to look through and the raw text is all a check has.
-            yield _ShelfFile(path, {}, split[0], split[1], not_utf8)
+            yield _ShelfFile(
+                path, {}, split[0], split[1], not_utf8, fingerprint=fingerprint
+            )
 
 
 def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
@@ -1212,6 +1236,14 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
         google_books_id = frontmatter.get("google_books_id") or _raw_frontmatter_value(
             unparsed_frontmatter, "google_books_id"
         )
+        # Text, as the client needs it. Older notes can carry an id YAML reads as
+        # a number, which reached URL quoting and raised TypeError - an error
+        # `repair` does not catch, so one such note ended the run (#129 fifth
+        # review).
+        if google_books_id is None or isinstance(google_books_id, bool):
+            google_books_id = None
+        else:
+            google_books_id = str(google_books_id).strip() or None
         isbn = note.isbn or read_isbn(
             _raw_frontmatter_value(unparsed_frontmatter, "isbn")
         )
@@ -1225,6 +1257,7 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
                 isbn=isbn,
                 fields=fields,
                 writable=shelf_file.has_mapping and not shelf_file.not_utf8,
+                fingerprint=shelf_file.fingerprint or None,
             )
         )
 
@@ -1546,10 +1579,10 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
 
     Returns:
         How many damaged strings were replaced. Zero when nothing was written:
-        the proposal was empty, or the note no longer holds any string it was
-        reported to. Fewer than the answers given when some had been fixed by
-        hand since the report was built - counting the answers instead reported
-        repairs that never happened (#129 second review).
+        the proposal was empty, or the note has changed in any way since it was
+        reported (#129 fifth review). Fewer than the answers given when some
+        name a string the note does not hold - counting the answers instead
+        reported repairs that never happened (#129 second review).
 
     Raises:
         BookNotFound: If the note is gone, or moved, by the time it is written.
@@ -1580,20 +1613,8 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
             if isinstance(value, list):
                 original = originals.setdefault(item.field, list(value))
                 entries = working.setdefault(item.field, list(value))
-                # An occurrence number is only good while the field's damaged
-                # entries are exactly as reported - the whole sequence, not the
-                # count of the answered text. A twin changed to another damaged
-                # name and a new twin added leave that count unchanged while
-                # moving which entry the occurrence names, and the answer would
-                # land on one the reader never answered for (#129 third and
-                # fourth reviews).
-                damaged_now = [
-                    entry
-                    for entry in original
-                    if isinstance(entry, str) and LOST_CHARACTER in entry
-                ]
-                if damaged_now != repair.damage.fields.get(item.field, []):
-                    continue
+                # Occurrence numbers name entries in the note as reported; the
+                # fingerprint checked by `edit_note` guarantees this is that note.
                 index = _nth_match(original, item.damaged, item.occurrence)
                 # Checked against the working copy too, so two answers naming the
                 # same occurrence cannot both apply and both be counted.
@@ -1625,21 +1646,12 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
             }
             seen: dict[str, int] = {}
 
-            # The same guard as for a list field: occurrence numbers are only
-            # trusted while the body's damaged lines are exactly as reported. A
-            # twin added, removed or swapped for another damaged line would
-            # shift an answer onto a line the reader skipped - and a count of
-            # the answered text cannot see a swap (#129 third and fourth
-            # reviews). Any such change refuses every body answer.
-            now = [line.strip() for line in body.splitlines() if LOST_CHARACTER in line]
-            body_stale = now != repair.damage.fields.get("body", [])
-
             repaired_lines = []
             for line in body.splitlines(keepends=True):
                 content = line.rstrip("\r\n")
                 ending = line[len(content) :]
                 key = content.strip()
-                if body_stale or LOST_CHARACTER not in key:
+                if LOST_CHARACTER not in key:
                     repaired_lines.append(line)
                     continue
 
@@ -1665,9 +1677,17 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
         return changes, new_body
 
     try:
-        edit_note(repair.damage.path, _decide)
+        edit_note(
+            repair.damage.path, _decide, expected_sha256=repair.damage.fingerprint
+        )
     except FileNotFoundError:
         raise BookNotFound(f"No Book Note is at {repair.damage.path.name}.") from None
+    except NoteChanged:
+        # The note is not the one the answers were given against. Every check
+        # narrower than this one - counts, then damaged sequences - met an edit
+        # it could not see, and each let an answer land on a string the reader
+        # never answered for (#129 third, fourth and fifth reviews).
+        return 0
     return applied
 
 

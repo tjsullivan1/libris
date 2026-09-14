@@ -1965,7 +1965,10 @@ def test_a_damaged_genre_is_repaired(tmp_path):
 
 
 def test_a_repair_counts_only_what_it_actually_changed(tmp_path):
-    # Given two answers, one of them for a title the reader has since fixed
+    # Given two answers for an unchanged note, one of them for an author the
+    # note does not hold. Set up without editing the note: a note changed since
+    # it was reported now refuses every answer (#129 fifth review), so a hand
+    # edit no longer produces a partial repair.
     vault = tmp_path / "shelf"
     vault.mkdir()
     path = _damaged_note(
@@ -1978,11 +1981,9 @@ def test_a_repair_counts_only_what_it_actually_changed(tmp_path):
         damage=damage,
         fields=[
             service.FieldRepair("title", "A�B", "AxB"),
-            service.FieldRepair("authors", "C�D", "CyD"),
+            service.FieldRepair("authors", "Z�Z", "ZyZ"),
         ],
     )
-    text = path.read_text(encoding="utf-8").replace('"A�B"', '"fixed by hand"')
-    path.write_text(text, encoding="utf-8")
 
     # When both are applied
     applied = service.apply_encoding_repair(repair)
@@ -1990,7 +1991,9 @@ def test_a_repair_counts_only_what_it_actually_changed(tmp_path):
     # Then one change is reported, not the two answers submitted (#129 second
     # review)
     assert applied == 1
-    assert BookNote.read(path).frontmatter["authors"] == ["CyD"]
+    frontmatter = BookNote.read(path).frontmatter
+    assert frontmatter["title"] == "AxB"
+    assert frontmatter["authors"] == ["C�D"]
 
 
 def test_unrepaired_damage_is_told_apart_by_field(tmp_path):
@@ -2338,6 +2341,97 @@ def test_a_note_with_an_empty_frontmatter_mapping_is_writable(tmp_path):
     # mapping held anything called it unwritable - but a repair writes to it
     # without trouble (#129 fourth review).
     assert damage.writable is True
+
+
+# --- #129 fifth review ------------------------------------------------------
+
+
+def test_an_author_fixed_by_hand_then_re_added_refuses_the_repair(tmp_path):
+    # Given a damaged author and an answer for it - then, before the answer is
+    # applied, the author fixed by hand and a new damaged author of the same
+    # text added after it. The damaged entries read exactly as reported.
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(vault, "re-added.md", 'title: Poems\nauthors:\n  - "V�lez"')
+    damage = find_encoding_damage(vault)[0]
+    repair = service.EncodingRepair(
+        damage=damage,
+        fields=[service.FieldRepair("authors", "V�lez", "Vélez")],
+    )
+    path.write_text(
+        '---\ntitle: Poems\nauthors:\n  - "Vález"\n  - "V�lez"\n'
+        "---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    # When the answer is applied
+    applied = service.apply_encoding_repair(repair)
+
+    # Then nothing is written. Every check that compared some part of the note -
+    # counts, then the damaged sequence - had an edit it could not see; only the
+    # note being exactly as it was when reported proves the answer still names
+    # what the reader answered (#129 fifth review).
+    assert applied == 0
+    assert path.read_bytes() == before
+
+
+def test_a_damaged_line_moved_out_of_the_callout_refuses_the_repair(tmp_path):
+    # Given the volume's text proposed for a damaged line of the description
+    # callout - then that line moved up into the reader's notes, and the callout
+    # given clean text. The damaged lines read exactly as reported.
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "moved.md",
+        'title: "Discourse"',
+        body=(
+            "## Notes\n\nMine.\n\n"
+            "> [!abstract]- Description\n> Discours de la m�thode\n"
+        ),
+    )
+    damage = find_encoding_damage(vault)[0]
+    repair = service.EncodingRepair(
+        damage=damage,
+        body=[
+            service.FieldRepair(
+                "body", "> Discours de la m�thode", "> Discours de la méthode"
+            )
+        ],
+    )
+    path.write_text(
+        '---\ntitle: "Discourse"\n---\n\n## Notes\n\n> Discours de la m�thode\n\n'
+        "> [!abstract]- Description\n> A clean blurb.\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    # When the proposal is applied
+    applied = service.apply_encoding_repair(repair)
+
+    # Then the reader's quotation is not given the volume's text (#129 fifth
+    # review)
+    assert applied == 0
+    assert path.read_bytes() == before
+
+
+def test_a_legacy_integer_volume_id_is_read_as_text(tmp_path):
+    # Given an older note whose volume id YAML reads as a number
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(vault, "legacy.md", 'title: "A�B"\ngoogle_books_id: 123')
+    damage = find_encoding_damage(vault)[0]
+    client = _StubClient(BookCandidate(title="AxB", authors=[]))
+
+    # When a repair is sought
+    service.propose_encoding_repair(damage, client)
+
+    # Then the id is text, as the client needs. Passed as an int it reached URL
+    # quoting and raised TypeError, which `repair` does not catch (#129 fifth
+    # review).
+    assert damage.google_books_id == "123"
+    assert client.asked == ["123"]
 
 
 def test_a_note_that_lost_nothing_is_not_reported(tmp_path):

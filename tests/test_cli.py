@@ -1165,6 +1165,47 @@ def test_repair_offers_the_blurb_only_to_the_callout_copy_of_a_twin(
     assert "> [!abstract]- Description\n> Discours de la méthode\n" in text
 
 
+def test_repair_names_each_note_left_for_a_rename(monkeypatch, tmp_path):
+    # Given a note damaged only in its filename, which this command leaves alone
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "S�ren.md").write_text(
+        '---\ntitle: "Either-Or"\n---\n\n## Notes\n\nMine.\n', encoding="utf-8"
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then the note is named, not only counted. #78 asks for the notes wanting a
+    # rename to be recorded, and a count cannot be acted on (#129 fifth review).
+    assert result.exit_code == 0, result.output
+    assert "S�ren.md" in result.output
+
+
+def test_repair_says_a_not_a_book_note_records_that_it_is_not_one(
+    monkeypatch, tmp_path
+):
+    # Given a damaged note whose volume id records that it is not a book
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Pamphlet.md").write_text(
+        '---\ntitle: "S�ren"\ngoogle_books_id: _not_a_book\n---\n\n## Notes\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_text(monkeypatch, "")
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then it says what that sentinel records. `_not_a_book` is not a lookup that
+    # found nothing, and saying Google Books has no such book misstates why the
+    # API was not asked (#129 fifth review).
+    assert result.exit_code == 0, result.output
+    assert "records that it is not a book" in result.output
+
+
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
     # Given a description callout of the length the real Shelf holds, damaged in
     # two places far apart

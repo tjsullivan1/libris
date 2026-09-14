@@ -1,6 +1,7 @@
 """Markdown file operations for book notes (frontmatter, creation, enrichment)."""
 
 import errno
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -293,6 +294,16 @@ class FrontmatterUnreadable(ValueError):
     """A Book Note's frontmatter could not be parsed, so it was not written to."""
 
 
+class NoteChanged(Exception):
+    """A Book Note is no longer the file a decision about it was made from.
+
+    Raised before anything is written. A change decided against a report of a
+    note - which line is which, which author a twin is - is only sound while
+    the note is exactly as reported, and no narrower check has held: counts,
+    then damaged sequences, each met an edit they could not see (#129 reviews).
+    """
+
+
 def split_frontmatter(content: str) -> Optional[tuple[str, str]]:
     """Split a note into its frontmatter block and everything after it.
 
@@ -471,6 +482,7 @@ def _write_through(handle: BinaryIO, path: Path, content: str, raw: bytes) -> No
 def edit_note(
     file_path: Path,
     decide: Callable[[dict[str, Any], str], tuple[dict[str, Any], str | None]],
+    expected_sha256: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Change a Book Note's frontmatter and body in one write.
 
@@ -503,6 +515,13 @@ def edit_note(
     """
     with file_path.open("r+b") as handle:
         raw = handle.read()
+        # Checked through the handle that will write, so the note compared is
+        # the note written. `expected_sha256` is the SHA-256 of its bytes when
+        # whatever `decide` acts on was read; any edit since refuses the change.
+        if expected_sha256 is not None and (
+            hashlib.sha256(raw).hexdigest() != expected_sha256
+        ):
+            raise NoteChanged(f"{file_path.name} has changed since it was read.")
         try:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
