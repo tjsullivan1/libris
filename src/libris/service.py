@@ -881,9 +881,9 @@ class EncodingDamage:
     # (#129 third review).
     writable: bool = True
     # The SHA-256 of the note's bytes when this report was read. A repair is
-    # applied only to the note as reported; anything else refuses it (#129
-    # fifth review). None for a report built some other way, which is applied
-    # unchecked.
+    # applied only if the note still has those bytes when it is read for
+    # writing (#129 fifth review). None for a report built some other way,
+    # which is applied unchecked.
     fingerprint: str | None = None
 
     @property
@@ -1579,8 +1579,10 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
 
     Returns:
         How many damaged strings were replaced. Zero when nothing was written:
-        the proposal was empty, or the note has changed in any way since it was
-        reported (#129 fifth review). Fewer than the answers given when some
+        the proposal was empty, or the note had changed by the time it was read
+        for writing (#129 fifth review) - an edit landing in the moment between
+        that read and the write is not caught (#129 sixth review). Fewer than
+        the answers given when some
         name a string the note does not hold - counting the answers instead
         reported repairs that never happened (#129 second review).
 

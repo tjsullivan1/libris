@@ -502,6 +502,10 @@ def edit_note(
             the fields to set and the body to write - or None for the body to
             leave it alone. It may raise to refuse the write, and nothing is
             written.
+        expected_sha256: The SHA-256 the note's bytes must have when read for
+            writing, or None to write without checking. Catches an edit made
+            before that read; an edit landing between that read and the write
+            is not caught (#129 sixth review).
 
     Returns:
         The frontmatter and body as they now stand on disk.
@@ -512,12 +516,18 @@ def edit_note(
             path for named fields, not the place to rebuild a broken note.
         FileNotFoundError: If the note is not there, or stops being the file at
             that path before it is written. It is never recreated.
+        NoteChanged: If `expected_sha256` is given and the note's bytes, when
+            read for writing, do not match it. Nothing is written.
     """
     with file_path.open("r+b") as handle:
         raw = handle.read()
         # Checked through the handle that will write, so the note compared is
         # the note written. `expected_sha256` is the SHA-256 of its bytes when
-        # whatever `decide` acts on was read; any edit since refuses the change.
+        # whatever `decide` acts on was read; an edit made between then and this
+        # read refuses the change. An edit landing after this read - while
+        # `decide` runs, a pure computation over one note - is not caught: no
+        # lock Obsidian honours exists, and a plain file offers no atomic
+        # compare-and-write (#129 sixth review).
         if expected_sha256 is not None and (
             hashlib.sha256(raw).hexdigest() != expected_sha256
         ):
