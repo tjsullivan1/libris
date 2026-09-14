@@ -1362,12 +1362,31 @@ def repair(
                 if suggested:
                     typer.echo(f"    the volume says: {_excerpt_damage(suggested)}")
 
-                typed = questionary.text(
-                    "    corrected (empty to leave it):",
-                    default=suggested or value,
-                ).ask()
+                default = suggested or value
+                while True:
+                    typed = questionary.text(
+                        "    corrected (empty to leave it):",
+                        default=default,
+                    ).ask()
+                    answer = (typed or "").strip()
+                    corrected = accept_correction(value, answer)
+                    # Accepted, skipped with an empty answer, or left as offered:
+                    # all final. Only an answer that changed the string and still
+                    # carries a lost character is asked again.
+                    if corrected is not None or not answer or answer == value:
+                        break
+                    # Said, and asked again with the reader's own answer filled
+                    # in, so only the missed letter needs fixing. Refused
+                    # silently, a half-fixed `Benito P?rez Galdos` was reported
+                    # "left alone" as though skipped, and read as a command that
+                    # did not work (user report).
+                    typer.echo(
+                        "    still has a lost character: "
+                        f"{_excerpt_damage(answer)} - fix it, or answer empty "
+                        "to leave it."
+                    )
+                    default = answer
 
-                corrected = accept_correction(value, typed or "")
                 if corrected is None:
                     continue
                 repair_item = FieldRepair(name, value, corrected, occurrence)

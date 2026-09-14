@@ -201,7 +201,7 @@ Ch'an and Zen Teaching - Lu K'uan Y�, ed..md
 
 **You supply the letter, because almost nothing else can.** Measured against this Shelf: of 57 damaged strings, the volumes Google Books returns account for **three**. The rest are beyond it — the vault's author values carry life dates the API never states (`S�ren Kierkegaard (1813-1855)`), some volumes name a different author entirely (`Po Ch�-i` resolves to `Anonymous`), four volumes serve text carrying the replacement character themselves, and three notes carry `_not_found_in_google_books_api` where an id should be. Where a volume does fit, its spelling is offered as the default, so accepting it is one keystroke.
 
-An empty answer leaves that string alone, and an answer still carrying `�` is refused rather than written back as a repair.
+An empty answer leaves that string alone. An answer that still carries a `�` - easy to do with a name like `Benito P�rez Gald�s`, where fixing one letter leaves the other - is not written back: `repair` says the answer still has a lost character, shows where, and asks again with your answer filled in, so you only fix what was missed.
 
 Frontmatter and body are written together in one pass, because a damaged title and the `# Title` heading rendered from it are the same damage in two places.
 
