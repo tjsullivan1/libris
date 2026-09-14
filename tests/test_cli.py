@@ -709,6 +709,503 @@ def test_doctor_reports_a_note_that_is_not_utf8(tmp_path, monkeypatch):
     assert note.read_bytes() == before
 
 
+# --- repairing what was lost (#78) ------------------------------------------
+
+
+def _damaged_shelf(tmp_path):
+    """A Shelf holding one note whose author and rendered heading lost a letter."""
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Either-Or.md"
+    note.write_text(
+        '---\ntitle: "Either-Or"\nauthors:\n  - "S�ren Kierkegaard"\n'
+        "google_books_id: vol1\n---\n\n# Either-Or\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    return vault, note
+
+
+def _answer_text(monkeypatch, answer):
+    """Stand in for the prompt `libris repair` asks per damaged string.
+
+    Records the default it was offered, which is where the API's suggestion
+    reaches the reader - asserting on the printed output alone would not say
+    whether the suggestion was actually the answer they could accept.
+    """
+    offered = []
+
+    def _text(message, default="", **_kwargs):
+        offered.append(default)
+
+        class _Answer:
+            def ask(self):
+                return answer(default) if callable(answer) else answer
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.text", _text)
+    return offered
+
+
+def _volume(monkeypatch, candidate):
+    """Answer every volume lookup with one candidate, or None for no volume."""
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.get_volume", lambda self, gid: candidate
+    )
+
+
+def test_repair_writes_what_the_reader_typed(monkeypatch, tmp_path):
+    # Given a damaged note whose volume says nothing that fits - 50 of the real
+    # Shelf's 57 damaged strings are like this (#78)
+    vault, note = _damaged_shelf(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(monkeypatch, None)
+    _answer_text(monkeypatch, "Søren Kierkegaard")
+
+    # When the reader types the letter themselves
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then it is written, and the note carries no replacement character
+    text = note.read_text(encoding="utf-8")
+    assert "Søren Kierkegaard" in text
+    assert "�" not in text
+    assert "Repaired 1 note(s)" in result.output
+
+
+def test_repair_offers_the_volumes_spelling_as_the_default(monkeypatch, tmp_path):
+    # Given a damaged note whose volume does hold the spelling
+    from libris.api import BookCandidate
+
+    vault, note = _damaged_shelf(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(
+        monkeypatch,
+        BookCandidate(
+            title="Either-Or", authors=["Søren Kierkegaard"], google_books_id="vol1"
+        ),
+    )
+    # The reader presses Enter, which questionary answers with the default
+    offered = _answer_text(monkeypatch, lambda default: default)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the volume's spelling was what they were offered, so accepting it is
+    # one keystroke - and it is what got written
+    assert "Søren Kierkegaard" in offered
+    assert "Søren Kierkegaard" in note.read_text(encoding="utf-8")
+    assert "the volume says" in result.output
+
+
+def test_repair_leaves_a_string_alone_on_an_empty_answer(monkeypatch, tmp_path):
+    # Given a damaged note and a reader who does not know this one either
+    vault, note = _damaged_shelf(tmp_path)
+    before = note.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(monkeypatch, None)
+    _answer_text(monkeypatch, "")
+
+    # When they answer with nothing
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the note is untouched byte for byte. A letter nobody supplied cannot
+    # be invented, and the file no longer says what it was (ADR 0003).
+    assert note.read_bytes() == before
+    assert "left 1 alone" in result.output
+
+
+def test_repair_refuses_an_answer_that_still_carries_the_damage(monkeypatch, tmp_path):
+    # Given a reader who fixed one lost character and left another, which is
+    # easy to do in a description carrying eight of them
+    vault, note = _damaged_shelf(tmp_path)
+    before = note.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(monkeypatch, None)
+    _answer_text(monkeypatch, "S�ren Kierkegård")
+
+    # When it is answered
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then nothing is written: an answer still carrying the replacement
+    # character writes the damage back
+    assert note.read_bytes() == before
+    assert "left 1 alone" in result.output
+
+
+def test_repair_says_when_a_note_records_that_google_books_lacks_the_book(
+    monkeypatch, tmp_path
+):
+    # Given a damaged note carrying the sentinel someone wrote after looking the
+    # book up and finding Google Books has not got it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Absent.md"
+    note.write_text(
+        '---\ntitle: "S�ren"\ngoogle_books_id: _not_found_in_google_books_api\n'
+        "---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _never(self, gid):
+        raise AssertionError(f"asked Google Books about the sentinel id {gid!r}")
+
+    monkeypatch.setattr("libris.cli.GoogleBooksClient.get_volume", _never)
+    _answer_text(monkeypatch, "Søren")
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then it reports what the note records rather than spending three retries
+    # and a backoff on a malformed lookup, and the reader still supplies the
+    # letter
+    assert result.exit_code == 0, result.output
+    assert "records that Google Books has no such book" in result.output
+    assert "title: Søren" in note.read_text(encoding="utf-8")
+
+
+def test_repair_offers_a_note_with_no_identifier_without_asking_the_api(
+    monkeypatch, tmp_path
+):
+    # Given a damaged note naming neither a volume nor an ISBN
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Orphan.md"
+    note.write_text('---\ntitle: "S�ren"\n---\n\n## Notes\n\nMine.\n', encoding="utf-8")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _never(self, gid):
+        raise AssertionError("asked the API about a note naming no volume")
+
+    monkeypatch.setattr("libris.cli.GoogleBooksClient.get_volume", _never)
+    _answer_text(monkeypatch, "Søren")
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then it is still offered - the reader is the source, not the API - and the
+    # API is not asked about a note that names no volume
+    assert result.exit_code == 0, result.output
+    assert "names no volume" in result.output
+    assert "title: Søren" in note.read_text(encoding="utf-8")
+
+
+# --- #129 review ----------------------------------------------------------
+
+
+def test_a_long_string_with_nothing_lost_is_shortened_not_crashed_on():
+    # Given a clean suggestion longer than the excerpt window - a description
+    # line the volume offers, which by design carries no replacement character
+    from libris.cli import _excerpt_damage
+
+    value = "A long description the volume offers. " * 6
+
+    # When it is rendered for the prompt
+    excerpt = _excerpt_damage(value)
+
+    # Then it is shortened. It indexed the first lost character, found none,
+    # and ended `libris repair` in an IndexError before the prompt (#129 review).
+    assert excerpt.endswith("...")
+    assert len(excerpt) < len(value)
+
+
+def test_repair_offers_each_field_its_own_suggestion(monkeypatch, tmp_path):
+    # Given a title and an author that lost the same character in the same
+    # place, and a volume spelling them differently
+    from libris.api import BookCandidate
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Note.md").write_text(
+        '---\ntitle: "S�ren"\nauthors:\n  - "S�ren"\n'
+        "google_books_id: vol1\n---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(
+        monkeypatch,
+        BookCandidate(title="Søren", authors=["Sören"], google_books_id="vol1"),
+    )
+    offered = _answer_text(monkeypatch, "")
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then each prompt is offered its own field's spelling. Keyed by the damaged
+    # text alone, the author's suggestion replaced the title's (#129 review).
+    assert offered == ["Søren", "Sören"]
+
+
+def test_repair_does_not_prompt_for_frontmatter_it_cannot_write(monkeypatch, tmp_path):
+    # Given a note whose frontmatter will not parse, and lost a character in it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Broken.md").write_text(
+        "---\ntitle: [S�ren\n---\n\n## Notes\n\nMine.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _never(message, default="", **_kwargs):
+        raise AssertionError("asked for a correction that cannot be written")
+
+    monkeypatch.setattr("questionary.text", _never)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then it says the note needs a hand repair instead of taking an answer it
+    # would then throw away (#129 review)
+    assert result.exit_code == 0, result.output
+    assert "by hand" in result.output
+
+
+def test_repair_refuses_a_negative_limit(monkeypatch, tmp_path):
+    # Given a Shelf with damage
+    vault, _note = _damaged_shelf(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When a negative limit is given
+    result = runner.invoke(app, ["repair", "--limit", "-1"])
+
+    # Then it is refused. Sliced as given, -1 meant every note but the last
+    # (#129 review).
+    assert result.exit_code != 0
+
+
+def test_repair_says_so_when_a_confirmed_repair_changed_nothing(monkeypatch, tmp_path):
+    # Given a reader's answer for a note that changed after it was reported
+    vault, _note = _damaged_shelf(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(monkeypatch, None)
+    _answer_text(monkeypatch, "Søren Kierkegaard")
+    monkeypatch.setattr("libris.cli.apply_encoding_repair", lambda repair: False)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then it is not counted as repaired (#129 review)
+    assert "no longer holds what was reported" in result.output
+    assert "Repaired 0 note(s)" in result.output
+
+
+def test_repair_names_the_status_when_google_books_fails(monkeypatch, tmp_path):
+    # Given a lookup that fails with a server error
+    import httpx
+
+    vault, _note = _damaged_shelf(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _fail(self, gid):
+        request = httpx.Request("GET", "https://example.invalid")
+        raise httpx.HTTPStatusError(
+            "unavailable",
+            request=request,
+            response=httpx.Response(503, request=request),
+        )
+
+    monkeypatch.setattr("libris.cli.GoogleBooksClient.get_volume", _fail)
+    _answer_text(monkeypatch, "")
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then the status is named, so a reader can tell an outage from a lookup
+    # that will never succeed (#129 review)
+    assert result.exit_code == 0, result.output
+    assert "HTTP 503" in result.output
+
+
+# --- #129 second review -----------------------------------------------------
+
+
+def test_repair_does_not_prompt_any_part_of_a_note_whose_frontmatter_breaks(
+    monkeypatch, tmp_path
+):
+    # Given a note whose frontmatter will not parse, damaged there and in its
+    # body too
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Broken.md").write_text(
+        "---\ntitle: [S�ren\n---\n\n## Notes\n\nDiscours de la m�thode\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _never(message, default="", **_kwargs):
+        raise AssertionError(f"prompted for {default!r}, which cannot be written")
+
+    monkeypatch.setattr("questionary.text", _never)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then the body is not prompted either. No edit to a note whose frontmatter
+    # will not parse can be written, so its answer would be thrown away (#129
+    # second review).
+    assert result.exit_code == 0, result.output
+    assert "by hand" in result.output
+
+
+def test_repair_reports_the_strings_it_changed_not_the_answers_it_took(
+    monkeypatch, tmp_path
+):
+    # Given a note with two damaged strings, both answered, of which the write
+    # manages only one
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Note.md").write_text(
+        '---\ntitle: "S�ren"\nauthors:\n  - "S�ren Kierkegaard"\n'
+        "---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_text(monkeypatch, lambda default: default.replace("�", "ø"))
+    monkeypatch.setattr("libris.cli.apply_encoding_repair", lambda repair: 1)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the count is what was written, not what was asked (#129 second review)
+    assert "Repaired 1 string(s)" in result.output
+
+
+def test_repair_puts_a_later_twins_answer_on_that_twin(monkeypatch, tmp_path):
+    # Given two identical damaged authors, and a reader who skips the first
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Twins.md"
+    note.write_text(
+        '---\ntitle: Poems\nauthors:\n  - "V�lez"\n  - "V�lez"\n'
+        "---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    answers = iter(["", "Vález"])
+    _answer_text(monkeypatch, lambda default: next(answers))
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the answer lands on the author it was typed for
+    from libris.markdown import read_frontmatter
+
+    assert read_frontmatter(note)["authors"] == ["V�lez", "Vález"]
+
+
+def test_repair_leaves_a_note_it_cannot_write_without_prompting(monkeypatch, tmp_path):
+    # Given a file on the Shelf with no frontmatter, damaged only in its text -
+    # reported under the body, with no marker saying it cannot be written
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Loose.md").write_text("Just text about m�thode.\n", encoding="utf-8")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _never(message, default="", **_kwargs):
+        raise AssertionError(f"prompted for {default!r}, which cannot be written")
+
+    monkeypatch.setattr("questionary.text", _never)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then it is left for a hand repair rather than taking an answer that would
+    # be refused (#129 third review)
+    assert result.exit_code == 0, result.output
+    assert "by hand" in result.output
+
+
+def test_repair_offers_the_blurb_only_to_the_callout_copy_of_a_twin(
+    monkeypatch, tmp_path
+):
+    # Given a quotation in the reader's notes identical to a damaged line of the
+    # description callout, and a volume whose description holds that sentence
+    from libris.api import BookCandidate
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Discourse.md"
+    note.write_text(
+        '---\ntitle: "Discourse"\ngoogle_books_id: vol1\n---\n\n'
+        "## Notes\n\n> Discours de la m�thode\n\n"
+        "> [!abstract]- Description\n> Discours de la m�thode\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(
+        monkeypatch,
+        BookCandidate(
+            title="Discourse",
+            authors=[],
+            google_books_id="vol1",
+            description="Discours de la méthode",
+        ),
+    )
+    # The reader presses Enter at both prompts
+    offered = _answer_text(monkeypatch, lambda default: default)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the reader's quotation was offered itself, and only the callout's copy
+    # the blurb. Looked up by field and text, both prompts took the callout's
+    # suggestion and Enter wrote the blurb over the reader's words (#129 fourth
+    # review).
+    assert offered == ["> Discours de la m�thode", "> Discours de la méthode"]
+    text = note.read_text(encoding="utf-8")
+    assert "## Notes\n\n> Discours de la m�thode\n" in text
+    assert "> [!abstract]- Description\n> Discours de la méthode\n" in text
+
+
+def test_repair_names_each_note_left_for_a_rename(monkeypatch, tmp_path):
+    # Given a note damaged only in its filename, which this command leaves alone
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "S�ren.md").write_text(
+        '---\ntitle: "Either-Or"\n---\n\n## Notes\n\nMine.\n', encoding="utf-8"
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then the note is named, not only counted. #78 asks for the notes wanting a
+    # rename to be recorded, and a count cannot be acted on (#129 fifth review).
+    assert result.exit_code == 0, result.output
+    assert "S�ren.md" in result.output
+
+
+def test_repair_says_a_not_a_book_note_records_that_it_is_not_one(
+    monkeypatch, tmp_path
+):
+    # Given a damaged note whose volume id records that it is not a book
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Pamphlet.md").write_text(
+        '---\ntitle: "S�ren"\ngoogle_books_id: _not_a_book\n---\n\n## Notes\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_text(monkeypatch, "")
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then it says what that sentinel records. `_not_a_book` is not a lookup that
+    # found nothing, and saying Google Books has no such book misstates why the
+    # API was not asked (#129 fifth review).
+    assert result.exit_code == 0, result.output
+    assert "records that it is not a book" in result.output
+
+
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
     # Given a description callout of the length the real Shelf holds, damaged in
     # two places far apart

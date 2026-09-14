@@ -20,6 +20,7 @@ from .config import (
 )
 from .importer import SUPPORTED_FORMATS, run_import
 from .markdown import (
+    EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
     FrontmatterUnreadable,
     RenameResult,
@@ -65,10 +66,16 @@ from .service import (
     LOST_CHARACTER,
     BookNotFound,
     EncodingDamage,
+    EncodingRepair,
+    FieldRepair,
     IdCollision,
     IsbnAgreement,
+    accept_correction,
     apply_decisions,
+    apply_encoding_repair,
+    find_encoding_damage,
     inspect_shelf,
+    propose_encoding_repair,
     update_note,
 )
 
@@ -1021,6 +1028,12 @@ def _excerpt_damage(value: str, width: int = 36) -> str:
     if len(value) <= width * 3:
         return value
 
+    if LOST_CHARACTER not in value:
+        # A suggestion from the volume is clean by design, so there is nothing
+        # to centre a window on. It indexed the first lost character anyway and
+        # ended `libris repair` in an IndexError before the prompt (#129 review).
+        return value[: width * 3].rstrip() + "..."
+
     # Overlapping windows are merged rather than printed twice: the description
     # callout that motivated this holds eight lost characters, several within a
     # few words of each other.
@@ -1201,6 +1214,204 @@ def _report_not_utf8(paths: list[Path]) -> None:
         "UTF-8 in an editor that can tell which encoding it was written in - the "
         "file does not say, so Libris does not guess (ADR 0003)."
     )
+
+
+_SENTINEL_REASONS = {
+    "_not_found_in_google_books_api": "the note records that Google Books has no such book",
+    "_not_a_book": "the note records that it is not a book",
+}
+
+
+def _suggestions_for(
+    damage: EncodingDamage, client: GoogleBooksClient
+) -> tuple[dict[tuple[str, str, int], str], str | None]:
+    """Ask the volume a note names what it can offer, and say if it could not.
+
+    Args:
+        damage: The note's damage, as reported.
+        client: The Google Books client to ask.
+
+    Returns:
+        The suggestion for each damaged string the volume accounts for, keyed by
+        field, damaged text and occurrence, and a line explaining why there are
+        none - which is the usual case. The field, because a title and an author
+        can lose the same character in the same place and still be spelled
+        differently (#129 review); the occurrence, because two copies of one
+        text can be one generated line and one the reader wrote (#129 fourth
+        review).
+    """
+    import httpx
+
+    if damage.identifier is None:
+        if damage.google_books_id in EXCLUDED_GOOGLE_BOOKS_IDS:
+            # Said as what the note records rather than as a failure - and what
+            # each sentinel records, because they are different answers:
+            # `_not_found_in_google_books_api` that the book was looked up and
+            # Google Books has not got it, `_not_a_book` that it is not a book
+            # (#129 fifth review).
+            return {}, _SENTINEL_REASONS.get(
+                damage.google_books_id, "the note records that it has no volume"
+            )
+        return {}, "the note names no volume"
+
+    try:
+        proposal = propose_encoding_repair(damage, client)
+    except httpx.HTTPStatusError as exc:
+        # One note's failure is not the run's. The status is named so an outage
+        # reads differently from a lookup that will never succeed.
+        return {}, f"could not ask Google Books (HTTP {exc.response.status_code})"
+    except httpx.RequestError as exc:
+        return {}, f"could not reach Google Books ({type(exc).__name__})"
+
+    if proposal is None:
+        return {}, "Google Books has no such volume"
+    if proposal.is_empty:
+        return {}, "the volume says nothing that fits"
+    # Keyed by occurrence as well. A proposal names which copy of a text it is
+    # for - only the description callout's copy of a line, say, and not the
+    # reader's identical quotation above it. Looked up by field and text alone,
+    # both prompts took the suggestion, and Enter wrote the blurb over the
+    # reader's own words (#129 fourth review).
+    return {
+        (item.field, item.damaged, item.occurrence): item.proposed
+        for item in proposal.fields + proposal.body
+    }, None
+
+
+@app.command()
+def repair(
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        min=0,
+        help="Stop after considering this many notes (0 for all)",
+    ),
+) -> None:
+    """Put back characters lost to a bad decode, one string at a time (#78).
+
+    The letter is gone from the file, so someone has to supply it. Measured
+    against the real Shelf, the volumes Libris can ask account for 3 of 57
+    damaged strings - the rest are plain to a reader (`Po Ch?-i` is Po Chü-i)
+    and to nothing else. So this shows each damaged string and takes the
+    correction from you, offering the volume's answer as the default in the few
+    cases it fits.
+
+    An empty answer leaves that string alone. Nothing is written that still
+    carries a replacement character, and nothing is written without your typing
+    it: guessing at an author's name is the silent wrongness ADR 0003 refuses.
+
+    Filenames are left alone. Renaming a note rewrites the wikilinks pointing at
+    it, which is its own piece of work.
+    """
+    import questionary
+
+    vault_path = _require_vault_path()
+    damaged = find_encoding_damage(vault_path)
+    if not damaged:
+        typer.echo("No note has lost a character.")
+        return
+
+    in_place = [note for note in damaged if note.repairable_in_place]
+    typer.echo(
+        f"{len(damaged)} note(s) have lost a character; {len(in_place)} have "
+        "damage outside the filename, which is what this repairs.\n"
+    )
+
+    client = GoogleBooksClient()
+    repaired = untouched = 0
+
+    for damage in in_place[: limit or None]:
+        typer.echo(f"{damage.path.name}")
+
+        if not damage.writable:
+            # The whole note: nothing can be written to one whose frontmatter is
+            # missing or will not parse, so prompting for any of it took answers
+            # that were then thrown away. Asked of the report rather than read
+            # off one marker, because a note with no frontmatter carries no
+            # marker at all (#129 second and third reviews).
+            typer.echo(
+                "  it has no frontmatter a repair can write to, so it needs "
+                "repairing by hand. Left alone.\n"
+            )
+            untouched += 1
+            continue
+
+        promptable = {
+            name: values for name, values in damage.fields.items() if name != "filename"
+        }
+        if not promptable:
+            typer.echo("  Nothing here can be written. Left alone.\n")
+            untouched += 1
+            continue
+
+        suggestions, why_not = _suggestions_for(damage, client)
+        if why_not:
+            typer.echo(f"  {why_not}; the spelling has to come from you.")
+
+        fields: list[FieldRepair] = []
+        body: list[FieldRepair] = []
+        for name, values in promptable.items():
+            # Counted before the prompt, so a skipped string still takes its
+            # place and a later twin's answer lands on that twin.
+            seen: dict[str, int] = {}
+            for value in values:
+                occurrence = seen.get(value, 0)
+                seen[value] = occurrence + 1
+                suggested = suggestions.get((name, value, occurrence))
+                typer.echo(f"  {name}: {_excerpt_damage(value)}")
+                if suggested:
+                    typer.echo(f"    the volume says: {_excerpt_damage(suggested)}")
+
+                typed = questionary.text(
+                    "    corrected (empty to leave it):",
+                    default=suggested or value,
+                ).ask()
+
+                corrected = accept_correction(value, typed or "")
+                if corrected is None:
+                    continue
+                repair_item = FieldRepair(name, value, corrected, occurrence)
+                (body if name == "body" else fields).append(repair_item)
+
+        if not fields and not body:
+            typer.echo("  Left alone. Nothing written.\n")
+            untouched += 1
+            continue
+
+        try:
+            applied = apply_encoding_repair(
+                EncodingRepair(damage=damage, fields=fields, body=body)
+            )
+        except (BookNotFound, FrontmatterUnreadable) as exc:
+            typer.echo(f"  {exc} Nothing was written to it.\n")
+            untouched += 1
+            continue
+
+        if not applied:
+            # Counted as repaired, this reported a write that never happened
+            # (#129 review).
+            typer.echo(
+                "  Nothing written: the note no longer holds what was reported.\n"
+            )
+            untouched += 1
+            continue
+
+        # What was written, not what was asked: an answer for a string fixed by
+        # hand since the report was built changes nothing (#129 second review).
+        typer.echo(f"  Repaired {applied} string(s).\n")
+        repaired += 1
+
+    typer.echo(f"Repaired {repaired} note(s); left {untouched} alone.")
+    renames = [note for note in damaged if note.touches_filename]
+    if renames:
+        typer.echo(
+            f"{len(renames)} still have damage in the filename. Renaming rewrites "
+            "the wikilinks pointing at a note, so it is left for that work:"
+        )
+        # Named, not only counted: #78 asks for the notes wanting a rename to be
+        # recorded, and a count cannot be acted on (#129 fifth review).
+        for note in renames:
+            typer.echo(f"  {note.path.name}")
 
 
 @app.command()

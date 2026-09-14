@@ -6,6 +6,7 @@ module knows about HTTP, and it raises rather than returning status codes: the
 adapter decides what a failure looks like on the wire.
 """
 
+import hashlib
 import math
 import re
 from collections.abc import Iterable, Iterator
@@ -18,8 +19,11 @@ import yaml
 
 from .api import BookCandidate, GoogleBooksClient
 from .markdown import (
+    EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
+    NoteChanged,
     create_book_note,
+    edit_note,
     list_books,
     set_frontmatter_fields,
     split_frontmatter,
@@ -34,6 +38,7 @@ from .merge import (
 )
 from .note_format import (
     READER_FIELDS,
+    description_callout_lines,
     is_isbn10,
     normalize_field_value,
     parse_frontmatter_yaml,
@@ -869,16 +874,39 @@ class EncodingDamage:
     # included alongside the frontmatter fields, because a reader looking at a
     # report does not care which of the three the note keeps them in.
     fields: dict[str, list[str]] = field(default_factory=dict)
+    # Whether a repair could be written to it at all: its frontmatter parses to
+    # a mapping and the file is UTF-8. A note with no frontmatter reports its
+    # damage under the body alone, so without this nothing said it was beyond
+    # a repair, and the reader was asked for answers that were then refused
+    # (#129 third review).
+    writable: bool = True
+    # The SHA-256 of the note's bytes when this report was read. A repair is
+    # applied only if the note still has those bytes when it is read for
+    # writing (#129 fifth review). None for a report built some other way,
+    # which is applied unchecked.
+    fingerprint: str | None = None
 
     @property
     def identifier(self) -> str | None:
         """What can be asked for the correct spelling, preferring the volume id.
 
+        A sentinel id is not one. `_not_found_in_google_books_api` records that
+        someone already looked and the API does not have this book, and
+        `_not_a_book` that it is not one - 41 and 47 notes on this Shelf carry
+        them. Read literally they are malformed ids, which Google answers with
+        503 rather than 404, so asking costs three retries and a backoff to be
+        told what the note already said.
+
         Returns:
             A Google Books volume id, an ISBN, or None when the note carries
             neither and only a person can say what the letter was.
         """
-        return self.google_books_id or self.isbn
+        volume_id = self.google_books_id
+        if volume_id in EXCLUDED_GOOGLE_BOOKS_IDS:
+            # The ISBN still stands: a book Google Books has no volume for may
+            # be findable by its ISBN.
+            volume_id = None
+        return volume_id or self.isbn
 
     @property
     def touches_filename(self) -> bool:
@@ -970,6 +998,14 @@ class _ShelfFile:
     # bytes are intact on disk, so a check for lost characters must not count
     # them.
     not_utf8: bool = False
+    # The frontmatter parsed to a mapping - of any size. Kept apart from
+    # `frontmatter` itself, which is empty both for a note with no frontmatter
+    # and for one whose frontmatter is the empty mapping `{}`; only the second
+    # can be written to (#129 fourth review).
+    has_mapping: bool = False
+    # The SHA-256 of the bytes read, so a repair decided from this reading can
+    # prove the note has not changed before writing it (#129 fifth review).
+    fingerprint: str = ""
 
     def value(self, key: str) -> object:
         """Read a frontmatter field, whether or not the block parsed.
@@ -1036,6 +1072,8 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
             # not stop `doctor` for the rest (#127 review).
             continue
 
+        fingerprint = hashlib.sha256(raw).hexdigest()
+
         # Decoded from the one read. Reading again to decode leniently was a
         # second chance for the file to vanish or be replaced (#127 review).
         try:
@@ -1063,12 +1101,14 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
                 # about a malformed file, but a better one than calling it all
                 # body: a note like this states its `libris_id` on the second
                 # line, and reading it as prose lost the collision it was in.
-                yield _ShelfFile(path, {}, unterminated, "", not_utf8)
+                yield _ShelfFile(
+                    path, {}, unterminated, "", not_utf8, fingerprint=fingerprint
+                )
                 continue
 
             # No fence at all, so the whole file is body - the same answer
             # `merge._extract_body_content` gives.
-            yield _ShelfFile(path, {}, "", content, not_utf8)
+            yield _ShelfFile(path, {}, "", content, not_utf8, fingerprint=fingerprint)
             continue
 
         try:
@@ -1077,11 +1117,21 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
             parsed = None
 
         if isinstance(parsed, dict):
-            yield _ShelfFile(path, parsed, "", split[1], not_utf8)
+            yield _ShelfFile(
+                path,
+                parsed,
+                "",
+                split[1],
+                not_utf8,
+                has_mapping=True,
+                fingerprint=fingerprint,
+            )
         else:
             # The block is there but nothing reads it as a mapping, so there are
             # no fields to look through and the raw text is all a check has.
-            yield _ShelfFile(path, {}, split[0], split[1], not_utf8)
+            yield _ShelfFile(
+                path, {}, split[0], split[1], not_utf8, fingerprint=fingerprint
+            )
 
 
 def find_encoding_damage(vault_path: Path) -> list[EncodingDamage]:
@@ -1186,6 +1236,14 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
         google_books_id = frontmatter.get("google_books_id") or _raw_frontmatter_value(
             unparsed_frontmatter, "google_books_id"
         )
+        # Text, as the client needs it. Older notes can carry an id YAML reads as
+        # a number, which reached URL quoting and raised TypeError - an error
+        # `repair` does not catch, so one such note ended the run (#129 fifth
+        # review).
+        if google_books_id is None or isinstance(google_books_id, bool):
+            google_books_id = None
+        else:
+            google_books_id = str(google_books_id).strip() or None
         isbn = note.isbn or read_isbn(
             _raw_frontmatter_value(unparsed_frontmatter, "isbn")
         )
@@ -1198,10 +1256,441 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
                 google_books_id=google_books_id,
                 isbn=isbn,
                 fields=fields,
+                writable=shelf_file.has_mapping and not shelf_file.not_utf8,
+                fingerprint=shelf_file.fingerprint or None,
             )
         )
 
     return damaged
+
+
+def fits_lost_characters(damaged: str, candidate: str) -> bool:
+    """Whether a candidate string is the damaged one with its letters restored.
+
+    The test a proposal has to pass before anyone is offered it. `S?ren
+    Kierkegaard` may be repaired to `Søren Kierkegaard`, because the two agree
+    everywhere the file still knows what it held; `Anne Kierkegaard` is a
+    different name and is not offered, however plausible the volume looks.
+
+    A replacement character stands for one character that could not be decoded,
+    which may have been written as one or two of them - the bytes of `ø` in
+    UTF-8 read as Latin-1 are two characters, and both decode paths this Shelf
+    has seen produce one or two replacements per lost letter.
+
+    Args:
+        damaged: The string as the note holds it, carrying `LOST_CHARACTER`.
+        candidate: The string the API offers.
+
+    Returns:
+        True when the candidate agrees with everything the damaged string still
+        states, and differs only where a character was lost.
+    """
+    if LOST_CHARACTER not in damaged or LOST_CHARACTER in candidate:
+        return False
+    pattern = ".{1,2}".join(re.escape(part) for part in damaged.split(LOST_CHARACTER))
+    return re.fullmatch(pattern, candidate, re.DOTALL) is not None
+
+
+@dataclass
+class FieldRepair:
+    """One damaged string and what it should be."""
+
+    field: str
+    damaged: str
+    proposed: str
+    # Which of the identical damaged strings in this field this answer is for,
+    # counting from zero in the order the report lists them - skipped ones
+    # included. Two authors or two lines can lose the same character in the
+    # same place and still mean different things, and an answer matched by text
+    # alone landed on the first of them (#129 second review).
+    occurrence: int = 0
+
+
+@dataclass
+class EncodingRepair:
+    """What could be put back into one note, and from where.
+
+    Nothing here is written until a person says so (#78). The Library cannot
+    tell `S?ren` from Søren, Sören or Suren on its own, so it asks the volume
+    the note already names and offers the answer.
+    """
+
+    damage: EncodingDamage
+    # The volume the note names, when one could be fetched. Usually there is
+    # nothing useful in it: measured against the real Shelf, the volumes account
+    # for 3 of 57 damaged strings, so most repairs are the reader's own (#78).
+    source: BookCandidate | None = None
+    fields: list[FieldRepair] = field(default_factory=list)
+    body: list[FieldRepair] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether the API offered nothing that fits the damage."""
+        return not self.fields and not self.body
+
+    @property
+    def unrepaired(self) -> list[str]:
+        """Damaged strings nothing here can put back, filenames aside.
+
+        A person deserves to know which damage a repair leaves behind rather
+        than discovering it in the next report.
+        """
+        # Keyed by field, text and occurrence. A title and an author can hold
+        # the same damaged string (#129 second review), and so can two authors -
+        # repairing the second twin said nothing about the first (#129 fourth
+        # review).
+        offered = {
+            (repair.field, repair.damaged, repair.occurrence)
+            for repair in self.fields + self.body
+        }
+        left: list[str] = []
+        for name, values in self.damage.fields.items():
+            if name == "filename":
+                continue
+            seen: dict[str, int] = {}
+            for value in values:
+                occurrence = seen.get(value, 0)
+                seen[value] = occurrence + 1
+                if (name, value, occurrence) not in offered:
+                    left.append(value)
+        return left
+
+
+def accept_correction(damaged: str, typed: str) -> str | None:
+    """Whether what a reader typed can stand as the repaired string.
+
+    The reader is the authority on a letter no source holds - measured against
+    the real Shelf, the API accounts for 3 of 57 damaged strings, and the rest
+    are obvious to a person and to nobody else (#78). So this refuses only what
+    cannot be a repair, rather than judging the spelling.
+
+    Args:
+        damaged: The string as the note holds it.
+        typed: What the reader typed, or an empty answer to skip it.
+
+    Returns:
+        The corrected string, or None when nothing should be written: an empty
+        answer, one that changes nothing, or one still carrying a replacement
+        character - which would write the damage back.
+    """
+    corrected = typed.strip()
+    if not corrected or corrected == damaged:
+        return None
+    if LOST_CHARACTER in corrected:
+        return None
+    return corrected
+
+
+def _proposed_field_repairs(
+    damage: EncodingDamage, source: BookCandidate
+) -> list[FieldRepair]:
+    """Match each damaged frontmatter string against what the volume says.
+
+    Only `title` and `authors` are proposed: they are what the API speaks for.
+    A `referred_by` is the reader's own record of who recommended the book, and
+    no volume knows it.
+
+    Args:
+        damage: The note's damage, as reported.
+        source: The volume the note names.
+
+    Returns:
+        One repair per damaged string the volume can account for.
+    """
+    repairs: list[FieldRepair] = []
+
+    # Numbered here, in report order, rather than left for a Surface to number:
+    # a proposal applied as it stands must name each twin, or the first is
+    # repaired twice and the second not at all (#129 third review).
+    for name in ("title", "authors"):
+        seen: dict[str, int] = {}
+        candidates = [source.title] if name == "title" else source.authors
+        for value in damage.fields.get(name, []):
+            occurrence = seen.get(value, 0)
+            seen[value] = occurrence + 1
+            for candidate in candidates:
+                if candidate and fits_lost_characters(value, candidate):
+                    repairs.append(FieldRepair(name, value, candidate, occurrence))
+                    break
+
+    return repairs
+
+
+def _proposed_body_repairs(
+    damage: EncodingDamage, source: BookCandidate
+) -> list[FieldRepair]:
+    """Match each damaged body line against what the volume says.
+
+    Both shapes this Shelf holds are machine-written: the `# Title` heading
+    rendered from the title, and the description callout the API supplied. A
+    line of the reader's own prose is never matched, because nothing here can
+    speak for it - it is reported as unrepaired instead.
+
+    Args:
+        damage: The note's damage, as reported.
+        source: The volume the note names.
+
+    Returns:
+        One repair per damaged line the volume can account for.
+    """
+    repairs: list[FieldRepair] = []
+    if not damage.fields.get("body"):
+        return repairs
+
+    # Which lines the Library wrote is decided from where they sit in the note,
+    # not from their text. A reader's own `# ...` heading or `> ...` quotation
+    # can read exactly like a generated one, and offering it the volume's text
+    # as the default would replace their words at a keystroke (#129 reviews).
+    try:
+        split = split_frontmatter(damage.path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return repairs
+    if split is None:
+        return repairs
+    frontmatter_yaml, body = split
+
+    try:
+        data = parse_frontmatter_yaml(frontmatter_yaml)
+    except yaml.YAMLError:
+        data = None
+    title = data.get("title") if isinstance(data, dict) else None
+    # The generated heading is the title written as a heading. Opening the note
+    # does not make a heading one: a reader can open with their own (#129 third
+    # review).
+    title_heading = (
+        f"# {title.strip()}" if isinstance(title, str) and title.strip() else None
+    )
+
+    lines = body.splitlines()
+    opening = next((index for index, line in enumerate(lines) if line.strip()), None)
+    callout = description_callout_lines(body)
+    volume_lines = (source.description or "").splitlines()
+
+    # Walked in order, numbering each damaged line the way the report lists
+    # them, so every proposal names the occurrence it is for.
+    seen: dict[str, int] = {}
+    for index, raw in enumerate(lines):
+        line = raw.strip()
+        if LOST_CHARACTER not in line:
+            continue
+        occurrence = seen.get(line, 0)
+        seen[line] = occurrence + 1
+
+        if index == opening and line == title_heading:
+            if source.title and fits_lost_characters(line[1:].strip(), source.title):
+                repairs.append(
+                    FieldRepair("body", line, f"# {source.title}", occurrence)
+                )
+            continue
+
+        if index not in callout or not line.startswith(">"):
+            continue
+        quoted = line[1:].strip()
+        for candidate in volume_lines:
+            if fits_lost_characters(quoted, candidate.strip()):
+                repairs.append(
+                    FieldRepair("body", line, f"> {candidate.strip()}", occurrence)
+                )
+                break
+
+    return repairs
+
+
+def propose_encoding_repair(
+    damage: EncodingDamage, client: GoogleBooksClient | None = None
+) -> EncodingRepair | None:
+    """Ask the volume a damaged note names what its letters should be.
+
+    Reads the API and nothing else; it writes nothing. The proposal is offered
+    to a person, because no rule can tell which letter a replacement character
+    ate and guessing at an author's name is the silent wrongness ADR 0003
+    refuses.
+
+    Args:
+        damage: One note's damage, from `find_encoding_damage`.
+        client: The Google Books client to ask.
+
+    Returns:
+        What the volume can put back, or None when the note names no identifier
+        or the API has no such volume. An `EncodingRepair` whose `is_empty` is
+        true means the volume answered but agreed with nothing damaged - a
+        different book, or a spelling that moved on.
+
+    Raises:
+        httpx.HTTPStatusError: If the API failed for a reason other than the
+            volume being absent.
+        httpx.RequestError: If the request could not be made.
+    """
+    if damage.identifier is None:
+        return None
+
+    client = client or GoogleBooksClient()
+    volume_id = damage.google_books_id
+    if volume_id and volume_id not in EXCLUDED_GOOGLE_BOOKS_IDS:
+        source = client.get_volume(volume_id)
+    else:
+        # A sentinel id reaches here only when the note also names an ISBN,
+        # because `identifier` refuses it above. Asking for the sentinel itself
+        # is a malformed lookup: three retries and a backoff to be told what the
+        # note already recorded.
+        found = client.search(f"isbn:{damage.isbn}")
+        source = found[0] if found else None
+
+    if source is None:
+        return None
+
+    return EncodingRepair(
+        damage=damage,
+        source=source,
+        fields=_proposed_field_repairs(damage, source),
+        body=_proposed_body_repairs(damage, source),
+    )
+
+
+def _nth_match(entries: list[object], target: str, occurrence: int) -> int | None:
+    """The position of the given occurrence of a value in a list, if it is there.
+
+    Args:
+        entries: The list as the note holds it.
+        target: The value to find.
+        occurrence: Which match, counting from zero.
+
+    Returns:
+        Its index, or None when the list holds fewer matches than that.
+    """
+    seen = 0
+    for index, entry in enumerate(entries):
+        if entry == target:
+            if seen == occurrence:
+                return index
+            seen += 1
+    return None
+
+
+def apply_encoding_repair(repair: EncodingRepair) -> int:
+    """Write one confirmed repair, frontmatter and body together.
+
+    Called only after a person has said yes to this note's proposal. The
+    filename is deliberately untouched: renaming rewrites the wikilinks pointing
+    at a note, which is its own piece of work (#78).
+
+    Args:
+        repair: The proposal a person confirmed.
+
+    Returns:
+        How many damaged strings were replaced. Zero when nothing was written:
+        the proposal was empty, or the note had changed by the time it was read
+        for writing (#129 fifth review) - an edit landing in the moment between
+        that read and the write is not caught (#129 sixth review). Fewer than
+        the answers given when some
+        name a string the note does not hold - counting the answers instead
+        reported repairs that never happened (#129 second review).
+
+    Raises:
+        BookNotFound: If the note is gone, or moved, by the time it is written.
+        FrontmatterUnreadable: If its frontmatter cannot be parsed.
+    """
+    if repair.is_empty:
+        return 0
+
+    applied = 0
+
+    def _decide(
+        current: dict[str, object], body: str
+    ) -> tuple[dict[str, object], str | None]:
+        nonlocal applied
+        applied = 0
+        changes: dict[str, object] = {}
+
+        # Every list field is corrected element by element - authors and genres
+        # alike. Only authors was handled as a list, so a genre answer compared
+        # a string to a list, matched nothing, and was dropped (#129 second
+        # review). Positions come from the list as the note holds it now, so an
+        # entry edited since the report is not replaced by a stale answer.
+        originals: dict[str, list[object]] = {}
+        working: dict[str, list[object]] = {}
+
+        for item in repair.fields:
+            value = current.get(item.field)
+            if isinstance(value, list):
+                original = originals.setdefault(item.field, list(value))
+                entries = working.setdefault(item.field, list(value))
+                # Occurrence numbers name entries in the note as reported; the
+                # fingerprint checked by `edit_note` guarantees this is that note.
+                index = _nth_match(original, item.damaged, item.occurrence)
+                # Checked against the working copy too, so two answers naming the
+                # same occurrence cannot both apply and both be counted.
+                if index is not None and entries[index] == item.damaged:
+                    entries[index] = item.proposed
+                    applied += 1
+            elif (
+                item.occurrence == 0
+                and item.field not in changes
+                and value == item.damaged
+            ):
+                # A scalar - including an author written as a bare string, which
+                # keeps its shape rather than becoming a list.
+                changes[item.field] = item.proposed
+                applied += 1
+
+        for name, entries in working.items():
+            if entries != originals[name]:
+                changes[name] = entries
+
+        new_body: str | None = None
+        if repair.body:
+            # Each answer is for one damaged line: the given occurrence of that
+            # text in the order the report lists them, skipped ones included.
+            # Queued by text alone, skipping the first of two identical lines put
+            # the second's answer on the first (#129 second review).
+            wanted = {
+                (item.damaged, item.occurrence): item.proposed for item in repair.body
+            }
+            seen: dict[str, int] = {}
+
+            repaired_lines = []
+            for line in body.splitlines(keepends=True):
+                content = line.rstrip("\r\n")
+                ending = line[len(content) :]
+                key = content.strip()
+                if LOST_CHARACTER not in key:
+                    repaired_lines.append(line)
+                    continue
+
+                occurrence = seen.get(key, 0)
+                seen[key] = occurrence + 1
+                proposed = wanted.get((key, occurrence))
+                if proposed is None:
+                    repaired_lines.append(line)
+                    continue
+
+                # Only the text changes. The indentation made that line a code
+                # block or a nested quote, and losing it changes what the note
+                # renders - the damage #99 fixed once already.
+                lead = content[: len(content) - len(content.lstrip())]
+                trail = content[len(content.rstrip()) :]
+                repaired_lines.append(lead + proposed + trail + ending)
+                applied += 1
+
+            rebuilt = "".join(repaired_lines)
+            if rebuilt != body:
+                new_body = rebuilt
+
+        return changes, new_body
+
+    try:
+        edit_note(
+            repair.damage.path, _decide, expected_sha256=repair.damage.fingerprint
+        )
+    except FileNotFoundError:
+        raise BookNotFound(f"No Book Note is at {repair.damage.path.name}.") from None
+    except NoteChanged:
+        # The note is not the one the answers were given against. Every check
+        # narrower than this one - counts, then damaged sequences - met an edit
+        # it could not see, and each let an answer land on a string the reader
+        # never answered for (#129 third, fourth and fifth reviews).
+        return 0
+    return applied
 
 
 class IsbnAgreement(Enum):
