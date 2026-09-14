@@ -991,6 +991,11 @@ class _ShelfFile:
     # bytes are intact on disk, so a check for lost characters must not count
     # them.
     not_utf8: bool = False
+    # The frontmatter parsed to a mapping - of any size. Kept apart from
+    # `frontmatter` itself, which is empty both for a note with no frontmatter
+    # and for one whose frontmatter is the empty mapping `{}`; only the second
+    # can be written to (#129 fourth review).
+    has_mapping: bool = False
 
     def value(self, key: str) -> object:
         """Read a frontmatter field, whether or not the block parsed.
@@ -1098,7 +1103,7 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
             parsed = None
 
         if isinstance(parsed, dict):
-            yield _ShelfFile(path, parsed, "", split[1], not_utf8)
+            yield _ShelfFile(path, parsed, "", split[1], not_utf8, has_mapping=True)
         else:
             # The block is there but nothing reads it as a mapping, so there are
             # no fields to look through and the raw text is all a check has.
@@ -1219,7 +1224,7 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
                 google_books_id=google_books_id,
                 isbn=isbn,
                 fields=fields,
-                writable=bool(frontmatter) and not shelf_file.not_utf8,
+                writable=shelf_file.has_mapping and not shelf_file.not_utf8,
             )
         )
 
@@ -1297,17 +1302,25 @@ class EncodingRepair:
         A person deserves to know which damage a repair leaves behind rather
         than discovering it in the next report.
         """
-        # Keyed by field as well as text: a title and an author can hold the
-        # same damaged string, and repairing one said nothing about the other
-        # (#129 second review).
-        offered = {(repair.field, repair.damaged) for repair in self.fields + self.body}
-        return [
-            value
-            for name, values in self.damage.fields.items()
-            if name != "filename"
-            for value in values
-            if (name, value) not in offered
-        ]
+        # Keyed by field, text and occurrence. A title and an author can hold
+        # the same damaged string (#129 second review), and so can two authors -
+        # repairing the second twin said nothing about the first (#129 fourth
+        # review).
+        offered = {
+            (repair.field, repair.damaged, repair.occurrence)
+            for repair in self.fields + self.body
+        }
+        left: list[str] = []
+        for name, values in self.damage.fields.items():
+            if name == "filename":
+                continue
+            seen: dict[str, int] = {}
+            for value in values:
+                occurrence = seen.get(value, 0)
+                seen[value] = occurrence + 1
+                if (name, value, occurrence) not in offered:
+                    left.append(value)
+        return left
 
 
 def accept_correction(damaged: str, typed: str) -> str | None:
@@ -1567,12 +1580,19 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
             if isinstance(value, list):
                 original = originals.setdefault(item.field, list(value))
                 entries = working.setdefault(item.field, list(value))
-                # An occurrence number is only good while that damaged value
-                # appears as often as it did when reported. A twin added or
-                # removed since shifts which entry it names, and the answer would
-                # land on one the reader never answered for (#129 third review).
-                reported = repair.damage.fields.get(item.field, [])
-                if original.count(item.damaged) != reported.count(item.damaged):
+                # An occurrence number is only good while the field's damaged
+                # entries are exactly as reported - the whole sequence, not the
+                # count of the answered text. A twin changed to another damaged
+                # name and a new twin added leave that count unchanged while
+                # moving which entry the occurrence names, and the answer would
+                # land on one the reader never answered for (#129 third and
+                # fourth reviews).
+                damaged_now = [
+                    entry
+                    for entry in original
+                    if isinstance(entry, str) and LOST_CHARACTER in entry
+                ]
+                if damaged_now != repair.damage.fields.get(item.field, []):
                     continue
                 index = _nth_match(original, item.damaged, item.occurrence)
                 # Checked against the working copy too, so two answers naming the
@@ -1606,23 +1626,20 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
             seen: dict[str, int] = {}
 
             # The same guard as for a list field: occurrence numbers are only
-            # trusted for a damaged line that appears as often as reported. A
-            # twin line added above the answered one would otherwise shift the
-            # answer onto the line the reader skipped (#129 third review).
+            # trusted while the body's damaged lines are exactly as reported. A
+            # twin added, removed or swapped for another damaged line would
+            # shift an answer onto a line the reader skipped - and a count of
+            # the answered text cannot see a swap (#129 third and fourth
+            # reviews). Any such change refuses every body answer.
             now = [line.strip() for line in body.splitlines() if LOST_CHARACTER in line]
-            reported = repair.damage.fields.get("body", [])
-            stale = {
-                item.damaged
-                for item in repair.body
-                if now.count(item.damaged) != reported.count(item.damaged)
-            }
+            body_stale = now != repair.damage.fields.get("body", [])
 
             repaired_lines = []
             for line in body.splitlines(keepends=True):
                 content = line.rstrip("\r\n")
                 ending = line[len(content) :]
                 key = content.strip()
-                if LOST_CHARACTER not in key or key in stale:
+                if body_stale or LOST_CHARACTER not in key:
                     repaired_lines.append(line)
                     continue
 

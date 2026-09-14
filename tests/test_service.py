@@ -2239,6 +2239,107 @@ def test_two_answers_for_one_occurrence_apply_once(tmp_path):
     assert BookNote.read(path).frontmatter["authors"] == ["Vélez", "Other"]
 
 
+# --- #129 fourth review -----------------------------------------------------
+
+
+def test_unrepaired_names_a_twin_left_behind(tmp_path):
+    # Given two identical damaged authors and a repair offered for the second
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault,
+        "twins-left.md",
+        'title: Poems\nauthors:\n  - "V�lez"\n  - "V�lez"',
+    )
+    damage = find_encoding_damage(vault)[0]
+    repair = service.EncodingRepair(
+        damage=damage,
+        fields=[service.FieldRepair("authors", "V�lez", "Vélez", occurrence=1)],
+    )
+
+    # When what it leaves behind is asked
+    # Then the first twin is named. Keyed by field and text, the second's repair
+    # hid it (#129 fourth review).
+    assert repair.unrepaired == ["V�lez"]
+
+
+def test_a_twin_author_swapped_since_the_report_refuses_the_repair(tmp_path):
+    # Given two identical damaged authors and an answer for the second - then one
+    # twin changed to another damaged name and a new twin added, which leaves the
+    # count of the answered text unchanged while moving where occurrence 1 is
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "swapped-authors.md",
+        'title: Poems\nauthors:\n  - "V�lez"\n  - "V�lez"',
+    )
+    damage = find_encoding_damage(vault)[0]
+    repair = service.EncodingRepair(
+        damage=damage,
+        fields=[service.FieldRepair("authors", "V�lez", "Vález", occurrence=1)],
+    )
+    path.write_text(
+        '---\ntitle: Poems\nauthors:\n  - "Gr�gory"\n  - "V�lez"\n'
+        '  - "V�lez"\n---\n\n## Notes\n\nMine.\n',
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    # When the answer is applied
+    applied = service.apply_encoding_repair(repair)
+
+    # Then nothing is written. Counting the answered text could not see the
+    # change: only the whole sequence of damaged entries, as reported, proves an
+    # occurrence still names the entry the reader answered (#129 fourth review).
+    assert applied == 0
+    assert path.read_bytes() == before
+
+
+def test_a_twin_line_swapped_since_the_report_refuses_the_repair(tmp_path):
+    # Given the same change made to damaged body lines
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "swapped-lines.md",
+        'title: "Notes"',
+        body="## Notes\n\nV�lez\n\nV�lez\n",
+    )
+    damage = find_encoding_damage(vault)[0]
+    repair = service.EncodingRepair(
+        damage=damage,
+        body=[service.FieldRepair("body", "V�lez", "Vález", occurrence=1)],
+    )
+    path.write_text(
+        '---\ntitle: "Notes"\n---\n\n## Notes\n\nGr�gory\n\nV�lez\n\nV�lez\n',
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    # When the answer is applied
+    applied = service.apply_encoding_repair(repair)
+
+    # Then nothing is written, for the same reason
+    assert applied == 0
+    assert path.read_bytes() == before
+
+
+def test_a_note_with_an_empty_frontmatter_mapping_is_writable(tmp_path):
+    # Given a note whose frontmatter is present but empty, damaged in its body
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(vault, "empty.md", "{}", body="Discours de la m�thode\n")
+
+    # When the Shelf is inspected
+    damage = find_encoding_damage(vault)[0]
+
+    # Then it is writable. An empty mapping is falsy, so asking whether the
+    # mapping held anything called it unwritable - but a repair writes to it
+    # without trouble (#129 fourth review).
+    assert damage.writable is True
+
+
 def test_a_note_that_lost_nothing_is_not_reported(tmp_path):
     # Given a Shelf whose notes are intact
     vault = tmp_path / "shelf"

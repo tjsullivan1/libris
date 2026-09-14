@@ -1218,7 +1218,7 @@ def _report_not_utf8(paths: list[Path]) -> None:
 
 def _suggestions_for(
     damage: EncodingDamage, client: GoogleBooksClient
-) -> tuple[dict[tuple[str, str], str], str | None]:
+) -> tuple[dict[tuple[str, str, int], str], str | None]:
     """Ask the volume a note names what it can offer, and say if it could not.
 
     Args:
@@ -1227,10 +1227,12 @@ def _suggestions_for(
 
     Returns:
         The suggestion for each damaged string the volume accounts for, keyed by
-        field and damaged text, and a line explaining why there are none - which
-        is the usual case. Keyed by the field too, because a title and an author
+        field, damaged text and occurrence, and a line explaining why there are
+        none - which is the usual case. The field, because a title and an author
         can lose the same character in the same place and still be spelled
-        differently (#129 review).
+        differently (#129 review); the occurrence, because two copies of one
+        text can be one generated line and one the reader wrote (#129 fourth
+        review).
     """
     import httpx
 
@@ -1255,8 +1257,13 @@ def _suggestions_for(
         return {}, "Google Books has no such volume"
     if proposal.is_empty:
         return {}, "the volume says nothing that fits"
+    # Keyed by occurrence as well. A proposal names which copy of a text it is
+    # for - only the description callout's copy of a line, say, and not the
+    # reader's identical quotation above it. Looked up by field and text alone,
+    # both prompts took the suggestion, and Enter wrote the blurb over the
+    # reader's own words (#129 fourth review).
     return {
-        (item.field, item.damaged): item.proposed
+        (item.field, item.damaged, item.occurrence): item.proposed
         for item in proposal.fields + proposal.body
     }, None
 
@@ -1340,7 +1347,7 @@ def repair(
             for value in values:
                 occurrence = seen.get(value, 0)
                 seen[value] = occurrence + 1
-                suggested = suggestions.get((name, value))
+                suggested = suggestions.get((name, value, occurrence))
                 typer.echo(f"  {name}: {_excerpt_damage(value)}")
                 if suggested:
                     typer.echo(f"    the volume says: {_excerpt_damage(suggested)}")

@@ -1122,6 +1122,49 @@ def test_repair_leaves_a_note_it_cannot_write_without_prompting(monkeypatch, tmp
     assert "by hand" in result.output
 
 
+def test_repair_offers_the_blurb_only_to_the_callout_copy_of_a_twin(
+    monkeypatch, tmp_path
+):
+    # Given a quotation in the reader's notes identical to a damaged line of the
+    # description callout, and a volume whose description holds that sentence
+    from libris.api import BookCandidate
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Discourse.md"
+    note.write_text(
+        '---\ntitle: "Discourse"\ngoogle_books_id: vol1\n---\n\n'
+        "## Notes\n\n> Discours de la m�thode\n\n"
+        "> [!abstract]- Description\n> Discours de la m�thode\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(
+        monkeypatch,
+        BookCandidate(
+            title="Discourse",
+            authors=[],
+            google_books_id="vol1",
+            description="Discours de la méthode",
+        ),
+    )
+    # The reader presses Enter at both prompts
+    offered = _answer_text(monkeypatch, lambda default: default)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the reader's quotation was offered itself, and only the callout's copy
+    # the blurb. Looked up by field and text, both prompts took the callout's
+    # suggestion and Enter wrote the blurb over the reader's words (#129 fourth
+    # review).
+    assert offered == ["> Discours de la m�thode", "> Discours de la méthode"]
+    text = note.read_text(encoding="utf-8")
+    assert "## Notes\n\n> Discours de la m�thode\n" in text
+    assert "> [!abstract]- Description\n> Discours de la méthode\n" in text
+
+
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
     # Given a description callout of the length the real Shelf holds, damaged in
     # two places far apart
