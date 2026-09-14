@@ -1498,7 +1498,7 @@ def test_a_repair_is_proposed_for_a_rendered_heading_and_a_callout(tmp_path):
     _damaged_note(
         vault,
         "discourse.md",
-        'title: "Discourse on Method"\ngoogle_books_id: vol1',
+        'title: "Helkavirsi� (Whitsongs)"\ngoogle_books_id: vol1',
         body=(
             "# Helkavirsi� (Whitsongs)\n\n## Notes\n\nMine, and m�thode is my own.\n\n"
             "> [!abstract]- Description\n> ...(French: Discours de la m�thode)...\n"
@@ -2039,6 +2039,204 @@ def test_only_the_heading_a_note_opens_with_counts_as_its_title(tmp_path):
     # Then the reader's heading is not taken for the title heading. The first H1
     # anywhere is not the heading the note opens with (#129 second review).
     assert proposal.body == []
+
+
+# --- #129 third review ------------------------------------------------------
+
+
+def test_a_note_without_frontmatter_is_reported_as_unwritable(tmp_path):
+    # Given a file on the Shelf with no frontmatter at all, damaged in its text,
+    # beside an ordinary damaged note
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "loose.md").write_text("Just text about m�thode.\n", encoding="utf-8")
+    _damaged_note(vault, "fine.md", 'title: "A�B"')
+
+    # When the Shelf is inspected
+    found = {damage.path.name: damage for damage in find_encoding_damage(vault)}
+
+    # Then the loose file says it cannot be written. Its damage is reported
+    # under the body alone, so nothing marked it as beyond a repair and the
+    # reader was prompted for answers that were then refused (#129 third review).
+    assert found["loose.md"].writable is False
+    assert found["fine.md"].writable is True
+
+
+def test_an_opening_heading_that_is_not_the_title_is_not_offered_the_volume_title(
+    tmp_path,
+):
+    # Given a note that opens with a heading the reader wrote, which is not its
+    # title
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault,
+        "opens-with-own.md",
+        'title: "Either-Or"\ngoogle_books_id: vol1',
+        body="# S�ren, as I read him\n\n## Notes\n\nMine.\n",
+    )
+    damage = find_encoding_damage(vault)[0]
+    client = _StubClient(
+        BookCandidate(title="Søren, as I read him", authors=[], google_books_id="vol1")
+    )
+
+    # When the volume is asked
+    proposal = service.propose_encoding_repair(damage, client)
+
+    # Then it is not offered the volume's title. A generated heading is the
+    # title written as a heading; opening the note does not make a heading one
+    # (#129 third review).
+    assert proposal.body == []
+
+
+def test_only_the_callout_copy_of_a_twin_line_is_offered_the_description(tmp_path):
+    # Given a quotation in the reader's notes identical to a damaged line of the
+    # description callout below it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault,
+        "twin-quote.md",
+        'title: "Discourse"\ngoogle_books_id: vol1',
+        body=(
+            "## Notes\n\n> Discours de la m�thode\n\n"
+            "> [!abstract]- Description\n> Discours de la m�thode\n"
+        ),
+    )
+    damage = find_encoding_damage(vault)[0]
+    client = _StubClient(
+        BookCandidate(
+            title="Discourse",
+            authors=[],
+            google_books_id="vol1",
+            description="Discours de la méthode",
+        )
+    )
+
+    # When the volume is asked
+    proposal = service.propose_encoding_repair(damage, client)
+
+    # Then only the second occurrence - the one inside the callout - is offered
+    # the blurb. By text alone both matched (#129 third review).
+    assert [(item.damaged, item.occurrence) for item in proposal.body] == [
+        ("> Discours de la m�thode", 1)
+    ]
+
+
+def test_a_proposal_numbers_twin_authors_so_applying_it_repairs_both(tmp_path):
+    # Given two authors that lost the same letter, and a volume that holds it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "twin-authors.md",
+        'title: Poems\nauthors:\n  - "V�lez"\n  - "V�lez"\ngoogle_books_id: vol1',
+    )
+    damage = find_encoding_damage(vault)[0]
+    client = _StubClient(
+        BookCandidate(title="Poems", authors=["Vélez"], google_books_id="vol1")
+    )
+
+    # When the proposal is built and applied as it stands
+    proposal = service.propose_encoding_repair(damage, client)
+    applied = service.apply_encoding_repair(proposal)
+
+    # Then each twin is its own occurrence and both are repaired. Numbered 0 and
+    # 0, the first was repaired twice, two were reported, and the second stayed
+    # damaged (#129 third review).
+    assert [item.occurrence for item in proposal.fields] == [0, 1]
+    assert applied == 2
+    assert BookNote.read(path).frontmatter["authors"] == ["Vélez", "Vélez"]
+
+
+def test_a_twin_line_added_since_the_report_refuses_the_repair(tmp_path):
+    # Given two identical damaged lines and an answer for the second, then a
+    # third identical line added above them before the answer is applied
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "stale-twins.md",
+        'title: "Notes"',
+        body="## Notes\n\nV�lez\n\nV�lez\n",
+    )
+    damage = find_encoding_damage(vault)[0]
+    repair = service.EncodingRepair(
+        damage=damage,
+        body=[service.FieldRepair("body", "V�lez", "Vález", occurrence=1)],
+    )
+    text = path.read_text(encoding="utf-8").replace(
+        "## Notes\n", "## Notes\n\nV�lez\n", 1
+    )
+    path.write_text(text, encoding="utf-8")
+    before = path.read_bytes()
+
+    # When the answer is applied
+    applied = service.apply_encoding_repair(repair)
+
+    # Then nothing is written. Occurrence 1 now names a different line - the one
+    # the reader skipped - and the numbering can only be trusted while the
+    # damaged lines are as they were reported (#129 third review).
+    assert applied == 0
+    assert path.read_bytes() == before
+
+
+def test_a_twin_author_added_since_the_report_refuses_the_repair(tmp_path):
+    # Given two identical damaged authors and an answer for the second, then a
+    # third identical author added at the front before it is applied
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "stale-authors.md",
+        'title: Poems\nauthors:\n  - "V�lez"\n  - "V�lez"',
+    )
+    damage = find_encoding_damage(vault)[0]
+    repair = service.EncodingRepair(
+        damage=damage,
+        fields=[service.FieldRepair("authors", "V�lez", "Vález", occurrence=1)],
+    )
+    text = path.read_text(encoding="utf-8").replace(
+        "authors:\n", 'authors:\n  - "V�lez"\n', 1
+    )
+    path.write_text(text, encoding="utf-8")
+    before = path.read_bytes()
+
+    # When the answer is applied
+    applied = service.apply_encoding_repair(repair)
+
+    # Then nothing is written, for the same reason as a line added above its twin
+    assert applied == 0
+    assert path.read_bytes() == before
+
+
+def test_two_answers_for_one_occurrence_apply_once(tmp_path):
+    # Given a repair built by a caller that named the same author twice - both
+    # answers for occurrence 0
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "doubled.md",
+        'title: Poems\nauthors:\n  - "V�lez"\n  - Other',
+    )
+    damage = find_encoding_damage(vault)[0]
+    repair = service.EncodingRepair(
+        damage=damage,
+        fields=[
+            service.FieldRepair("authors", "V�lez", "Vélez", occurrence=0),
+            service.FieldRepair("authors", "V�lez", "Vález", occurrence=0),
+        ],
+    )
+
+    # When it is applied
+    applied = service.apply_encoding_repair(repair)
+
+    # Then the first answer lands and is counted once. The second found the
+    # entry already repaired; letting it apply overwrote the first answer and
+    # counted two repairs of one string (#129 third review).
+    assert applied == 1
+    assert BookNote.read(path).frontmatter["authors"] == ["Vélez", "Other"]
 
 
 def test_a_note_that_lost_nothing_is_not_reported(tmp_path):

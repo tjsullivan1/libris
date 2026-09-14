@@ -1261,11 +1261,6 @@ def _suggestions_for(
     }, None
 
 
-# Damage a repair cannot write, because the block holding it will not parse.
-# Taking an answer for it would only throw the answer away (#129 review).
-_HAND_REPAIR_ONLY = "frontmatter (unparseable)"
-
-
 @app.command()
 def repair(
     limit: int = typer.Option(
@@ -1311,13 +1306,15 @@ def repair(
     for damage in in_place[: limit or None]:
         typer.echo(f"{damage.path.name}")
 
-        if damage.fields.get(_HAND_REPAIR_ONLY):
-            # The whole note, not just its frontmatter: nothing can be written to
-            # a note whose frontmatter will not parse, so prompting for its body
-            # took answers that were then thrown away (#129 second review).
+        if not damage.writable:
+            # The whole note: nothing can be written to one whose frontmatter is
+            # missing or will not parse, so prompting for any of it took answers
+            # that were then thrown away. Asked of the report rather than read
+            # off one marker, because a note with no frontmatter carries no
+            # marker at all (#129 second and third reviews).
             typer.echo(
-                "  its frontmatter will not parse, so it needs repairing by hand. "
-                "Left alone.\n"
+                "  it has no frontmatter a repair can write to, so it needs "
+                "repairing by hand. Left alone.\n"
             )
             untouched += 1
             continue

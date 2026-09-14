@@ -1100,6 +1100,28 @@ def test_repair_puts_a_later_twins_answer_on_that_twin(monkeypatch, tmp_path):
     assert read_frontmatter(note)["authors"] == ["V�lez", "Vález"]
 
 
+def test_repair_leaves_a_note_it_cannot_write_without_prompting(monkeypatch, tmp_path):
+    # Given a file on the Shelf with no frontmatter, damaged only in its text -
+    # reported under the body, with no marker saying it cannot be written
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    (vault / "Loose.md").write_text("Just text about m�thode.\n", encoding="utf-8")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _never(message, default="", **_kwargs):
+        raise AssertionError(f"prompted for {default!r}, which cannot be written")
+
+    monkeypatch.setattr("questionary.text", _never)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then it is left for a hand repair rather than taking an answer that would
+    # be refused (#129 third review)
+    assert result.exit_code == 0, result.output
+    assert "by hand" in result.output
+
+
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
     # Given a description callout of the length the real Shelf holds, damaged in
     # two places far apart

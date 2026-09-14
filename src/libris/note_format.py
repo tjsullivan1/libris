@@ -520,3 +520,38 @@ def has_description_callout(body: str) -> bool:
         True when the callout is present.
     """
     return _CALLOUT_HEADING.search(body) is not None
+
+
+def description_callout_lines(body: str) -> set[int]:
+    """Where a note's description callout sits, as line positions in the body.
+
+    Positions rather than text: a reader's own quotation can say exactly what a
+    line of the description says, and only the callout's copy came from the API
+    (#129 third review). Read the way `split_body` reads a callout - blank lines
+    may separate the heading from its first quoted line, and the callout ends at
+    the first line after that which is not quoted.
+
+    Args:
+        body: Everything after the closing frontmatter fence.
+
+    Returns:
+        The indices, in `body.splitlines()`, of the callout's quoted lines - its
+        heading excluded. Empty when the note carries no description callout.
+    """
+    lines = body.splitlines()
+    for heading_index, line in enumerate(lines):
+        if _CALLOUT_HEADING.match(line):
+            break
+    else:
+        return set()
+
+    inside: set[int] = set()
+    for index in range(heading_index + 1, len(lines)):
+        line = lines[index]
+        if line.startswith(">"):
+            inside.add(index)
+        elif not line.strip() and not inside:
+            continue
+        else:
+            break
+    return inside

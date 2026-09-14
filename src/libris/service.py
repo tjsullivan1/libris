@@ -36,11 +36,11 @@ from .merge import (
 )
 from .note_format import (
     READER_FIELDS,
+    description_callout_lines,
     is_isbn10,
     normalize_field_value,
     parse_frontmatter_yaml,
     read_isbn,
-    split_body,
     validate_field_value,
 )
 from .shelf import index_for
@@ -872,6 +872,12 @@ class EncodingDamage:
     # included alongside the frontmatter fields, because a reader looking at a
     # report does not care which of the three the note keeps them in.
     fields: dict[str, list[str]] = field(default_factory=dict)
+    # Whether a repair could be written to it at all: its frontmatter parses to
+    # a mapping and the file is UTF-8. A note with no frontmatter reports its
+    # damage under the body alone, so without this nothing said it was beyond
+    # a repair, and the reader was asked for answers that were then refused
+    # (#129 third review).
+    writable: bool = True
 
     @property
     def identifier(self) -> str | None:
@@ -1213,6 +1219,7 @@ def _encoding_damage_in(files: Iterable["_ShelfFile"]) -> list[EncodingDamage]:
                 google_books_id=google_books_id,
                 isbn=isbn,
                 fields=fields,
+                writable=bool(frontmatter) and not shelf_file.not_utf8,
             )
         )
 
@@ -1346,15 +1353,19 @@ def _proposed_field_repairs(
     """
     repairs: list[FieldRepair] = []
 
-    for value in damage.fields.get("title", []):
-        if source.title and fits_lost_characters(value, source.title):
-            repairs.append(FieldRepair("title", value, source.title))
-
-    for value in damage.fields.get("authors", []):
-        for author in source.authors:
-            if fits_lost_characters(value, author):
-                repairs.append(FieldRepair("authors", value, author))
-                break
+    # Numbered here, in report order, rather than left for a Surface to number:
+    # a proposal applied as it stands must name each twin, or the first is
+    # repaired twice and the second not at all (#129 third review).
+    for name in ("title", "authors"):
+        seen: dict[str, int] = {}
+        candidates = [source.title] if name == "title" else source.authors
+        for value in damage.fields.get(name, []):
+            occurrence = seen.get(value, 0)
+            seen[value] = occurrence + 1
+            for candidate in candidates:
+                if candidate and fits_lost_characters(value, candidate):
+                    repairs.append(FieldRepair(name, value, candidate, occurrence))
+                    break
 
     return repairs
 
@@ -1377,53 +1388,66 @@ def _proposed_body_repairs(
         One repair per damaged line the volume can account for.
     """
     repairs: list[FieldRepair] = []
-    damaged_lines = damage.fields.get("body", [])
-    if not damaged_lines:
+    if not damage.fields.get("body"):
         return repairs
 
-    # Which lines the Library wrote is decided from the note itself, not from
-    # their shape. A reader's own `# ...` heading or `> ...` quotation looks just
-    # like a generated one, and offering it the volume's text as the default
-    # would replace their words at a keystroke (#129 review).
+    # Which lines the Library wrote is decided from where they sit in the note,
+    # not from their text. A reader's own `# ...` heading or `> ...` quotation
+    # can read exactly like a generated one, and offering it the volume's text
+    # as the default would replace their words at a keystroke (#129 reviews).
     try:
         split = split_frontmatter(damage.path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return repairs
     if split is None:
         return repairs
-    body = split[1]
+    frontmatter_yaml, body = split
 
-    # `match` on the body as it opens, not `search`: the first H1 anywhere is a
-    # reader's own heading in a note that was never given a title heading
-    # (#129 second review).
-    first_heading = _FIRST_H1.match(body.lstrip("\r\n"))
-    title_heading = first_heading.group(0).strip() if first_heading else None
-    _prose, description = split_body(body)
-    description_lines = {line.strip() for line in (description or "").splitlines()}
+    try:
+        data = parse_frontmatter_yaml(frontmatter_yaml)
+    except yaml.YAMLError:
+        data = None
+    title = data.get("title") if isinstance(data, dict) else None
+    # The generated heading is the title written as a heading. Opening the note
+    # does not make a heading one: a reader can open with their own (#129 third
+    # review).
+    title_heading = (
+        f"# {title.strip()}" if isinstance(title, str) and title.strip() else None
+    )
+
+    lines = body.splitlines()
+    opening = next((index for index, line in enumerate(lines) if line.strip()), None)
+    callout = description_callout_lines(body)
     volume_lines = (source.description or "").splitlines()
 
-    for line in damaged_lines:
-        if line == title_heading and source.title:
-            if fits_lost_characters(line[1:].strip(), source.title):
-                repairs.append(FieldRepair("body", line, f"# {source.title}"))
+    # Walked in order, numbering each damaged line the way the report lists
+    # them, so every proposal names the occurrence it is for.
+    seen: dict[str, int] = {}
+    for index, raw in enumerate(lines):
+        line = raw.strip()
+        if LOST_CHARACTER not in line:
+            continue
+        occurrence = seen.get(line, 0)
+        seen[line] = occurrence + 1
+
+        if index == opening and line == title_heading:
+            if source.title and fits_lost_characters(line[1:].strip(), source.title):
+                repairs.append(
+                    FieldRepair("body", line, f"# {source.title}", occurrence)
+                )
             continue
 
-        if not line.startswith(">"):
+        if index not in callout or not line.startswith(">"):
             continue
         quoted = line[1:].strip()
-        if quoted not in description_lines:
-            continue
         for candidate in volume_lines:
             if fits_lost_characters(quoted, candidate.strip()):
-                repairs.append(FieldRepair("body", line, f"> {candidate.strip()}"))
+                repairs.append(
+                    FieldRepair("body", line, f"> {candidate.strip()}", occurrence)
+                )
                 break
 
     return repairs
-
-
-# The heading a note's body opens with, which is rendered from its title. Only
-# the first one: any later H1 is the reader's.
-_FIRST_H1 = re.compile(r"^#[ \t]+.+?[ \t]*$", re.MULTILINE)
 
 
 def propose_encoding_repair(
@@ -1543,8 +1567,17 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
             if isinstance(value, list):
                 original = originals.setdefault(item.field, list(value))
                 entries = working.setdefault(item.field, list(value))
+                # An occurrence number is only good while that damaged value
+                # appears as often as it did when reported. A twin added or
+                # removed since shifts which entry it names, and the answer would
+                # land on one the reader never answered for (#129 third review).
+                reported = repair.damage.fields.get(item.field, [])
+                if original.count(item.damaged) != reported.count(item.damaged):
+                    continue
                 index = _nth_match(original, item.damaged, item.occurrence)
-                if index is not None:
+                # Checked against the working copy too, so two answers naming the
+                # same occurrence cannot both apply and both be counted.
+                if index is not None and entries[index] == item.damaged:
                     entries[index] = item.proposed
                     applied += 1
             elif (
@@ -1572,12 +1605,24 @@ def apply_encoding_repair(repair: EncodingRepair) -> int:
             }
             seen: dict[str, int] = {}
 
+            # The same guard as for a list field: occurrence numbers are only
+            # trusted for a damaged line that appears as often as reported. A
+            # twin line added above the answered one would otherwise shift the
+            # answer onto the line the reader skipped (#129 third review).
+            now = [line.strip() for line in body.splitlines() if LOST_CHARACTER in line]
+            reported = repair.damage.fields.get("body", [])
+            stale = {
+                item.damaged
+                for item in repair.body
+                if now.count(item.damaged) != reported.count(item.damaged)
+            }
+
             repaired_lines = []
             for line in body.splitlines(keepends=True):
                 content = line.rstrip("\r\n")
                 ending = line[len(content) :]
                 key = content.strip()
-                if LOST_CHARACTER not in key:
+                if LOST_CHARACTER not in key or key in stale:
                     repaired_lines.append(line)
                     continue
 
