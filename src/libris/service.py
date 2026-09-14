@@ -40,6 +40,7 @@ from .note_format import (
     normalize_field_value,
     parse_frontmatter_yaml,
     read_isbn,
+    split_body,
     validate_field_value,
 )
 from .shelf import index_for
@@ -1367,27 +1368,50 @@ def _proposed_body_repairs(
         One repair per damaged line the volume can account for.
     """
     repairs: list[FieldRepair] = []
-    description_lines = (source.description or "").splitlines()
+    damaged_lines = damage.fields.get("body", [])
+    if not damaged_lines:
+        return repairs
 
-    for line in damage.fields.get("body", []):
-        heading = line[2:].strip() if line.startswith("# ") else None
-        if (
-            heading is not None
-            and source.title
-            and fits_lost_characters(heading, source.title)
-        ):
-            repairs.append(FieldRepair("body", line, f"# {source.title}"))
+    # Which lines the Library wrote is decided from the note itself, not from
+    # their shape. A reader's own `# ...` heading or `> ...` quotation looks just
+    # like a generated one, and offering it the volume's text as the default
+    # would replace their words at a keystroke (#129 review).
+    try:
+        split = split_frontmatter(damage.path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return repairs
+    if split is None:
+        return repairs
+    body = split[1]
+
+    first_heading = _FIRST_H1.search(body)
+    title_heading = first_heading.group(0).strip() if first_heading else None
+    _prose, description = split_body(body)
+    description_lines = {line.strip() for line in (description or "").splitlines()}
+    volume_lines = (source.description or "").splitlines()
+
+    for line in damaged_lines:
+        if line == title_heading and source.title:
+            if fits_lost_characters(line[1:].strip(), source.title):
+                repairs.append(FieldRepair("body", line, f"# {source.title}"))
             continue
 
-        quoted = line[1:].strip() if line.startswith(">") else None
-        if quoted is None:
+        if not line.startswith(">"):
             continue
-        for candidate in description_lines:
+        quoted = line[1:].strip()
+        if quoted not in description_lines:
+            continue
+        for candidate in volume_lines:
             if fits_lost_characters(quoted, candidate.strip()):
                 repairs.append(FieldRepair("body", line, f"> {candidate.strip()}"))
                 break
 
     return repairs
+
+
+# The heading a note's body opens with, which is rendered from its title. Only
+# the first one: any later H1 is the reader's.
+_FIRST_H1 = re.compile(r"^#[ \t]+.+?[ \t]*$", re.MULTILINE)
 
 
 def propose_encoding_repair(
@@ -1452,7 +1476,9 @@ def apply_encoding_repair(repair: EncodingRepair) -> bool:
         repair: The proposal a person confirmed.
 
     Returns:
-        True when something was written, False when the proposal was empty.
+        True when something was written. False when nothing was: the proposal
+        was empty, or the note no longer holds any string it was reported to -
+        the reader fixed it by hand after the report was built.
 
     Raises:
         BookNotFound: If the note is gone, or moved, by the time it is written.
@@ -1461,51 +1487,74 @@ def apply_encoding_repair(repair: EncodingRepair) -> bool:
     if repair.is_empty:
         return False
 
+    wrote = False
+
     def _decide(
         current: dict[str, object], body: str
     ) -> tuple[dict[str, object], str | None]:
+        nonlocal wrote
         changes: dict[str, object] = {}
+
+        # Read once and corrected in place, so every damaged author lands. Each
+        # correction rebuilding the list from `current` meant the last one
+        # overwrote the rest (#129 review). Matched against what the file holds
+        # now, so an author edited meanwhile is not replaced by a stale report.
+        original_authors = current.get("authors")
+        if isinstance(original_authors, str):
+            original_authors = [original_authors]
+        authors = list(original_authors) if isinstance(original_authors, list) else None
 
         for item in repair.fields:
             if item.field == "authors":
-                authors = current.get("authors")
-                if isinstance(authors, str):
-                    authors = [authors]
-                if not isinstance(authors, list):
+                if authors is None:
                     continue
-                # Rebuilt from what the file holds now rather than from what was
-                # reported, so an author the reader edited meanwhile is not
-                # quietly replaced by the value the report was built from.
-                changes["authors"] = [
-                    item.proposed if entry == item.damaged else entry
-                    for entry in authors
-                ]
-            elif current.get(item.field) == item.damaged:
+                for index, entry in enumerate(authors):
+                    if entry == item.damaged:
+                        authors[index] = item.proposed
+                        break
+            elif item.field not in changes and current.get(item.field) == item.damaged:
                 changes[item.field] = item.proposed
+
+        if authors is not None and authors != original_authors:
+            changes["authors"] = authors
 
         new_body: str | None = None
         if repair.body:
-            lines = body.splitlines(keepends=True)
+            # Answers queued per damaged line, in document order - the order the
+            # report lists them and the reader answered them. Two identical
+            # damaged lines can mean different things, and keying by text alone
+            # gave both the last answer (#129 review).
+            pending: dict[str, list[str]] = {}
+            for item in repair.body:
+                pending.setdefault(item.damaged, []).append(item.proposed)
+
             repaired_lines = []
-            by_damaged = {item.damaged: item.proposed for item in repair.body}
-            for line in lines:
-                stripped = line.rstrip("\r\n")
-                ending = line[len(stripped) :]
-                proposed = by_damaged.get(stripped.strip())
-                repaired_lines.append(
-                    (proposed + ending) if proposed is not None else line
-                )
+            for line in body.splitlines(keepends=True):
+                content = line.rstrip("\r\n")
+                ending = line[len(content) :]
+                answers = pending.get(content.strip())
+                if not answers:
+                    repaired_lines.append(line)
+                    continue
+                # Only the text changes. The indentation made that line a code
+                # block or a nested quote, and losing it changes what the note
+                # renders - the damage #99 fixed once already.
+                lead = content[: len(content) - len(content.lstrip())]
+                trail = content[len(content.rstrip()) :]
+                repaired_lines.append(lead + answers.pop(0) + trail + ending)
+
             rebuilt = "".join(repaired_lines)
             if rebuilt != body:
                 new_body = rebuilt
 
+        wrote = bool(changes) or new_body is not None
         return changes, new_body
 
     try:
         edit_note(repair.damage.path, _decide)
     except FileNotFoundError:
         raise BookNotFound(f"No Book Note is at {repair.damage.path.name}.") from None
-    return True
+    return wrote
 
 
 class IsbnAgreement(Enum):

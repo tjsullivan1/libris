@@ -1028,6 +1028,12 @@ def _excerpt_damage(value: str, width: int = 36) -> str:
     if len(value) <= width * 3:
         return value
 
+    if LOST_CHARACTER not in value:
+        # A suggestion from the volume is clean by design, so there is nothing
+        # to centre a window on. It indexed the first lost character anyway and
+        # ended `libris repair` in an IndexError before the prompt (#129 review).
+        return value[: width * 3].rstrip() + "..."
+
     # Overlapping windows are merged rather than printed twice: the description
     # callout that motivated this holds eight lost characters, several within a
     # few words of each other.
@@ -1212,7 +1218,7 @@ def _report_not_utf8(paths: list[Path]) -> None:
 
 def _suggestions_for(
     damage: EncodingDamage, client: GoogleBooksClient
-) -> tuple[dict[str, str], str | None]:
+) -> tuple[dict[tuple[str, str], str], str | None]:
     """Ask the volume a note names what it can offer, and say if it could not.
 
     Args:
@@ -1220,8 +1226,11 @@ def _suggestions_for(
         client: The Google Books client to ask.
 
     Returns:
-        The suggestion for each damaged string the volume accounts for, and a
-        line explaining why there are none - which is the usual case.
+        The suggestion for each damaged string the volume accounts for, keyed by
+        field and damaged text, and a line explaining why there are none - which
+        is the usual case. Keyed by the field too, because a title and an author
+        can lose the same character in the same place and still be spelled
+        differently (#129 review).
     """
     import httpx
 
@@ -1235,25 +1244,35 @@ def _suggestions_for(
 
     try:
         proposal = propose_encoding_repair(damage, client)
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
-        # One note's failure is not the run's, and a malformed id answers 503
-        # rather than 404 - three notes on this Shelf carry a sentinel id that
-        # looks exactly like an outage (#78).
-        return {}, f"could not ask Google Books ({type(exc).__name__})"
+    except httpx.HTTPStatusError as exc:
+        # One note's failure is not the run's. The status is named so an outage
+        # reads differently from a lookup that will never succeed.
+        return {}, f"could not ask Google Books (HTTP {exc.response.status_code})"
+    except httpx.RequestError as exc:
+        return {}, f"could not reach Google Books ({type(exc).__name__})"
 
     if proposal is None:
         return {}, "Google Books has no such volume"
     if proposal.is_empty:
         return {}, "the volume says nothing that fits"
     return {
-        item.damaged: item.proposed for item in proposal.fields + proposal.body
+        (item.field, item.damaged): item.proposed
+        for item in proposal.fields + proposal.body
     }, None
+
+
+# Damage a repair cannot write, because the block holding it will not parse.
+# Taking an answer for it would only throw the answer away (#129 review).
+_HAND_REPAIR_ONLY = "frontmatter (unparseable)"
 
 
 @app.command()
 def repair(
     limit: int = typer.Option(
-        0, "--limit", help="Stop after considering this many notes (0 for all)"
+        0,
+        "--limit",
+        min=0,
+        help="Stop after considering this many notes (0 for all)",
     ),
 ):
     """Put back characters lost to a bad decode, one string at a time (#78).
@@ -1290,19 +1309,34 @@ def repair(
     repaired = untouched = 0
 
     for damage in in_place[: limit or None]:
-        suggestions, why_not = _suggestions_for(damage, client)
-
         typer.echo(f"{damage.path.name}")
+
+        hand_only = damage.fields.get(_HAND_REPAIR_ONLY, [])
+        if hand_only:
+            typer.echo(
+                f"  its frontmatter will not parse, so {len(hand_only)} damaged "
+                "line(s) there need repairing by hand."
+            )
+
+        promptable = {
+            name: values
+            for name, values in damage.fields.items()
+            if name not in ("filename", _HAND_REPAIR_ONLY)
+        }
+        if not promptable:
+            typer.echo("  Nothing here can be written. Left alone.\n")
+            untouched += 1
+            continue
+
+        suggestions, why_not = _suggestions_for(damage, client)
         if why_not:
             typer.echo(f"  {why_not}; the spelling has to come from you.")
 
         fields: list[FieldRepair] = []
         body: list[FieldRepair] = []
-        for name, values in damage.fields.items():
-            if name == "filename":
-                continue
+        for name, values in promptable.items():
             for value in values:
-                suggested = suggestions.get(value)
+                suggested = suggestions.get((name, value))
                 typer.echo(f"  {name}: {_excerpt_damage(value)}")
                 if suggested:
                     typer.echo(f"    the volume says: {_excerpt_damage(suggested)}")
@@ -1324,11 +1358,20 @@ def repair(
             continue
 
         try:
-            apply_encoding_repair(
+            wrote = apply_encoding_repair(
                 EncodingRepair(damage=damage, fields=fields, body=body)
             )
         except (BookNotFound, FrontmatterUnreadable) as exc:
             typer.echo(f"  {exc} Nothing was written to it.\n")
+            untouched += 1
+            continue
+
+        if not wrote:
+            # Counted as repaired, this reported a write that never happened
+            # (#129 review).
+            typer.echo(
+                "  Nothing written: the note no longer holds what was reported.\n"
+            )
             untouched += 1
             continue
 

@@ -1707,6 +1707,171 @@ def test_applying_a_repair_to_a_note_that_has_gone_is_not_found(tmp_path):
     assert list(vault.glob("*.md")) == []
 
 
+# --- #129 review ----------------------------------------------------------
+
+
+def _repair_of(vault, fields=(), body=()):
+    """Build a repair for the one damaged note on a Shelf, from given answers."""
+    damage = find_encoding_damage(vault)[0]
+    return service.EncodingRepair(
+        damage=damage,
+        fields=[service.FieldRepair(*item) for item in fields],
+        body=[service.FieldRepair(*item) for item in body],
+    )
+
+
+def test_every_damaged_author_in_a_note_is_repaired(tmp_path):
+    # Given a note two of whose authors each lost a character
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "two.md",
+        'title: Poems\nauthors:\n  - "Po Ch�-i"\n  - "S�ren Kierkegaard"',
+    )
+    repair = _repair_of(
+        vault,
+        fields=[
+            ("authors", "Po Ch�-i", "Po Chü-i"),
+            ("authors", "S�ren Kierkegaard", "Søren Kierkegaard"),
+        ],
+    )
+
+    # When both corrections are applied
+    service.apply_encoding_repair(repair)
+
+    # Then both land. Each correction rebuilt the list from the note as read,
+    # so the second overwrote the first and only the last author was repaired
+    # while `repair` reported two (#129 review).
+    assert BookNote.read(path).frontmatter["authors"] == [
+        "Po Chü-i",
+        "Søren Kierkegaard",
+    ]
+
+
+def test_identical_damaged_lines_each_take_their_own_answer(tmp_path):
+    # Given a note in which the same damaged line appears twice, and a reader
+    # who knows the two meant different things
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "twice.md",
+        'title: "Notes"',
+        body="## Notes\n\nV�lez\n\nand later\n\nV�lez\n",
+    )
+    repair = _repair_of(
+        vault,
+        body=[("body", "V�lez", "Vélez"), ("body", "V�lez", "Vález")],
+    )
+
+    # When both are applied
+    service.apply_encoding_repair(repair)
+
+    # Then each occurrence takes the answer given for it, in order. Keyed by the
+    # damaged text alone, the last answer landed on both (#129 review).
+    lines = [
+        line for line in path.read_text(encoding="utf-8").splitlines() if "lez" in line
+    ]
+    assert lines == ["Vélez", "Vález"]
+
+
+def test_a_repaired_body_line_keeps_its_indentation(tmp_path):
+    # Given a damaged line inside an indented block the reader wrote
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(
+        vault,
+        "indented.md",
+        'title: "Notes"',
+        body="## Notes\n\n    Discours de la m�thode\n",
+    )
+    repair = _repair_of(
+        vault,
+        body=[("body", "Discours de la m�thode", "Discours de la méthode")],
+    )
+
+    # When it is repaired
+    service.apply_encoding_repair(repair)
+
+    # Then only the letter changes. The indent made it a code block, and losing
+    # it changes what the note renders - the same damage #99 fixed once.
+    assert "\n    Discours de la méthode\n" in path.read_text(encoding="utf-8")
+
+
+def test_a_repair_that_finds_nothing_to_change_says_it_wrote_nothing(tmp_path):
+    # Given a report built before the reader fixed the title by hand
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    path = _damaged_note(vault, "stale.md", 'title: "A�B"')
+    repair = _repair_of(vault, fields=[("title", "A�B", "AxB")])
+    path.write_text('---\ntitle: "edited since"\n---\n\n## Notes\n', encoding="utf-8")
+    before = path.read_bytes()
+
+    # When the stale repair is applied
+    wrote = service.apply_encoding_repair(repair)
+
+    # Then it reports that nothing was written, rather than a repair that did
+    # not happen (#129 review) - and the reader's edit stands
+    assert wrote is False
+    assert path.read_bytes() == before
+
+
+def test_a_readers_own_heading_is_not_offered_the_volume_title(tmp_path):
+    # Given a note whose rendered title heading is intact, and a later heading
+    # the reader wrote that lost a character
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault,
+        "own-heading.md",
+        'title: "Either-Or"\ngoogle_books_id: vol1',
+        body="# Either-Or\n\n## Notes\n\n# S�ren, as I read him\n",
+    )
+    damage = find_encoding_damage(vault)[0]
+    client = _StubClient(
+        BookCandidate(title="Søren, as I read him", authors=[], google_books_id="vol1")
+    )
+
+    # When the volume is asked
+    proposal = service.propose_encoding_repair(damage, client)
+
+    # Then the reader's heading is not offered the volume's title, however well
+    # it fits. Only the heading rendered from the title is the Library's to
+    # repair; prefilling this one would replace the reader's words at a keystroke
+    # (#129 review).
+    assert proposal.body == []
+
+
+def test_a_quoted_line_outside_the_description_is_not_offered_the_blurb(tmp_path):
+    # Given a quotation the reader wrote in their notes, and a volume whose
+    # description happens to contain the same sentence
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _damaged_note(
+        vault,
+        "own-quote.md",
+        'title: "Discourse"\ngoogle_books_id: vol1',
+        body="## Notes\n\n> Discours de la m�thode\n",
+    )
+    damage = find_encoding_damage(vault)[0]
+    client = _StubClient(
+        BookCandidate(
+            title="Discourse",
+            authors=[],
+            google_books_id="vol1",
+            description="Discours de la méthode",
+        )
+    )
+
+    # When the volume is asked
+    proposal = service.propose_encoding_repair(damage, client)
+
+    # Then nothing is offered for it. Only lines inside the description callout
+    # came from the API (#129 review).
+    assert proposal.body == []
+
+
 def test_a_note_that_lost_nothing_is_not_reported(tmp_path):
     # Given a Shelf whose notes are intact
     vault = tmp_path / "shelf"
