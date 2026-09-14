@@ -1370,13 +1370,20 @@ def repair(
                     ).ask()
                     answer = (typed or "").strip()
                     corrected = accept_correction(value, answer)
-                    # Accepted, skipped with an empty answer, or left as offered:
-                    # all final. Only an answer that changed the string and still
-                    # carries a lost character is asked again.
-                    if corrected is not None or not answer or answer == value:
+                    # Accepted, skipped with an empty answer, or left as offered -
+                    # the original string, or after a refusal the answer that came
+                    # back prefilled: all final. Only an answer that changed what
+                    # was offered and still carries a lost character is asked
+                    # again. Compared with the original string alone, Enter on a
+                    # prefilled refused answer was refused for ever (#130 review).
+                    if (
+                        corrected is not None
+                        or not answer
+                        or answer in (value, default.strip())
+                    ):
                         break
-                    # Said, and asked again with the reader's own answer filled
-                    # in, so only the missed letter needs fixing. Refused
+                    # Refused, then asked again with the reader's own answer
+                    # filled in, so only the missed letter needs fixing. Refused
                     # silently, a half-fixed `Benito P?rez Galdos` was reported
                     # "left alone" as though skipped, and read as a command that
                     # did not work (user report).

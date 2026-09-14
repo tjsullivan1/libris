@@ -817,7 +817,7 @@ def test_repair_leaves_a_string_alone_on_an_empty_answer(monkeypatch, tmp_path):
     assert "left 1 alone" in result.output
 
 
-def _answers_in_turn(monkeypatch, *answers):
+def _answers_in_turn(monkeypatch: pytest.MonkeyPatch, *answers: str) -> list[str]:
     """Answer each prompt with the next answer, recording the default offered.
 
     An iterator rather than a constant, so a prompt asked more often than the
@@ -917,6 +917,29 @@ def test_repair_does_not_ask_again_when_the_damaged_string_is_left_unchanged(
     # Then it is asked once and left alone. Treated as a refused answer, the
     # unchanged default would be offered again for ever.
     assert "still has a lost character" not in result.output
+    assert note.read_bytes() == before
+
+
+def test_repair_does_not_ask_again_when_a_refused_answer_is_left_as_prefilled(
+    monkeypatch, tmp_path
+):
+    # Given a reader whose answer still carries a lost character, and who then
+    # presses Enter on that answer as it comes back prefilled
+    vault, note = _damaged_shelf(tmp_path)
+    before = note.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(monkeypatch, None)
+    half_fixed = "S�ren Kierkegård"
+    offered = _answers_in_turn(monkeypatch, half_fixed, half_fixed)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then it is asked twice and left alone. Only the original damaged string
+    # counted as "left as offered", so Enter on the prefilled refused answer was
+    # refused again for ever (#130 review).
+    assert offered == ["S�ren Kierkegaard", half_fixed]
     assert note.read_bytes() == before
 
 
