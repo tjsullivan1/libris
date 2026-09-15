@@ -1846,6 +1846,61 @@ def test_enrich_reports_a_note_removed_while_a_match_was_chosen(monkeypatch, tmp
     assert not (vault / "Dune.md").exists()
 
 
+# --- #131 third review ----------------------------------------------------
+
+
+def test_the_auto_enrich_callout_does_not_recreate_a_note_removed_after_it_was_read(
+    monkeypatch, tmp_path
+):
+    # Given a note the auto-enrich callout is being added to, removed after the
+    # callout step has read it - the YAML is rendered in exactly that gap
+    import yaml
+
+    from libris import cli as cli_module
+
+    path = tmp_path / "Dune.md"
+    path.write_text("---\ntitle: Dune\ntags: Book\n---\n\n## Notes\n", encoding="utf-8")
+    real_dump = yaml.dump
+
+    def _dump(*args, **kwargs):
+        path.unlink(missing_ok=True)
+        return real_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "dump", _dump)
+
+    # When the callout is added
+    # Then the note is not recreated to take it. The other test of this path
+    # removed the note before the read, so it would still pass if this write
+    # created missing files again (#131 third review).
+    with pytest.raises(FileNotFoundError):
+        cli_module._append_auto_enrich_note(path, "Dune", "Dune")
+    assert not path.exists()
+
+
+def test_autoenrich_dry_run_does_not_count_a_vanished_note_as_would_be_enriched(
+    monkeypatch, tmp_path
+):
+    # Given two notes due enrichment, one removed before the dry run reads it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("Gone", "Kept"):
+        (vault / f"{name}.md").write_text(
+            f"---\ntitle: {name}\nisbn: null\n---\n\n## Notes\n", encoding="utf-8"
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _removed_before(monkeypatch, "libris.cli.read_frontmatter", "Gone.md")
+
+    # When autoenrich runs as a dry run
+    result = runner.invoke(app, ["autoenrich", "--dry-run"])
+
+    # Then the vanished note is not counted as one that would be enriched, and is
+    # reported as gone. The dry run returns before the full summary, so it was
+    # summed into the would-enrich count and never mentioned (#131 third review).
+    assert result.exit_code == 0, result.output
+    assert "Dry run: 1 book(s) would be enriched" in result.output
+    assert "Gone (moved or removed while running): 1" in result.output
+
+
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
     # Given a description callout of the length the real Shelf holds, damaged in
     # two places far apart

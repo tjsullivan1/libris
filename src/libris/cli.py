@@ -1015,9 +1015,15 @@ def autoenrich(
     # Summary
     typer.echo("")
     if dry_run:
+        # A vanished note used an action but was never going to be enriched, so
+        # it is not counted as one that would be - and it is said here, because
+        # the dry run returns before the full summary (#131 third review).
+        would = action_count - len(gone)
         typer.echo(
-            f"Dry run: {action_count} book(s) would be enriched, {skipped} already complete."
+            f"Dry run: {would} book(s) would be enriched, {skipped} already complete."
         )
+        if gone:
+            typer.echo(f"Gone (moved or removed while running): {len(gone)}")
         return
 
     typer.echo(f"Enriched (auto): {enriched_auto}")
