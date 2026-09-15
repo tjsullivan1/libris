@@ -538,29 +538,31 @@ def clean(
         return
 
     selected_file = _note_on_the_shelf(vault_path, selected_file_name, books)
+    # The whole of the work on the note, repair and rename together. Guarded call
+    # by call, the rename ran outside the repair's handler and a note moved
+    # between the two ended in a traceback (#128, #131 second review).
     try:
         updated, fm = ensure_frontmatter_fields(selected_file)
+        if updated:
+            typer.echo(f"Cleaned: {selected_file_name}")
+        else:
+            typer.echo(f"{selected_file_name} is already up to date or invalid.")
+
+        if rename:
+            vault_root = get_obsidian_vault_root() or vault_path
+            result = rename_book_file(selected_file, vault_root, frontmatter=fm)
+            if result.status == "renamed":
+                typer.echo(f"Renamed: {selected_file_name} → {result.new_path.name}")
+            else:
+                msg = _format_rename_skip(selected_file_name, result)
+                if msg:
+                    typer.echo(msg)
     except FileNotFoundError:
-        # Picked, then moved or removed before the repair reached it (#128).
         typer.echo(
-            f"{selected_file_name} is gone - moved or removed before it was "
-            "cleaned. Nothing written."
+            f"{selected_file_name} is gone - moved or removed while it was being "
+            "cleaned. Nothing more written."
         )
         raise typer.Exit(code=1) from None
-    if updated:
-        typer.echo(f"Cleaned: {selected_file_name}")
-    else:
-        typer.echo(f"{selected_file_name} is already up to date or invalid.")
-
-    if rename:
-        vault_root = get_obsidian_vault_root() or vault_path
-        result = rename_book_file(selected_file, vault_root, frontmatter=fm)
-        if result.status == "renamed":
-            typer.echo(f"Renamed: {selected_file_name} → {result.new_path.name}")
-        else:
-            msg = _format_rename_skip(selected_file_name, result)
-            if msg:
-                typer.echo(msg)
 
 
 @app.command()
@@ -701,7 +703,9 @@ def cleanup(
             typer.echo(
                 f"No files renamed. {skipped_count} file(s) could not be renamed."
             )
-        else:
+        elif not gone_count:
+            # Not when a note vanished: it was never looked at, so nothing says
+            # its name is canonical (#131 second review).
             typer.echo("All files already have canonical names.")
 
     if unmatched_files:
@@ -743,21 +747,17 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
 
     first = results[0]
     if _titles_match(file_path.stem, first.title):
-        try:
-            if update_frontmatter_from_book(file_path, first):
-                # Append a note to the body indicating this was an automatic match
-                _append_auto_enrich_note(file_path, first.title, query)
-                typer.echo(
-                    f'Auto-enriched: {file_path.name} → "{first.title}" by {", ".join(first.authors)}'
-                )
-                return True
-        except FileNotFoundError:
-            # Moved or removed mid-enrichment. Not recreated to take the
-            # callout, and not counted as enriched (#128).
+        # A note that vanishes here raises FileNotFoundError to the command
+        # running it, which reports it once, at the boundary of the note it was
+        # working on. Caught here and returned as False, it looked like a book
+        # with no match to every caller (#128, #131 second review).
+        if update_frontmatter_from_book(file_path, first):
+            # Append a note to the body indicating this was an automatic match
+            _append_auto_enrich_note(file_path, first.title, query)
             typer.echo(
-                f"{file_path.name} is gone - moved or removed while it was "
-                "enriched. Skipped."
+                f'Auto-enriched: {file_path.name} → "{first.title}" by {", ".join(first.authors)}'
             )
+            return True
         return False
     else:
         unmatched_log.append(file_path.name)
@@ -846,15 +846,11 @@ def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
 
     book = results[result_choices.index(selected_result)]
 
-    try:
-        changed = update_frontmatter_from_book(file_path, book)
-    except FileNotFoundError:
-        # Moved or removed while the reader chose a match (#128).
-        typer.echo(
-            f"{file_path.name} is gone - moved or removed while it was being "
-            "enriched. Nothing written."
-        )
-        return False
+    # A note that vanishes while the reader chooses raises FileNotFoundError to
+    # the command running it. Returned as False, it was counted as a skip by
+    # `autoenrich --interactive` and could not be counted as gone by `cleanup
+    # --rename` (#131 second review).
+    changed = update_frontmatter_from_book(file_path, book)
     if changed:
         typer.echo(f"Enriched: {file_path.name}")
         return True
@@ -939,74 +935,80 @@ def autoenrich(
             typer.echo(f"Limit reached ({limit}). Stopping.")
             break
 
-        fm = read_frontmatter(book_file)
-        if fm is None:
-            skipped += 1
-            continue
+        # The whole of the work on one note. Guarded call by call, the first read
+        # and the interactive choice each ran outside a handler, so a note moving
+        # at either ended the run or was counted as already complete (#128, #131
+        # second review).
+        try:
+            fm = read_frontmatter(book_file)
+            if fm is None:
+                skipped += 1
+                continue
 
-        if not _needs_enrichment(fm):
-            skipped += 1
-            continue
+            if not _needs_enrichment(fm):
+                skipped += 1
+                continue
 
-        query = _build_query_from_frontmatter(fm, book_file)
-        typer.echo(f"[{i}/{len(books)}] {book_file.name}", nl=False)
+            query = _build_query_from_frontmatter(fm, book_file)
+            typer.echo(f"[{i}/{len(books)}] {book_file.name}", nl=False)
 
-        if dry_run:
-            typer.echo(f" — would search: {query}")
-            action_count += 1
-            continue
-
-        results = client.search(query)
-
-        if not results:
-            # Fallback: try ISBN search if available
-            isbn = fm.get("isbn")
-            if isbn:
-                results = client.search(f"isbn:{isbn}")
-
-        if not results:
-            typer.echo(" — no results")
-            unmatched.append(book_file.name)
-            action_count += 1
-            continue
-
-        # Find confident matches via title comparison
-        confident = [b for b in results if _titles_match(book_file.stem, b.title)]
-
-        # Auto-apply when there's a single result, or all confident matches
-        # share the same title (i.e. different editions of the same book).
-        unique_titles = (
-            {_normalize_for_match(b.title) for b in confident} if confident else set()
-        )
-        if len(results) == 1 or (confident and len(unique_titles) == 1):
-            pick = _best_match(confident) if confident else results[0]
-            try:
-                changed = update_frontmatter_from_book(book_file, pick)
-            except FileNotFoundError:
-                # Moved or removed while the run reached it. Reported and passed
-                # over, rather than recreated or ending the run (#128).
-                typer.echo(
-                    f" — {book_file.name} is gone - moved or removed while "
-                    "autoenrich ran. Skipped."
-                )
-                gone.append(book_file.name)
+            if dry_run:
+                typer.echo(f" — would search: {query}")
                 action_count += 1
                 continue
-            if changed:
-                typer.echo(f' — auto-enriched → "{pick.title}"')
-                enriched_auto += 1
+
+            results = client.search(query)
+
+            if not results:
+                # Fallback: try ISBN search if available
+                isbn = fm.get("isbn")
+                if isbn:
+                    results = client.search(f"isbn:{isbn}")
+
+            if not results:
+                typer.echo(" — no results")
+                unmatched.append(book_file.name)
+                action_count += 1
+                continue
+
+            # Find confident matches via title comparison
+            confident = [b for b in results if _titles_match(book_file.stem, b.title)]
+
+            # Auto-apply when there's a single result, or all confident matches
+            # share the same title (i.e. different editions of the same book).
+            unique_titles = (
+                {_normalize_for_match(b.title) for b in confident}
+                if confident
+                else set()
+            )
+            if len(results) == 1 or (confident and len(unique_titles) == 1):
+                pick = _best_match(confident) if confident else results[0]
+                if update_frontmatter_from_book(book_file, pick):
+                    typer.echo(f' — auto-enriched → "{pick.title}"')
+                    enriched_auto += 1
+                else:
+                    typer.echo(" — already up to date")
+                    skipped += 1
+            elif interactive:
+                typer.echo("")  # newline before interactive prompt
+                if _enrich_interactive(book_file, results=results):
+                    enriched_interactive += 1
+                else:
+                    skipped += 1
             else:
-                typer.echo(" — already up to date")
-                skipped += 1
-        elif interactive:
-            typer.echo("")  # newline before interactive prompt
-            if _enrich_interactive(book_file, results=results):
-                enriched_interactive += 1
-            else:
-                skipped += 1
-        else:
-            typer.echo(f" — {len(results)} results, needs interactive selection")
-            needs_interactive.append(book_file.name)
+                typer.echo(f" — {len(results)} results, needs interactive selection")
+                needs_interactive.append(book_file.name)
+        except FileNotFoundError:
+            # Moved or removed while the run reached it. Reported and passed over,
+            # rather than recreated or ending the run, and counted as gone - not
+            # as a book already complete.
+            typer.echo(
+                f" — {book_file.name} is gone - moved or removed while autoenrich "
+                "ran. Skipped."
+            )
+            gone.append(book_file.name)
+            action_count += 1
+            continue
 
         action_count += 1
 
@@ -1074,7 +1076,17 @@ def enrich(
         vault_path, filename, _books_on_the_shelf(vault_path)
     )
 
-    _enrich_interactive(selected_file)
+    try:
+        _enrich_interactive(selected_file)
+    except FileNotFoundError:
+        # Moved or removed while the reader chose a match. Said, and a failing
+        # exit, as `clean` does - not recreated, and not a traceback (#128, #131
+        # second review).
+        typer.echo(
+            f"{selected_file.name} is gone - moved or removed while it was being "
+            "enriched. Nothing written."
+        )
+        raise typer.Exit(code=1) from None
 
 
 def _excerpt_damage(value: str, width: int = 36) -> str:
@@ -1604,29 +1616,40 @@ def merge(
         typer.echo(f"Duplicate Group {group_idx} ({len(group)} books)")
         typer.echo(f"{'=' * 60}")
 
-        # Display group members
-        for path in group:
-            fm = read_frontmatter(path)
-            title = fm.get("title", "Unknown") if fm else "Unknown"
-            status = fm.get("status", "Unknown") if fm else "Unknown"
-            isbn = fm.get("isbn") if fm else None
-            gid = fm.get("google_books_id") if fm else None
-            details = [f"Status: {status}"]
-            if isbn:
-                details.append(f"ISBN: {isbn}")
-            if gid:
-                details.append(f"Google ID: {gid}")
-            typer.echo(f"  {path.name}")
-            typer.echo(f"    {title} | {' | '.join(details)}")
+        # Showing the group and choosing its primary both read its notes, so they
+        # are guarded as one step: a note vanishing here skips the group with
+        # nothing merged, rather than ending the command. Each pair below guards
+        # its own merge (#128, #131 second review).
+        try:
+            # Display group members
+            for path in group:
+                fm = read_frontmatter(path)
+                title = fm.get("title", "Unknown") if fm else "Unknown"
+                status = fm.get("status", "Unknown") if fm else "Unknown"
+                isbn = fm.get("isbn") if fm else None
+                gid = fm.get("google_books_id") if fm else None
+                details = [f"Status: {status}"]
+                if isbn:
+                    details.append(f"ISBN: {isbn}")
+                if gid:
+                    details.append(f"Google ID: {gid}")
+                typer.echo(f"  {path.name}")
+                typer.echo(f"    {title} | {' | '.join(details)}")
 
-        if len(group) < 2:
+            if len(group) < 2:
+                continue
+
+            # Pick the most complete book as primary; merge others into it
+            primary = get_primary_book(group[0], group[1])
+            for candidate in group[2:]:
+                primary = get_primary_book(primary, candidate)
+            secondaries = [p for p in group if p != primary]
+        except FileNotFoundError:
+            typer.echo(
+                "  A note of this group is gone - moved or removed while merge ran. "
+                "Group skipped; nothing merged."
+            )
             continue
-
-        # Pick the most complete book as primary; merge others into it
-        primary = get_primary_book(group[0], group[1])
-        for candidate in group[2:]:
-            primary = get_primary_book(primary, candidate)
-        secondaries = [p for p in group if p != primary]
 
         typer.echo(f"\n  Primary (keeper): {primary.name}")
 
@@ -1716,7 +1739,8 @@ def _write_merge(
 
     Returns:
         True when the merged note was written, including when the secondary was
-        already gone by the time it was to be deleted. False when the primary was
+        not where it was by the time it was to be deleted - which it reports as
+        not deleted, since it may have been moved. False when the primary was
         gone, so nothing was written and nothing deleted.
     """
     try:
@@ -1732,9 +1756,14 @@ def _write_merge(
     try:
         delete_secondary_file(secondary)
     except FileNotFoundError:
-        # Already gone: the merged note is written, so this merge is done.
+        # The merged note is written, so this merge is done - but a missing path
+        # cannot tell a deleted secondary from a moved one. A moved copy is still
+        # on the Shelf, carrying the merged note's identity, so it is not
+        # reported as gone (#131 second review).
         typer.echo(
-            f"    {secondary.name} was already gone; the merged note is written."
+            f"    Merged into {primary.name}, but {secondary.name} was not where it "
+            "was, so it was not deleted. If it was moved rather than removed, a "
+            "copy remains - `libris doctor` will show it."
         )
     return True
 

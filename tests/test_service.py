@@ -465,6 +465,63 @@ def test_a_merge_whose_secondary_vanished_before_deletion_is_still_merged(
     assert len(list(tmp_path.glob("*.md"))) == 1
 
 
+def test_a_merge_whose_secondary_was_moved_says_it_was_not_deleted(
+    tmp_path, monkeypatch
+):
+    # Given a pair whose merged note is written, and whose secondary is moved -
+    # not removed - before it can be deleted
+    first, second = _pair(tmp_path)
+    real = service.delete_secondary_file
+
+    def _moved(secondary_path):
+        secondary_path.rename(
+            secondary_path.with_name(f"{secondary_path.stem} moved.md")
+        )
+        return real(secondary_path)
+
+    monkeypatch.setattr(service, "delete_secondary_file", _moved)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then it is merged - the merged note was written - but the outcome does not
+    # imply the secondary is gone. A missing path cannot tell a deletion from a
+    # move, and a moved copy is still on the Shelf carrying the merged note's
+    # identity (#131 second review).
+    assert [o.status for o in outcomes] == [DecisionStatus.MERGED]
+    assert "not deleted" in outcomes[0].detail
+
+
+def test_a_merged_note_removed_before_the_index_is_refreshed_records_the_merge(
+    tmp_path, monkeypatch
+):
+    # Given a pair decided twice, whose merged note is removed after the merge is
+    # written and the secondary deleted - before the index is refreshed
+    first, second = _pair(tmp_path)
+    real = service.delete_secondary_file
+
+    def _then_merged_note_gone(secondary_path):
+        real(secondary_path)
+        for remaining in tmp_path.glob("*.md"):
+            remaining.unlink()
+
+    monkeypatch.setattr(service, "delete_secondary_file", _then_merged_note_gone)
+
+    # When both decisions are applied
+    outcomes = apply_decisions(
+        tmp_path, [_decision(first, second), _decision(first, second)]
+    )
+
+    # Then the first is recorded as merged and the second as drifted. Reading the
+    # merged note back to refresh the index ran outside any handler, so the batch
+    # ended with no outcome for either; and its stale index entries would have
+    # sent the second decision to a note that was gone (#131 second review).
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.MERGED,
+        DecisionStatus.DRIFTED,
+    ]
+
+
 def test_a_decision_still_applies_after_one_note_was_merged_away(tmp_path):
     # Given a note that has since absorbed another, so its id is superseded
     first, second = _pair(tmp_path)

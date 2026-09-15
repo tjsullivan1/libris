@@ -1996,24 +1996,41 @@ def apply_decisions(
                 )
             )
             continue
+        notes: list[str] = []
         try:
             delete_secondary_file(secondary)
         except FileNotFoundError:
-            # Already gone: the merged note is written, so the merge is done.
-            # Outside any handler, this ended the batch with no outcome for the
-            # pair (#131 review).
-            pass
+            # The merged note is written, so the merge is done - but a missing path
+            # cannot tell a deleted secondary from a moved one, and a moved copy is
+            # still on the Shelf carrying the merged note's identity. Said, rather
+            # than reported as gone (#131 reviews).
+            notes.append(
+                f"{secondary.name} was not where it was, so it was not deleted; "
+                "if it was moved, a copy remains"
+            )
 
         # The Shelf just changed, so the index has to change with it: the
         # survivor now answers for the identities the deleted note held.
-        survivor = BookNote.read(primary)
+        try:
+            survivor = BookNote.read(primary)
+        except FileNotFoundError:
+            # The merged note moved or was removed once written. The merge still
+            # happened, so it is recorded as merged; and the index forgets both
+            # paths, so a later decision naming them drifts rather than reading a
+            # file that is gone (#131 second review).
+            survivor = None
+            for key, note in list(index.items()):
+                if note.path in (primary, secondary):
+                    del index[key]
+            notes.append(f"{primary.name} was then moved or removed")
         if survivor is not None:
             for key, note in list(index.items()):
                 if note.path in (primary, secondary):
                     index[key] = survivor
 
-        outcomes.append(
-            DecisionOutcome(DecisionStatus.MERGED, f"{label} -> {primary.name}")
-        )
+        detail = f"{label} -> {primary.name}"
+        if notes:
+            detail += f" ({'; '.join(notes)})"
+        outcomes.append(DecisionOutcome(DecisionStatus.MERGED, detail))
 
     return outcomes
