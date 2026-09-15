@@ -817,23 +817,130 @@ def test_repair_leaves_a_string_alone_on_an_empty_answer(monkeypatch, tmp_path):
     assert "left 1 alone" in result.output
 
 
-def test_repair_refuses_an_answer_that_still_carries_the_damage(monkeypatch, tmp_path):
-    # Given a reader who fixed one lost character and left another, which is
-    # easy to do in a description carrying eight of them
+def _answers_in_turn(monkeypatch: pytest.MonkeyPatch, *answers: str) -> list[str]:
+    """Answer each prompt with the next answer, recording the default offered.
+
+    An iterator rather than a constant, so a prompt asked more often than the
+    test expects fails with StopIteration instead of looping for ever.
+    """
+    remaining = iter(answers)
+    offered = []
+
+    def _text(message, default="", **_kwargs):
+        offered.append(default)
+
+        class _Answer:
+            def ask(self):
+                return next(remaining)
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.text", _text)
+    return offered
+
+
+def test_repair_explains_an_answer_still_carrying_a_lost_character_and_asks_again(
+    monkeypatch, tmp_path
+):
+    # Given a name that lost two letters, and a reader who fixes one of them and
+    # misses the other - what happened on the real Shelf with
+    # `Benito P?rez Gald?s (1843-1920)`
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Marianela.md"
+    note.write_text(
+        '---\ntitle: Marianela\nauthors:\n  - "Benito P�rez Gald�s (1843-1920)"\n'
+        "---\n\n## Notes\n\nMine.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(monkeypatch, None)
+    half_fixed = "Benito P�rez Galdós (1843-1920)"
+    offered = _answers_in_turn(
+        monkeypatch, half_fixed, "Benito Pérez Galdós (1843-1920)"
+    )
+
+    # When the half-fixed answer is given, then the finished one
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then the reader is told the answer still carries a lost character, and
+    # asked again with their own answer as the default - rather than the note
+    # being reported "left alone" as though they had skipped it (user report)
+    assert "still has a lost character" in result.output
+    assert offered[1] == half_fixed
+
+    # And the finished answer is written
+    from libris.markdown import read_frontmatter
+
+    assert read_frontmatter(note)["authors"] == ["Benito Pérez Galdós (1843-1920)"]
+
+
+def test_repair_leaves_a_string_alone_when_a_refused_answer_is_then_skipped(
+    monkeypatch, tmp_path
+):
+    # Given a reader whose answer still carries a lost character, and who then
+    # answers empty
     vault, note = _damaged_shelf(tmp_path)
     before = note.read_bytes()
     monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
     _volume(monkeypatch, None)
-    _answer_text(monkeypatch, "S�ren Kierkegård")
+    _answers_in_turn(monkeypatch, "S�ren Kierkegård", "")
 
-    # When it is answered
+    # When the repair runs
     result = runner.invoke(app, ["repair"])
     assert result.exit_code == 0, result.output
 
-    # Then nothing is written: an answer still carrying the replacement
-    # character writes the damage back
+    # Then the refusal is explained, nothing is written, and the note is left
+    # alone. An answer still carrying the replacement character writes the
+    # damage back.
+    assert "still has a lost character" in result.output
     assert note.read_bytes() == before
     assert "left 1 alone" in result.output
+
+
+def test_repair_does_not_ask_again_when_the_damaged_string_is_left_unchanged(
+    monkeypatch, tmp_path
+):
+    # Given a reader who presses Enter on the damaged string as offered - which
+    # still carries the lost character, but is a skip rather than an answer
+    vault, note = _damaged_shelf(tmp_path)
+    before = note.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(monkeypatch, None)
+    _answers_in_turn(monkeypatch, "S�ren Kierkegaard")
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then it is asked once and left alone. Treated as a refused answer, the
+    # unchanged default would be offered again for ever.
+    assert "still has a lost character" not in result.output
+    assert note.read_bytes() == before
+
+
+def test_repair_does_not_ask_again_when_a_refused_answer_is_left_as_prefilled(
+    monkeypatch, tmp_path
+):
+    # Given a reader whose answer still carries a lost character, and who then
+    # presses Enter on that answer as it comes back prefilled
+    vault, note = _damaged_shelf(tmp_path)
+    before = note.read_bytes()
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _volume(monkeypatch, None)
+    half_fixed = "S�ren Kierkegård"
+    offered = _answers_in_turn(monkeypatch, half_fixed, half_fixed)
+
+    # When the repair runs
+    result = runner.invoke(app, ["repair"])
+    assert result.exit_code == 0, result.output
+
+    # Then it is asked twice and left alone. Only the original damaged string
+    # counted as "left as offered", so Enter on the prefilled refused answer was
+    # refused again for ever (#130 review).
+    assert offered == ["S�ren Kierkegaard", half_fixed]
+    assert note.read_bytes() == before
 
 
 def test_repair_says_when_a_note_records_that_google_books_lacks_the_book(
