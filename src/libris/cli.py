@@ -603,6 +603,7 @@ def cleanup(
     updated_count = 0
     renamed_count = 0
     skipped_count = 0
+    gone_count = 0
     action_count = 0
     unmatched_files: list[str] = []
     for i, book_file in enumerate(books, 1):
@@ -668,7 +669,7 @@ def cleanup(
             # or a sync client. Reported and passed over, rather than written
             # back into existence or ending the sweep for every other note
             # (#128).
-            skipped_count += 1
+            gone_count += 1
             file_had_action = True
             typer.echo(
                 f"\n  {book_file.name} is gone - moved or removed while cleanup "
@@ -681,10 +682,17 @@ def cleanup(
             action_count += 1
 
     typer.echo("")
-    if updated_count == 0:
-        typer.echo("All books are already up to date.")
-    else:
+    if updated_count:
         typer.echo(f"Finished. Updated {updated_count} books.")
+    elif not gone_count:
+        typer.echo("All books are already up to date.")
+    if gone_count:
+        # Counted apart from the rename skips, and said: a note that vanished was
+        # never repaired, so a run where nothing was updated is not a Shelf
+        # already in order (#131 review).
+        typer.echo(
+            f"{gone_count} note(s) were gone - moved or removed while cleanup ran."
+        )
 
     if rename:
         if renamed_count:
@@ -921,6 +929,7 @@ def autoenrich(
     enriched_auto = 0
     enriched_interactive = 0
     skipped = 0
+    gone: list[str] = []
     needs_interactive: list[str] = []
     unmatched: list[str] = []
     action_count = 0
@@ -980,7 +989,7 @@ def autoenrich(
                     f" — {book_file.name} is gone - moved or removed while "
                     "autoenrich ran. Skipped."
                 )
-                skipped += 1
+                gone.append(book_file.name)
                 action_count += 1
                 continue
             if changed:
@@ -1013,6 +1022,11 @@ def autoenrich(
     if enriched_interactive:
         typer.echo(f"Enriched (interactive): {enriched_interactive}")
     typer.echo(f"Skipped (already complete): {skipped}")
+    if gone:
+        # Not "already complete": they were never enriched. Summed into the
+        # skipped total, a vanished note was reported as a finished one (#131
+        # review).
+        typer.echo(f"Gone (moved or removed while running): {len(gone)}")
 
     if needs_interactive:
         typer.echo(
@@ -1629,10 +1643,9 @@ def merge(
                         continue
 
                     merged_fm, merged_body, _ = merge_result
-                    write_merged_book(primary, merged_fm, merged_body)
-                    delete_secondary_file(secondary)
-                    typer.echo("    Auto-merged successfully")
-                    total_merged += 1
+                    if _write_merge(primary, secondary, merged_fm, merged_body):
+                        typer.echo("    Auto-merged successfully")
+                        total_merged += 1
                 else:
                     merged_fm, merged_body, conflicts = merge_two_books(
                         primary, secondary, allow_conflicts=False
@@ -1664,19 +1677,18 @@ def merge(
                             typer.echo("    Skipped by user")
                             continue
 
-                    write_merged_book(primary, merged_fm, merged_body)
-                    delete_secondary_file(secondary)
-                    typer.echo("    Merged successfully")
-                    total_merged += 1
+                    if _write_merge(primary, secondary, merged_fm, merged_body):
+                        typer.echo("    Merged successfully")
+                        total_merged += 1
             except FileNotFoundError:
-                # A note of the pair moved or was removed mid-merge. The merged
-                # note is written before the secondary is deleted, so a primary
-                # that is gone refuses the write and the secondary is kept -
-                # rather than the primary coming back from memory and the
-                # secondary being deleted after it (#128).
+                # A note of the pair moved or was removed before the merge was
+                # read. The write and the delete handle their own vanished notes
+                # in `_write_merge`, so reaching here means nothing was written
+                # (#128, #131 review).
                 typer.echo(
                     f"    {primary.name} or {secondary.name} is gone - moved or "
-                    "removed mid-merge. Nothing merged; nothing deleted."
+                    "removed before the merge was read. Nothing merged; nothing "
+                    "deleted."
                 )
                 continue
             except Exception as e:
@@ -1684,6 +1696,47 @@ def merge(
                 continue
 
     typer.echo(f"\nMerge complete: {total_merged} duplicate(s) merged")
+
+
+def _write_merge(
+    primary: Path, secondary: Path, merged_fm: dict, merged_body: str
+) -> bool:
+    """Write a merged note, then delete its secondary, reporting a note gone.
+
+    The write and the delete are handled apart, because a note vanishing at each
+    means something different. One handler caught both, and so called a merge
+    whose secondary was already gone "nothing merged" when the merged note had
+    been written (#131 review).
+
+    Args:
+        primary: The note the merge keeps.
+        secondary: The note merged into it, deleted once the merge is written.
+        merged_fm: The merged frontmatter.
+        merged_body: The merged body.
+
+    Returns:
+        True when the merged note was written, including when the secondary was
+        already gone by the time it was to be deleted. False when the primary was
+        gone, so nothing was written and nothing deleted.
+    """
+    try:
+        write_merged_book(primary, merged_fm, merged_body)
+    except FileNotFoundError:
+        # Moved or removed after the merge was worked out. The write refuses
+        # rather than recreating it, and the secondary is kept (#128).
+        typer.echo(
+            f"    {primary.name} is gone - moved or removed mid-merge. "
+            "Nothing merged; nothing deleted."
+        )
+        return False
+    try:
+        delete_secondary_file(secondary)
+    except FileNotFoundError:
+        # Already gone: the merged note is written, so this merge is done.
+        typer.echo(
+            f"    {secondary.name} was already gone; the merged note is written."
+        )
+    return True
 
 
 _DECISION_LABELS = {

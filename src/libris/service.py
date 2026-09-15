@@ -1944,12 +1944,26 @@ def apply_decisions(
             )
             continue
 
-        primary = get_primary_book(first.path, second.path)
-        secondary = second.path if primary == first.path else first.path
+        try:
+            primary = get_primary_book(first.path, second.path)
+            secondary = second.path if primary == first.path else first.path
 
-        merged_fm, merged_body, conflicts = merge_two_books(
-            primary, secondary, allow_conflicts=allow_conflicts
-        )
+            merged_fm, merged_body, conflicts = merge_two_books(
+                primary, secondary, allow_conflicts=allow_conflicts
+            )
+        except FileNotFoundError:
+            # A note of the pair moved or was removed after the index was built -
+            # found by the lookup, gone by the time the merge read it. Reported as
+            # drifted rather than ending the batch. A later decision naming a note
+            # that already drifted reaches here too, because the index still names
+            # it (#131 review).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: a note of the pair is gone; nothing merged",
+                )
+            )
+            continue
         if conflicts and not allow_conflicts:
             fields = ", ".join(sorted({c.field for c in conflicts}))
             outcomes.append(
@@ -1982,7 +1996,13 @@ def apply_decisions(
                 )
             )
             continue
-        delete_secondary_file(secondary)
+        try:
+            delete_secondary_file(secondary)
+        except FileNotFoundError:
+            # Already gone: the merged note is written, so the merge is done.
+            # Outside any handler, this ended the batch with no outcome for the
+            # pair (#131 review).
+            pass
 
         # The Shelf just changed, so the index has to change with it: the
         # survivor now answers for the identities the deleted note held.

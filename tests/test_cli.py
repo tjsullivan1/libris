@@ -1450,6 +1450,16 @@ def test_autoenrich_reports_a_note_removed_while_it_ran_and_carries_on(
     assert "Gone.md is gone" in result.output
     assert not (vault / "Gone.md").exists()
 
+    # And the run really did go on: the note after it was enriched. Checking only
+    # that Gone.md stayed gone would pass a run that stopped there (#131 review).
+    from libris.markdown import read_frontmatter
+
+    assert read_frontmatter(vault / "Kept.md")["authors"] == ["A"]
+
+    # And the vanished note is not counted as already complete, which is what
+    # the skipped total says (#131 review)
+    assert "Skipped (already complete): 0" in result.output
+
 
 def test_migrate_reports_notes_it_could_not_write(monkeypatch, tmp_path):
     # Given two notes due a migration, one removed after it was planned
@@ -1558,6 +1568,64 @@ def test_interactive_enrichment_reports_a_note_removed_while_a_match_was_chosen(
     assert enriched is False
     assert "Dune.md is gone" in capsys.readouterr().out
     assert not path.exists()
+
+
+def test_cleanup_does_not_call_the_shelf_up_to_date_when_a_note_vanished(
+    monkeypatch, tmp_path
+):
+    # Given a Shelf whose only note due a repair is removed as cleanup reaches it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _legacy_note(vault, "Gone.md")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _removed_before(monkeypatch, "libris.cli.ensure_frontmatter_fields", "Gone.md")
+
+    # When cleanup runs
+    result = runner.invoke(app, ["cleanup"])
+
+    # Then the summary does not say everything is up to date - the note was never
+    # repaired - and it counts the note that was gone (#131 review)
+    assert result.exit_code == 0, result.output
+    assert "All books are already up to date" not in result.output
+    assert "1 note(s) were gone" in result.output
+
+
+def test_merge_counts_a_merge_whose_secondary_vanished_after_it_was_written(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, and the secondary removed after the merged
+    # note is written but before the secondary is deleted
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_delete = cli_module.delete_secondary_file
+
+    def _already_gone(secondary_path):
+        secondary_path.unlink()
+        return real_delete(secondary_path)
+
+    monkeypatch.setattr("libris.cli.delete_secondary_file", _already_gone)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then the merge is reported as done - the merged note was written, and the
+    # secondary it would have deleted is already gone. One handler caught both
+    # the write and the delete, so this said "Nothing merged" about a merge that
+    # had happened (#131 review).
+    assert result.exit_code == 0, result.output
+    assert "Nothing merged" not in result.output
+    assert "Merge complete: 1 duplicate(s) merged" in result.output
+    assert len(list(vault.glob("*.md"))) == 1
 
 
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
