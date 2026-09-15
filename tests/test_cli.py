@@ -1313,6 +1313,253 @@ def test_repair_says_a_not_a_book_note_records_that_it_is_not_one(
     assert "records that it is not a book" in result.output
 
 
+# --- a rewrite never recreates a note removed while it ran (#128) -----------
+
+
+def _removed_before(monkeypatch, target, name):
+    """Wrap `target` so it removes the note called `name` before running."""
+    module_path, attribute = target.rsplit(".", 1)
+    import importlib
+
+    module = importlib.import_module(module_path)
+    real = getattr(module, attribute)
+
+    def _wrapped(path, *args, **kwargs):
+        if path.name == name:
+            path.unlink(missing_ok=True)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(module, attribute, _wrapped)
+
+
+def _legacy_note(vault, name):
+    """A note the repair pass rewrites, because it lacks the current fields."""
+    path = vault / name
+    path.write_text(
+        f"---\ntitle: {path.stem}\nstatus: To Read\n---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_cleanup_reports_a_note_removed_while_it_ran_and_carries_on(
+    monkeypatch, tmp_path
+):
+    # Given two notes due a repair, one of them removed as the pass reaches it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    gone = _legacy_note(vault, "Gone.md")
+    kept = _legacy_note(vault, "Kept.md")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _removed_before(monkeypatch, "libris.cli.ensure_frontmatter_fields", "Gone.md")
+
+    # When cleanup runs over the Shelf
+    result = runner.invoke(app, ["cleanup"])
+
+    # Then the vanished note is reported and skipped, not recreated, and the
+    # sweep still repairs the rest of the Shelf. One note moving mid-run ended
+    # the whole pass in a traceback (#128).
+    assert result.exit_code == 0, result.output
+    assert "Gone.md is gone" in result.output
+    assert not gone.exists()
+    assert "tags: Book" in kept.read_text(encoding="utf-8")
+
+
+def test_clean_reports_a_note_removed_before_it_was_written(monkeypatch, tmp_path):
+    # Given a note picked for cleaning, removed before the repair reaches it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    gone = _legacy_note(vault, "Gone.md")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_prompts(monkeypatch, "Gone.md", "Read")
+    _removed_before(monkeypatch, "libris.cli.ensure_frontmatter_fields", "Gone.md")
+
+    # When it is cleaned
+    result = runner.invoke(app, ["clean"])
+
+    # Then the command says so and stops, and nothing is recreated (#128)
+    assert result.exit_code == 1
+    assert "Gone.md is gone" in result.output
+    assert not gone.exists()
+
+
+def test_auto_enrichment_reports_a_note_removed_before_its_callout_is_added(
+    monkeypatch, tmp_path, capsys
+):
+    # Given a note enriched from Google Books, removed before the auto-enriched
+    # callout is appended to it
+    from libris import cli as cli_module
+    from libris.api import BookCandidate
+
+    path = tmp_path / "Dune.md"
+    path.write_text("---\ntitle: Dune\nisbn: null\n---\n\n## Notes\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search",
+        lambda self, query: [
+            BookCandidate(title="Dune", authors=["Frank Herbert"], isbn="9780441013593")
+        ],
+    )
+    real_enrich = cli_module.update_frontmatter_from_book
+
+    def _enriched_then_removed(file_path, book):
+        changed = real_enrich(file_path, book)
+        file_path.unlink()
+        return changed
+
+    monkeypatch.setattr(
+        "libris.cli.update_frontmatter_from_book", _enriched_then_removed
+    )
+
+    # When it is auto-enriched
+    enriched = cli_module._enrich_auto(path, [])
+
+    # Then the vanished note is reported, not recreated to take the callout, and
+    # not counted as enriched (#128)
+    assert enriched is False
+    assert "Dune.md is gone" in capsys.readouterr().out
+    assert not path.exists()
+
+
+def test_autoenrich_reports_a_note_removed_while_it_ran_and_carries_on(
+    monkeypatch, tmp_path
+):
+    # Given two notes due enrichment, one of them removed as it is reached
+    from libris.api import BookCandidate
+
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("Gone", "Kept"):
+        (vault / f"{name}.md").write_text(
+            f"---\ntitle: {name}\nisbn: null\n---\n\n## Notes\n", encoding="utf-8"
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search",
+        lambda self, query: [
+            BookCandidate(title="Gone" if "Gone" in query else "Kept", authors=["A"])
+        ],
+    )
+    _removed_before(monkeypatch, "libris.cli.update_frontmatter_from_book", "Gone.md")
+
+    # When autoenrich runs over the Shelf
+    result = runner.invoke(app, ["autoenrich"])
+
+    # Then the vanished note is reported and skipped, not recreated, and the run
+    # goes on to the rest of the Shelf (#128)
+    assert result.exit_code == 0, result.output
+    assert "Gone.md is gone" in result.output
+    assert not (vault / "Gone.md").exists()
+
+
+def test_migrate_reports_notes_it_could_not_write(monkeypatch, tmp_path):
+    # Given two notes due a migration, one removed after it was planned
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("Gone.md", "Kept.md"):
+        (vault / name).write_text(
+            "---\ntitle: A Book\nStatus: Read\n---\n\n## Notes\n", encoding="utf-8"
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _confirm(_message, **_kwargs):
+        class _Answer:
+            def ask(self):
+                return True
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.confirm", _confirm)
+
+    from libris import cli as cli_module
+
+    real_apply = cli_module.apply_migration
+
+    def _one_removed(plans):
+        (vault / "Gone.md").unlink()
+        return real_apply(plans)
+
+    monkeypatch.setattr("libris.cli.apply_migration", _one_removed)
+
+    # When the migration is applied
+    result = runner.invoke(app, ["migrate", "--apply"])
+
+    # Then it says one note could not be written, rather than counting a note it
+    # brought back from its plan (#128)
+    assert result.exit_code == 0, result.output
+    assert "Migrated 1 notes." in result.output
+    assert "1 could not be written" in result.output
+    assert not (vault / "Gone.md").exists()
+
+
+def test_merge_keeps_the_secondary_when_the_primary_is_removed_mid_merge(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, and the primary removed before the merged
+    # note is written
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_write = cli_module.write_merged_book
+
+    def _primary_removed(primary_path, merged_frontmatter, merged_body):
+        primary_path.unlink()
+        return real_write(primary_path, merged_frontmatter, merged_body)
+
+    monkeypatch.setattr("libris.cli.write_merged_book", _primary_removed)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then the secondary survives and the primary is not recreated. Written with
+    # `write_note`, the primary came back from memory and the secondary was
+    # deleted after it (#128).
+    assert result.exit_code == 0, result.output
+    assert "is gone" in result.output
+    assert len(list(vault.glob("*.md"))) == 1
+
+
+def test_interactive_enrichment_reports_a_note_removed_while_a_match_was_chosen(
+    monkeypatch, tmp_path, capsys
+):
+    # Given a note removed while the reader chose its match from Google Books
+    from libris import cli as cli_module
+    from libris.api import BookCandidate
+
+    path = tmp_path / "Dune.md"
+    path.write_text("---\ntitle: Dune\nisbn: null\n---\n\n## Notes\n", encoding="utf-8")
+    candidate = BookCandidate(
+        title="Dune", authors=["Frank Herbert"], isbn="9780441013593"
+    )
+
+    def _select(_message, choices=None, **_kwargs):
+        class _Answer:
+            def ask(self):
+                return choices[0]
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.select", _select)
+    _removed_before(monkeypatch, "libris.cli.update_frontmatter_from_book", "Dune.md")
+
+    # When the chosen match is applied
+    enriched = cli_module._enrich_interactive(path, results=[candidate])
+
+    # Then the vanished note is reported and not recreated, rather than the
+    # command ending in a traceback (#128)
+    assert enriched is False
+    assert "Dune.md is gone" in capsys.readouterr().out
+    assert not path.exists()
+
+
 def test_a_long_damaged_string_is_excerpted_around_what_was_lost():
     # Given a description callout of the length the real Shelf holds, damaged in
     # two places far apart

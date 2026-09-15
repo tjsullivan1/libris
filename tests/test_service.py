@@ -361,6 +361,34 @@ def test_a_decision_naming_a_vanished_note_is_reported(tmp_path):
     assert first.path.exists()
 
 
+def test_a_primary_removed_before_its_merge_is_written_keeps_the_secondary(
+    tmp_path, monkeypatch
+):
+    # Given a pair judged one Book, whose primary is removed between the merge
+    # being worked out and written
+    first, second = _pair(tmp_path)
+    removed = []
+    real = service.write_merged_book
+
+    def _removed_first(primary_path, merged_frontmatter, merged_body):
+        removed.append(primary_path)
+        primary_path.unlink()
+        return real(primary_path, merged_frontmatter, merged_body)
+
+    monkeypatch.setattr(service, "write_merged_book", _removed_first)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then the primary is not recreated, the secondary is not deleted, and the
+    # decision is reported as drifted. Written with `write_note`, the primary
+    # came back from memory and the secondary was deleted after it (#128).
+    assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
+    assert not removed[0].exists()
+    survivors = {first.path, second.path} - {removed[0]}
+    assert all(path.exists() for path in survivors)
+
+
 def test_a_decision_still_applies_after_one_note_was_merged_away(tmp_path):
     # Given a note that has since absorbed another, so its id is superseded
     first, second = _pair(tmp_path)

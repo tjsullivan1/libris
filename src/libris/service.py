@@ -1967,7 +1967,21 @@ def apply_decisions(
             )
             continue
 
-        write_merged_book(primary, merged_fm, merged_body)
+        try:
+            write_merged_book(primary, merged_fm, merged_body)
+        except FileNotFoundError:
+            # The primary moved or was removed after the merge was worked out.
+            # The write refuses rather than recreating it, and the secondary is
+            # kept - deleted after a recreated primary, it would have been the
+            # last copy of either note. The rest of the decisions still apply
+            # (#128).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {primary.name} is gone; nothing merged",
+                )
+            )
+            continue
         delete_secondary_file(secondary)
 
         # The Shelf just changed, so the index has to change with it: the

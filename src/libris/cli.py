@@ -31,9 +31,9 @@ from .markdown import (
     list_books,
     read_frontmatter,
     rename_book_file,
+    rewrite_note,
     split_frontmatter,
     update_frontmatter_from_book,
-    write_note,
 )
 from .matching import (
     best_match,
@@ -538,7 +538,15 @@ def clean(
         return
 
     selected_file = _note_on_the_shelf(vault_path, selected_file_name, books)
-    updated, fm = ensure_frontmatter_fields(selected_file)
+    try:
+        updated, fm = ensure_frontmatter_fields(selected_file)
+    except FileNotFoundError:
+        # Picked, then moved or removed before the repair reached it (#128).
+        typer.echo(
+            f"{selected_file_name} is gone - moved or removed before it was "
+            "cleaned. Nothing written."
+        )
+        raise typer.Exit(code=1) from None
     if updated:
         typer.echo(f"Cleaned: {selected_file_name}")
     else:
@@ -607,52 +615,66 @@ def cleanup(
 
         file_had_action = False
 
-        updated, fm = ensure_frontmatter_fields(book_file, dry_run=dry_run)
-        if updated:
-            updated_count += 1
-            file_had_action = True
-            typer.echo(f"\n  Updated: {book_file.name}", nl=False)
-
-        if rename:
-            result = rename_book_file(book_file, vault_root, frontmatter=fm)
-
-            # Offer to enrich when title or author is missing
-            if result.status in ("missing_title", "missing_author"):
-                enriched = False
-                if auto_enrich:
-                    typer.echo("")  # newline before enrich output
-                    enriched = _enrich_auto(book_file, unmatched_files)
-                else:
-                    typer.echo(
-                        f"\n  {book_file.name}: {result.status.replace('_', ' ')}"
-                    )
-                    import questionary
-
-                    if questionary.confirm(
-                        f"Enrich {book_file.name} from Google Books?",
-                        default=True,
-                    ).ask():
-                        enriched = _enrich_interactive(book_file)
-
-                if enriched:
-                    # Re-read updated frontmatter and retry rename
-                    _, fm = ensure_frontmatter_fields(book_file)
-                    result = rename_book_file(book_file, vault_root, frontmatter=fm)
-
+        try:
+            updated, fm = ensure_frontmatter_fields(book_file, dry_run=dry_run)
+            if updated:
+                updated_count += 1
                 file_had_action = True
+                typer.echo(f"\n  Updated: {book_file.name}", nl=False)
 
-            if result.status == "renamed":
-                renamed_count += 1
-                file_had_action = True
-                typer.echo(
-                    f"\n  Renamed: {book_file.name} → {result.new_path.name}", nl=False
-                )
-            elif result.status not in ("already_canonical",):
-                msg = _format_rename_skip(book_file.name, result)
-                if msg:
-                    skipped_count += 1
+            if rename:
+                result = rename_book_file(book_file, vault_root, frontmatter=fm)
+
+                # Offer to enrich when title or author is missing
+                if result.status in ("missing_title", "missing_author"):
+                    enriched = False
+                    if auto_enrich:
+                        typer.echo("")  # newline before enrich output
+                        enriched = _enrich_auto(book_file, unmatched_files)
+                    else:
+                        typer.echo(
+                            f"\n  {book_file.name}: {result.status.replace('_', ' ')}"
+                        )
+                        import questionary
+
+                        if questionary.confirm(
+                            f"Enrich {book_file.name} from Google Books?",
+                            default=True,
+                        ).ask():
+                            enriched = _enrich_interactive(book_file)
+
+                    if enriched:
+                        # Re-read updated frontmatter and retry rename
+                        _, fm = ensure_frontmatter_fields(book_file)
+                        result = rename_book_file(book_file, vault_root, frontmatter=fm)
+
                     file_had_action = True
-                    typer.echo(f"\n  {msg}", nl=False)
+
+                if result.status == "renamed":
+                    renamed_count += 1
+                    file_had_action = True
+                    typer.echo(
+                        f"\n  Renamed: {book_file.name} → {result.new_path.name}",
+                        nl=False,
+                    )
+                elif result.status not in ("already_canonical",):
+                    msg = _format_rename_skip(book_file.name, result)
+                    if msg:
+                        skipped_count += 1
+                        file_had_action = True
+                        typer.echo(f"\n  {msg}", nl=False)
+        except FileNotFoundError:
+            # Moved or removed while the sweep reached it - Obsidian renaming it,
+            # or a sync client. Reported and passed over, rather than written
+            # back into existence or ending the sweep for every other note
+            # (#128).
+            skipped_count += 1
+            file_had_action = True
+            typer.echo(
+                f"\n  {book_file.name} is gone - moved or removed while cleanup "
+                "ran. Skipped.",
+                nl=False,
+            )
 
         typer.echo("")  # final newline for this file
         if file_had_action:
@@ -713,13 +735,21 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
 
     first = results[0]
     if _titles_match(file_path.stem, first.title):
-        if update_frontmatter_from_book(file_path, first):
-            # Append a note to the body indicating this was an automatic match
-            _append_auto_enrich_note(file_path, first.title, query)
+        try:
+            if update_frontmatter_from_book(file_path, first):
+                # Append a note to the body indicating this was an automatic match
+                _append_auto_enrich_note(file_path, first.title, query)
+                typer.echo(
+                    f'Auto-enriched: {file_path.name} → "{first.title}" by {", ".join(first.authors)}'
+                )
+                return True
+        except FileNotFoundError:
+            # Moved or removed mid-enrichment. Not recreated to take the
+            # callout, and not counted as enriched (#128).
             typer.echo(
-                f'Auto-enriched: {file_path.name} → "{first.title}" by {", ".join(first.authors)}'
+                f"{file_path.name} is gone - moved or removed while it was "
+                "enriched. Skipped."
             )
-            return True
         return False
     else:
         unmatched_log.append(file_path.name)
@@ -766,7 +796,9 @@ def _append_auto_enrich_note(
         f'> Query: "{original_query}" → Matched: "{matched_title}"\n'
         f"> Please verify this is the correct book.\n"
     )
-    write_note(file_path, content.rstrip() + note + "\n")
+    # Rewritten, never created: the note was read above, and one removed since
+    # must not come back to take the callout (#128).
+    rewrite_note(file_path, content.rstrip() + note + "\n")
 
 
 def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
@@ -806,7 +838,16 @@ def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
 
     book = results[result_choices.index(selected_result)]
 
-    if update_frontmatter_from_book(file_path, book):
+    try:
+        changed = update_frontmatter_from_book(file_path, book)
+    except FileNotFoundError:
+        # Moved or removed while the reader chose a match (#128).
+        typer.echo(
+            f"{file_path.name} is gone - moved or removed while it was being "
+            "enriched. Nothing written."
+        )
+        return False
+    if changed:
         typer.echo(f"Enriched: {file_path.name}")
         return True
     else:
@@ -930,7 +971,19 @@ def autoenrich(
         )
         if len(results) == 1 or (confident and len(unique_titles) == 1):
             pick = _best_match(confident) if confident else results[0]
-            if update_frontmatter_from_book(book_file, pick):
+            try:
+                changed = update_frontmatter_from_book(book_file, pick)
+            except FileNotFoundError:
+                # Moved or removed while the run reached it. Reported and passed
+                # over, rather than recreated or ending the run (#128).
+                typer.echo(
+                    f" — {book_file.name} is gone - moved or removed while "
+                    "autoenrich ran. Skipped."
+                )
+                skipped += 1
+                action_count += 1
+                continue
+            if changed:
                 typer.echo(f' — auto-enriched → "{pick.title}"')
                 enriched_auto += 1
             else:
@@ -1116,9 +1169,15 @@ def _report_encoding_damage(damaged: list[EncodingDamage], verbose: bool) -> Non
     for name, count in sorted(where.items(), key=lambda kv: -kv[1]):
         typer.echo(f"  {count:5d}  {name}")
 
+    # Said as what the notes carry, not as what can be fetched with it. Measured
+    # against this Shelf, the volumes a note names account for 3 of 57 damaged
+    # strings, so "the correct spelling can be fetched" overstated the API by an
+    # order of magnitude - `libris repair` takes the spelling from the reader
+    # (#78).
     typer.echo(
-        f"\n{len(damaged) - len(unidentifiable)} of {len(damaged)} carry an "
-        "identifier the correct spelling can be fetched with."
+        f"\n{len(damaged) - len(unidentifiable)} of {len(damaged)} name a volume "
+        "or an ISBN, though a volume rarely holds the lost letter. "
+        "`libris repair` takes the spelling from you."
     )
     if unidentifiable:
         typer.echo(
@@ -1609,6 +1668,17 @@ def merge(
                     delete_secondary_file(secondary)
                     typer.echo("    Merged successfully")
                     total_merged += 1
+            except FileNotFoundError:
+                # A note of the pair moved or was removed mid-merge. The merged
+                # note is written before the secondary is deleted, so a primary
+                # that is gone refuses the write and the secondary is kept -
+                # rather than the primary coming back from memory and the
+                # secondary being deleted after it (#128).
+                typer.echo(
+                    f"    {primary.name} or {secondary.name} is gone - moved or "
+                    "removed mid-merge. Nothing merged; nothing deleted."
+                )
+                continue
             except Exception as e:
                 typer.echo(f"    Error: {e}")
                 continue
@@ -1834,6 +1904,14 @@ def migrate(
 
     written = apply_migration(plans)
     typer.echo(f"Migrated {written} notes.")
+    unwritten = len(changing) - written
+    if unwritten:
+        # Planned, then moved or removed before the migration reached them. Not
+        # recreated from their plans, and said, rather than left for the reader
+        # to find by counting (#128).
+        typer.echo(
+            f"{unwritten} could not be written: moved or removed while migrating."
+        )
 
 
 if __name__ == "__main__":

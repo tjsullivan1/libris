@@ -371,6 +371,95 @@ def test_update_frontmatter_from_book_keeps_the_body_indented(tmp_path):
     assert body == _INDENTED_BODY
 
 
+# --- a rewrite never recreates a note removed while it ran (#128) -----------
+
+
+def _removed_while_rendering(monkeypatch, path):
+    """Remove `path` when YAML is rendered - between a rewrite's read and write."""
+    import yaml
+
+    real_dump = yaml.dump
+
+    def _dump(*args, **kwargs):
+        path.unlink(missing_ok=True)
+        return real_dump(*args, **kwargs)
+
+    monkeypatch.setattr(yaml, "dump", _dump)
+
+
+def test_the_repair_pass_does_not_recreate_a_note_removed_while_it_ran(
+    tmp_path, monkeypatch
+):
+    # Given a note the repair pass will rewrite, removed after it is read -
+    # renamed in Obsidian, say, while `libris cleanup` works through the Shelf
+    from libris.markdown import ensure_frontmatter_fields
+
+    path = tmp_path / "legacy.md"
+    path.write_text("---\ntitle: Legacy\nstatus: To Read\n---\n\n## Notes\n")
+    _removed_while_rendering(monkeypatch, path)
+
+    # When the pass runs
+    # Then it says the note is gone rather than writing it back under its old
+    # name. `write_note` created a missing file, so the old note returned beside
+    # the renamed copy and the pass reported success (#128).
+    with pytest.raises(FileNotFoundError):
+        ensure_frontmatter_fields(path)
+    assert not path.exists()
+
+
+def test_enrichment_does_not_recreate_a_note_removed_while_it_ran(
+    tmp_path, monkeypatch
+):
+    # Given a note enrichment will fill, removed after it is read
+    from libris.markdown import update_frontmatter_from_book
+
+    path = tmp_path / "enrich.md"
+    path.write_text("---\ntitle: A Book\nisbn: null\n---\n\n## Notes\n")
+    _removed_while_rendering(monkeypatch, path)
+
+    # When it is enriched
+    # Then it is not recreated (#128)
+    with pytest.raises(FileNotFoundError):
+        update_frontmatter_from_book(
+            path, BookCandidate(title="A Book", authors=[], isbn="9780000000001")
+        )
+    assert not path.exists()
+
+
+def test_the_wikilink_sweep_skips_a_linking_note_removed_while_it_ran(
+    tmp_path, monkeypatch
+):
+    # Given two notes linking to a renamed one, the first removed between the
+    # sweep reading it and writing it back
+    from pathlib import Path as _Path
+
+    from libris.markdown import update_wikilinks_in_vault
+
+    gone = tmp_path / "Gone.md"
+    kept = tmp_path / "Kept.md"
+    for linking in (gone, kept):
+        linking.write_text("See [[Old Name]].\n", encoding="utf-8")
+
+    real_read = _Path.read_text
+
+    def _read_then_remove(self, *args, **kwargs):
+        text = real_read(self, *args, **kwargs)
+        if self.name == "Gone.md":
+            self.unlink()
+        return text
+
+    monkeypatch.setattr(_Path, "read_text", _read_then_remove)
+
+    # When the sweep runs
+    updated = update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
+
+    # Then the vanished note is skipped rather than recreated - it holds no link
+    # left to fix - and the sweep goes on to the rest of the vault (#128)
+    assert not gone.exists()
+    assert updated == 1
+    assert real_read(kept, encoding="utf-8") == "See [[New Name]].\n"
+
+
 def test_ensure_frontmatter_fields(tmp_path):
     file_path = tmp_path / "legacy_book.md"
     file_path.write_text("""---

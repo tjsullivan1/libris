@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from .markdown import BookNote, list_books, split_frontmatter, write_note
+from .markdown import BookNote, list_books, rewrite_note, split_frontmatter
 from .note_format import (
     FORMAT_VALUES,
     LEAKED_HEADINGS,
@@ -552,11 +552,16 @@ def apply_migration(plans: list[NoteMigration]) -> int:
         plans: Plans from `plan_migration`.
 
     Returns:
-        How many notes were rewritten.
+        How many notes were rewritten. A note removed after it was planned is
+        skipped and not counted: rewritten, never created from its plan, so it
+        does not come back under its old name (#128).
     """
     written = 0
     for plan in plans:
         if plan.changed:
-            write_note(plan.path, plan.migrated)
+            try:
+                rewrite_note(plan.path, plan.migrated)
+            except FileNotFoundError:
+                continue
             written += 1
     return written

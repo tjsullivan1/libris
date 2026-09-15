@@ -445,6 +445,31 @@ def test_frontmatter_that_is_not_a_mapping_is_reported(tmp_path):
 # --- restoring a missing leading zero on an ISBN (#116) ---------------------
 
 
+def test_a_migration_skips_a_note_removed_after_it_was_planned(tmp_path):
+    # Given a migration planned for two notes, one of them removed before the
+    # plans are applied
+    from libris.migrate import apply_migration
+
+    gone = tmp_path / "Gone.md"
+    kept = tmp_path / "Kept.md"
+    for path in (gone, kept):
+        path.write_text(
+            "---\ntitle: A Book\nStatus: Read\n---\n\n## Notes\n", encoding="utf-8"
+        )
+    plans = [plan_note_migration(gone), plan_note_migration(kept)]
+    assert all(plan.changed for plan in plans)
+    gone.unlink()
+
+    # When they are applied
+    written = apply_migration(plans)
+
+    # Then the removed note is not recreated from its plan, and only the note
+    # still there is counted. Written with `write_note`, the plan brought the
+    # note back under its old name (#128).
+    assert not gone.exists()
+    assert written == 1
+
+
 def _isbn_note(tmp_path, name, isbn_line):
     """A Book Note whose isbn line is written exactly as given."""
     return write_note(
