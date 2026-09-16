@@ -65,6 +65,18 @@ libris status
 ```
 Start typing to narrow the list — it matches anywhere in the filename, not just the start — then choose one of **To Read**, **Reading**, **Read**, **Not To Read**.
 
+Name the book and the status and it asks nothing, which is what lets a script or a shortcut reach it:
+
+```bash
+# By filename
+libris status "Dune - Frank Herbert.md" --set Read
+
+# By Libris ID, which survives a rename and a merge
+libris status --id 01M0WQEHRZ6KZK0D3BM7C2YXEM --set Reading
+```
+
+A status the Library does not define is refused before the Shelf is read, so a typo costs nothing. Naming a book both ways at once is refused rather than resolved: the two can name different books, and Libris will not guess which you meant.
+
 Marking a book **Reading** stamps `date_started`, and **Read** stamps `date_finished`, but only when the field is empty: re-marking a book you have already dated leaves your date alone. Anything Libris fills in for you is printed, so you can correct it while you still remember that you actually started it last Tuesday.
 
 ### 5. List Books
