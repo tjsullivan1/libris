@@ -682,6 +682,10 @@ def ensure_frontmatter_fields(
         A tuple of (updated, frontmatter_dict). The dict is the cleaned
         frontmatter data, whether or not it was written back, or None if the
         frontmatter could not be parsed.
+
+    Raises:
+        FileNotFoundError: If the note is gone when read, or removed before the
+            repair is written. It is never recreated (#128).
     """
     content = file_path.read_text(encoding="utf-8")
 
@@ -769,7 +773,10 @@ def ensure_frontmatter_fields(
         # The body goes back exactly as it was read - it carries its own leading
         # newlines, and stripping them was what cost an indented block its indent.
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
-        write_note(file_path, new_content)
+        # Rewritten, never created: a note removed since it was read above - moved
+        # in Obsidian while `cleanup` works through the Shelf - came back under
+        # its old name through `write_note` (#128).
+        rewrite_note(file_path, new_content)
 
     return updated, data
 
@@ -909,7 +916,19 @@ def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
 
 
 def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
-    """Fill null frontmatter fields from a candidate. Returns True if changed."""
+    """Fill null frontmatter fields from a candidate.
+
+    Args:
+        file_path: The Book Note to enrich.
+        book: The candidate whose values fill the note's empty fields.
+
+    Returns:
+        True when the note was changed.
+
+    Raises:
+        FileNotFoundError: If the note is gone when read, or removed before the
+            enrichment is written. It is never recreated (#128).
+    """
     content = file_path.read_text(encoding="utf-8")
     split = split_frontmatter(content)
     if split is None:
@@ -961,7 +980,8 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
         # As in ensure_frontmatter_fields: the body carries its own leading
         # newlines, and stripping them cost an indented block its indent (#99).
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
-        write_note(file_path, new_content)
+        # Rewritten, never created, as in ensure_frontmatter_fields (#128).
+        rewrite_note(file_path, new_content)
         return True
 
     return False
@@ -976,7 +996,21 @@ def compute_canonical_filename(file_path: Path) -> Optional[str]:
 def update_wikilinks_in_vault(
     vault_root: Path, old_stem: str, new_stem: str, exclude: Optional[Path] = None
 ) -> int:
-    """Update all wikilinks from old_stem to new_stem across the vault. Returns count of files updated."""
+    """Update all wikilinks from old_stem to new_stem across the vault.
+
+    A linking note removed while the sweep runs is skipped. It holds no link
+    left to fix, and one note moving must not stop the rest of the vault being
+    updated - nor be written back into existence (#128).
+
+    Args:
+        vault_root: The vault to sweep.
+        old_stem: The renamed note's old filename, without its extension.
+        new_stem: Its new filename, without its extension.
+        exclude: A note to leave unswept, usually the renamed note itself.
+
+    Returns:
+        How many notes had a link updated.
+    """
     updated_count = 0
     exclude_resolved = exclude.resolve() if exclude else None
     for root, dirnames, filenames in os.walk(vault_root):
@@ -989,14 +1023,17 @@ def update_wikilinks_in_vault(
             md_file = root_path / filename
             if exclude_resolved and md_file.resolve() == exclude_resolved:
                 continue
-            content = md_file.read_text(encoding="utf-8")
-            new_content = content.replace(f"[[{old_stem}]]", f"[[{new_stem}]]")
-            new_content = new_content.replace(f"[[{old_stem}|", f"[[{new_stem}|")
-            new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
-            new_content = new_content.replace(f"[[{old_stem}^", f"[[{new_stem}^")
-            if new_content != content:
-                write_note(md_file, new_content)
-                updated_count += 1
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                new_content = content.replace(f"[[{old_stem}]]", f"[[{new_stem}]]")
+                new_content = new_content.replace(f"[[{old_stem}|", f"[[{new_stem}|")
+                new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
+                new_content = new_content.replace(f"[[{old_stem}^", f"[[{new_stem}^")
+                if new_content != content:
+                    rewrite_note(md_file, new_content)
+                    updated_count += 1
+            except FileNotFoundError:
+                continue
     return updated_count
 
 

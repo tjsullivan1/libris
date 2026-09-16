@@ -497,6 +497,11 @@ class TestWriteMergedBook:
     def test_write_merged_frontmatter_and_body(self, tmp_path):
         """Should write merged frontmatter and body to file."""
         path = tmp_path / "book.md"
+        # The primary exists, as it always does in a merge: the merge keeps a
+        # note already on the Shelf. This test once wrote to a path with nothing
+        # there, which only passed because the write created missing files -
+        # the behaviour #128 removes.
+        path.write_text("---\ntitle: Old\n---\n\n## Notes\n", encoding="utf-8")
 
         merged_fm = {
             "title": "Book",
@@ -512,6 +517,21 @@ class TestWriteMergedBook:
         assert "title: Book" in content
         assert "isbn: '123'" in content or "isbn: 123" in content
         assert "My notes here" in content
+
+    def test_a_primary_removed_before_the_merge_is_written_is_not_recreated(
+        self, tmp_path
+    ):
+        # Given a primary note removed after the merge was worked out - renamed
+        # in Obsidian, or moved by a sync client
+        path = tmp_path / "gone.md"
+
+        # When the merged note is written
+        # Then it refuses rather than creating the primary again. The caller
+        # deletes the secondary only after this succeeds, so a recreated primary
+        # would have been the only copy left of either note (#128).
+        with pytest.raises(FileNotFoundError):
+            write_merged_book(path, {"title": "Book"}, "## Notes\n\nMine.\n")
+        assert not path.exists()
 
 
 class TestDeleteSecondaryFile:

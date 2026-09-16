@@ -60,13 +60,18 @@ installed editable. Use it. Killing the MCP server also works, at the cost of th
 applies: CI syncs cleanly, so a missing dependency surfaces there rather than being hidden.
 
 `libris` on your PATH is a `uv tool` snapshot, not the working tree. It goes stale silently:
-after landing a change, `uv tool install . --force` from the repo root refreshes it, and
-`uv cache clean libris` first if a newly added flag is still missing. Check the installed file
-rather than the install output, which says "Installed" either way:
+after landing a change, `uv tool install . --force --no-cache` from the repo root refreshes it.
+
+Keep `--no-cache`. Without it, a reinstall can report "Installed" and put back an older build
+from `uv`'s cache. The obvious cure, `uv cache clean libris`, waits on a cache lock that a
+running libris MCP server holds, and times out. That happened, and the install that followed
+still reported success. `--no-cache` builds in a temporary cache and never touches the locked
+one. Check the installed file rather than the install output, which says "Installed" either
+way:
 
 ```bash
-uv run libris --help            # the working tree, always current
-uv tool install . --force       # refresh the global command
+uv run libris --help                     # the working tree, always current
+uv tool install . --force --no-cache     # refresh the global command
 ```
 
 ## Workflow

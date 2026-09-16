@@ -14,9 +14,9 @@ import yaml
 from .markdown import (
     _normalize_author,
     read_frontmatter,
+    rewrite_note,
     split_frontmatter,
     tidy_author,
-    write_note,
 )
 from .note_format import (
     MULTI_VALUED_FIELDS,
@@ -337,12 +337,24 @@ def check_auto_merge(
 def write_merged_book(
     primary_path: Path, merged_frontmatter: Dict[str, Any], merged_body: str
 ) -> None:
-    """Write merged frontmatter and body to the primary file."""
+    """Write merged frontmatter and body to the primary file.
+
+    Args:
+        primary_path: The note the merge keeps.
+        merged_frontmatter: The merged frontmatter to write.
+        merged_body: The merged body to write.
+
+    Raises:
+        FileNotFoundError: If the primary is gone. It is never recreated: callers
+            delete the secondary only after this succeeds, and a primary written
+            back from memory would have left the secondary deleted after it
+            (#128).
+    """
     frontmatter_yaml = yaml.dump(
         merged_frontmatter, sort_keys=False, allow_unicode=True
     ).strip()
     content = f"---\n{frontmatter_yaml}\n---\n{merged_body.lstrip()}"
-    write_note(primary_path, content)
+    rewrite_note(primary_path, content)
 
 
 def delete_secondary_file(secondary_path: Path) -> None:
