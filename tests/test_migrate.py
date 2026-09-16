@@ -461,13 +461,40 @@ def test_a_migration_skips_a_note_removed_after_it_was_planned(tmp_path):
     gone.unlink()
 
     # When they are applied
-    written = apply_migration(plans)
+    outcome = apply_migration(plans)
 
     # Then the removed note is not recreated from its plan, and only the note
     # still there is counted. Written with `write_note`, the plan brought the
     # note back under its old name (#128).
     assert not gone.exists()
-    assert written == 1
+    assert outcome.written == 1
+    assert outcome.gone == 1
+
+
+def test_a_migration_refuses_a_note_edited_after_it_was_planned(tmp_path):
+    # Given a note planned for migration, then edited while the reader read the
+    # diffs - the migration waits for confirmation, so this window is minutes
+    from libris.migrate import apply_migration
+
+    path = tmp_path / "Edited.md"
+    path.write_text(
+        "---\ntitle: A Book\nStatus: Read\n---\n\n## Notes\n", encoding="utf-8"
+    )
+    plan = plan_note_migration(path)
+    assert plan.changed
+    path.write_text(
+        "---\ntitle: A Book\nStatus: Read\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+        encoding="utf-8",
+    )
+
+    # When the plan is applied
+    outcome = apply_migration([plan])
+
+    # Then the note is left as it stands and counted as changed since planning,
+    # rather than overwritten with content worked out before the edit (#132)
+    assert outcome.written == 0
+    assert outcome.changed == 1
+    assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
 
 
 def _isbn_note(tmp_path, name, isbn_line):

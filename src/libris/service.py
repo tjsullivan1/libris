@@ -25,6 +25,7 @@ from .markdown import (
     create_book_note,
     edit_note,
     list_books,
+    note_fingerprint,
     set_frontmatter_fields,
     split_frontmatter,
     unterminated_frontmatter,
@@ -1948,6 +1949,10 @@ def apply_decisions(
             primary = get_primary_book(first.path, second.path)
             secondary = second.path if primary == first.path else first.path
 
+            # Taken before the merge reads the pair, so the write can tell that
+            # the primary is still the note the merge was worked out from (#132).
+            primary_fingerprint = note_fingerprint(primary)
+
             merged_fm, merged_body, conflicts = merge_two_books(
                 primary, secondary, allow_conflicts=allow_conflicts
             )
@@ -1982,7 +1987,20 @@ def apply_decisions(
             continue
 
         try:
-            write_merged_book(primary, merged_fm, merged_body)
+            write_merged_book(primary, merged_fm, merged_body, primary_fingerprint)
+        except NoteChanged:
+            # The primary was edited after the merge read it. The merged text
+            # describes a note that no longer says that, so nothing is written
+            # and the secondary is kept: applying it would have traded the
+            # reader's edit for a deletion (#132).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {primary.name} changed since it was read; "
+                    "nothing merged",
+                )
+            )
+            continue
         except FileNotFoundError:
             # The primary moved or was removed after the merge was worked out.
             # The write refuses rather than recreating it, and the secondary is
