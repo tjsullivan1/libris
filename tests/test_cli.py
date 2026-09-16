@@ -1382,6 +1382,29 @@ def test_repair_rename_leaves_a_note_whose_frontmatter_is_still_damaged(
     assert not any("�" not in p.name for p in vault.glob("*.md"))
 
 
+def test_repair_rename_says_when_the_frontmatter_cannot_be_read(monkeypatch, tmp_path):
+    # Given a note whose filename lost a character and whose frontmatter will not
+    # parse, so nothing can say what the file should be called
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "Jane Eyre - Charlotte Bront�.md"
+    note.write_text("---\ntitle: [unclosed\n---\n\n## Notes\n", encoding="utf-8")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _confirm_with(monkeypatch, True)
+
+    # When the repair is asked to rename
+    result = runner.invoke(app, ["repair", "--rename"])
+
+    # Then it says the frontmatter cannot be read, rather than that the note has
+    # no title or author. The two want different things from the reader - one a
+    # note repaired by hand, the other a title typed into it - and the lookup
+    # answers None for both (#135 review).
+    assert result.exit_code == 0, result.output
+    assert note.exists()
+    assert "invalid or missing frontmatter" in result.output
+    assert "no title or author" not in result.output
+
+
 def test_repair_rename_reports_a_collision_and_renames_nothing(monkeypatch, tmp_path):
     # Given a damaged filename whose canonical name is already taken by another
     # note - which is the Calendar of Wisdom pair on the real Shelf

@@ -25,7 +25,6 @@ from .markdown import (
     FrontmatterUnreadable,
     NoteChanged,
     RenameResult,
-    compute_canonical_filename,
     create_book_note,
     ensure_frontmatter_fields,
     find_duplicate_candidates,
@@ -1468,7 +1467,7 @@ def _rename_damaged_filenames(damaged: list[EncodingDamage], vault_path: Path) -
         typer.echo(f"\n{path.name}")
 
         try:
-            canonical = compute_canonical_filename(path)
+            note = BookNote.read(path)
         except FileNotFoundError:
             # Moved or removed between the report and here, as any note may be
             # while a command works through the Shelf (#128).
@@ -1476,6 +1475,21 @@ def _rename_damaged_filenames(damaged: list[EncodingDamage], vault_path: Path) -
             gone += 1
             continue
 
+        if note is None:
+            # Read through `BookNote` rather than `compute_canonical_filename`,
+            # which answers None both for a note nothing can parse and for one
+            # that simply has no title. Told apart because what the reader does
+            # next differs: repair the frontmatter by hand, or put a title in it.
+            # `repair` already draws this distinction when it decides what it can
+            # write to, and this branch dropped it (#135 review).
+            typer.echo(
+                "  has invalid or missing frontmatter, so nothing here can say "
+                "what it should be called. Left alone."
+            )
+            left += 1
+            continue
+
+        canonical = note.canonical_filename
         if canonical is None:
             typer.echo("  has no title or author to take a name from. Left alone.")
             left += 1
