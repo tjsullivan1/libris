@@ -3165,6 +3165,45 @@ def test_a_file_with_no_fence_at_all_is_still_all_body(tmp_path):
     assert list(damaged["loose.md"].fields) == ["body"]
 
 
+def test_a_decision_drifts_when_a_path_carries_the_other_named_id(
+    tmp_path, monkeypatch
+):
+    # Given a pair whose second note is replaced at its path by a note carrying
+    # the first note's Libris ID. Both ids are ones the decision names, so
+    # asking only whether a path holds one of the two is satisfied - and the
+    # note that actually answers for the second id is no longer in the pair.
+    first, second = _pair(tmp_path)
+    real = service.get_primary_book
+
+    def _replaced_after_the_index(path1, path2):
+        primary = real(path1, path2)
+        # The title is quoted: these titles carry a colon, and written bare the
+        # note is not valid YAML. Unquoted, it was unreadable rather than a
+        # different book, so the decision drifted because nothing could be read
+        # from it and the test passed without ever exercising the ids.
+        second.path.write_text(
+            f'---\ntitle: "{BookNote.read(primary).title}"\n'
+            f"libris_id: {first.libris_id}\n---\n\n## Notes\n\nA different book.\n",
+            encoding="utf-8",
+        )
+        return primary
+
+    monkeypatch.setattr(service, "get_primary_book", _replaced_after_the_index)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then it drifts and both notes are still there. Each path has to carry the
+    # id it resolved for: checked against the two ids as a set, this pair passed
+    # and deleted a book the decision never named (#133 fourth review).
+    assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
+    assert len(list(tmp_path.glob("*.md"))) == 2
+    assert any(
+        "A different book." in path.read_text(encoding="utf-8")
+        for path in tmp_path.glob("*.md")
+    )
+
+
 def test_a_decision_whose_note_was_replaced_by_another_book_drifts(
     tmp_path, monkeypatch
 ):
@@ -3178,8 +3217,11 @@ def test_a_decision_whose_note_was_replaced_by_another_book_drifts(
     def _replaced_after_the_index(path1, path2):
         primary = real(path1, path2)
         secondary = path2 if primary == path1 else path1
+        # Quoted, so this is a readable note that is a different book - not an
+        # unreadable one, which drifts for its own reason and would let this
+        # test pass without the identity ever being compared.
         secondary.write_text(
-            f"---\ntitle: {BookNote.read(primary).title}\n"
+            f'---\ntitle: "{BookNote.read(primary).title}"\n'
             "libris_id: lb-2099-9999\n---\n\n## Notes\n\nAnother book entirely.\n",
             encoding="utf-8",
         )

@@ -1965,16 +1965,24 @@ def apply_decisions(
             # notice, and what follows merges one note into another and deletes
             # it (#133 third review). Superseded ids count, because a note that
             # absorbed another answers for it too (ADR 0014).
-            named = {shorter.strip(), longer.strip()}
+            # Each path against the id it resolved for, rather than against both
+            # of them together. A note replaced at one path by one carrying the
+            # *other* named id satisfies a check that asks only whether a path
+            # holds one of the two, and the pair then merges and deletes a book
+            # the decision never named while the note it did name sits elsewhere,
+            # untouched (#133 fourth review).
             stale = None
-            for path in (primary, secondary):
+            for path, wanted in (
+                (first.path, shorter.strip()),
+                (second.path, longer.strip()),
+            ):
                 note_now = BookNote.read(path)
                 identities = (
                     {note_now.libris_id} | set(note_now.superseded_ids)
                     if note_now is not None
                     else set()
                 )
-                if not named & identities:
+                if wanted not in identities:
                     stale = path
                     break
             if stale is not None:
