@@ -29,6 +29,7 @@ from .markdown import (
     set_frontmatter_fields,
     split_frontmatter,
     unterminated_frontmatter,
+    verify_note_unchanged,
 )
 from .matching import best_match, normalize_for_match, titles_match
 from .merge import (
@@ -1950,8 +1951,11 @@ def apply_decisions(
             secondary = second.path if primary == first.path else first.path
 
             # Taken before the merge reads the pair, so the write can tell that
-            # the primary is still the note the merge was worked out from (#132).
+            # the primary is still the note the merge was worked out from (#132),
+            # and the deletion can tell the same about the secondary - which it
+            # destroys rather than overwrites (#133 review).
             primary_fingerprint = note_fingerprint(primary)
+            secondary_fingerprint = note_fingerprint(secondary)
 
             merged_fm, merged_body, conflicts = merge_two_books(
                 primary, secondary, allow_conflicts=allow_conflicts
@@ -1987,6 +1991,27 @@ def apply_decisions(
             continue
 
         try:
+            verify_note_unchanged(secondary, secondary_fingerprint)
+        except NoteChanged:
+            # Checked before the write, so the pair is left exactly as it stands.
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {secondary.name} changed since it was read; "
+                    "nothing merged",
+                )
+            )
+            continue
+        except FileNotFoundError:
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {secondary.name} is gone; nothing merged",
+                )
+            )
+            continue
+
+        try:
             write_merged_book(primary, merged_fm, merged_body, primary_fingerprint)
         except NoteChanged:
             # The primary was edited after the merge read it. The merged text
@@ -2016,7 +2041,15 @@ def apply_decisions(
             continue
         notes: list[str] = []
         try:
-            delete_secondary_file(secondary)
+            delete_secondary_file(secondary, secondary_fingerprint)
+        except NoteChanged:
+            # Edited between the check above and this instant. The merge is
+            # written, so it happened, but the secondary holds writing the merged
+            # note never saw and is kept rather than deleted (#133 review).
+            notes.append(
+                f"{secondary.name} changed just before it was deleted, so it was "
+                "kept; its newer writing is not in the merged note"
+            )
         except FileNotFoundError:
             # The merged note is written, so the merge is done - but a missing path
             # cannot tell a deleted secondary from a moved one, and a moved copy is

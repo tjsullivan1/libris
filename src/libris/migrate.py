@@ -231,7 +231,16 @@ def plan_note_migration(path: Path) -> NoteMigration:
     # leading newlines go here. `lstrip("\n")` rather than `lstrip()`, which
     # would take an indented first line's indentation with them (#99).
     frontmatter_text, body = split[0], split[1].lstrip("\n")
-    note = BookNote.read(path)
+    # Parsed from the text already read, rather than by reading the file again.
+    # A second read can land on a newer note, and the plan then paired this body
+    # and this fingerprint with that note's frontmatter - a diff describing a
+    # version that never existed, and a write refused later for a fingerprint
+    # that was never going to match (#133 review).
+    try:
+        parsed = parse_frontmatter_yaml(frontmatter_text)
+    except yaml.YAMLError:
+        parsed = None
+    note = BookNote(path=path, frontmatter=parsed) if isinstance(parsed, dict) else None
     if note is None:
         return NoteMigration(
             path=path,

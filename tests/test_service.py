@@ -449,9 +449,9 @@ def test_a_merge_whose_secondary_vanished_before_deletion_is_still_merged(
     first, second = _pair(tmp_path)
     real = service.delete_secondary_file
 
-    def _already_gone(secondary_path):
+    def _already_gone(secondary_path, *args):
         secondary_path.unlink()
-        return real(secondary_path)
+        return real(secondary_path, *args)
 
     monkeypatch.setattr(service, "delete_secondary_file", _already_gone)
 
@@ -473,11 +473,11 @@ def test_a_merge_whose_secondary_was_moved_says_it_was_not_deleted(
     first, second = _pair(tmp_path)
     real = service.delete_secondary_file
 
-    def _moved(secondary_path):
+    def _moved(secondary_path, *args):
         secondary_path.rename(
             secondary_path.with_name(f"{secondary_path.stem} moved.md")
         )
-        return real(secondary_path)
+        return real(secondary_path, *args)
 
     monkeypatch.setattr(service, "delete_secondary_file", _moved)
 
@@ -500,8 +500,8 @@ def test_a_merged_note_removed_before_the_index_is_refreshed_records_the_merge(
     first, second = _pair(tmp_path)
     real = service.delete_secondary_file
 
-    def _then_merged_note_gone(secondary_path):
-        real(secondary_path)
+    def _then_merged_note_gone(secondary_path, *args):
+        real(secondary_path, *args)
         for remaining in tmp_path.glob("*.md"):
             remaining.unlink()
 
@@ -3163,6 +3163,76 @@ def test_a_file_with_no_fence_at_all_is_still_all_body(tmp_path):
     # Then it is body, not frontmatter. Only a file that opens a fence gets the
     # benefit of the doubt about what its author meant.
     assert list(damaged["loose.md"].fields) == ["body"]
+
+
+def test_a_secondary_edited_after_the_check_and_before_the_delete_is_kept(
+    tmp_path, monkeypatch
+):
+    # Given a pair judged one Book, whose secondary is edited after it was
+    # checked and after the merged note was written - the last instant before
+    # the deletion, which no check can close
+    first, second = _pair(tmp_path)
+    real = service.write_merged_book
+
+    def _edit_secondary_after_writing(primary_path, *args, **kwargs):
+        result = real(primary_path, *args, **kwargs)
+        secondary_path = next(
+            path for path in (first.path, second.path) if path != primary_path
+        )
+        secondary_path.write_text(
+            "---\ntitle: The Brass Verdict\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(service, "write_merged_book", _edit_secondary_after_writing)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then the merge counts as done - it was written - but the secondary is kept
+    # rather than deleted, because it now holds writing the merged note never
+    # saw. The deletion is the last irreversible act, so it is checked again
+    # here and not only before the write (#133 review).
+    assert [o.status for o in outcomes] == [DecisionStatus.MERGED]
+    assert "kept" in outcomes[0].detail
+    assert len(list(tmp_path.glob("*.md"))) == 2
+    assert any(
+        "Typed in Obsidian." in path.read_text(encoding="utf-8")
+        for path in tmp_path.glob("*.md")
+    )
+
+
+def test_a_secondary_edited_before_its_merge_is_written_is_not_deleted(
+    tmp_path, monkeypatch
+):
+    # Given a pair judged one Book, whose secondary - the note the merge deletes
+    # - is edited between the merge being worked out and written
+    first, second = _pair(tmp_path)
+    real = service.merge_two_books
+
+    def _edited_after_reading(primary_path, secondary_path, **kwargs):
+        merged = real(primary_path, secondary_path, **kwargs)
+        secondary_path.write_text(
+            "---\ntitle: The Brass Verdict\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return merged
+
+    monkeypatch.setattr(service, "merge_two_books", _edited_after_reading)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then nothing is merged and the secondary is not deleted. Its edit is not in
+    # the merged text, so deleting it would have destroyed the only copy of it
+    # (#133 review).
+    assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
+    assert len(list(tmp_path.glob("*.md"))) == 2
+    assert any(
+        "Typed in Obsidian." in path.read_text(encoding="utf-8")
+        for path in tmp_path.glob("*.md")
+    )
 
 
 def test_a_primary_edited_before_its_merge_is_written_keeps_both_notes(

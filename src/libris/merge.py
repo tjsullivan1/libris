@@ -17,6 +17,7 @@ from .markdown import (
     rewrite_note,
     split_frontmatter,
     tidy_author,
+    verify_note_unchanged,
 )
 from .note_format import (
     MULTI_VALUED_FIELDS,
@@ -367,8 +368,26 @@ def write_merged_book(
     rewrite_note(primary_path, content, expected_sha256)
 
 
-def delete_secondary_file(secondary_path: Path) -> None:
-    """Delete the secondary (merged-away) file."""
+def delete_secondary_file(
+    secondary_path: Path, expected_sha256: Optional[str] = None
+) -> None:
+    """Delete the secondary (merged-away) file.
+
+    Args:
+        secondary_path: The note the merge deletes.
+        expected_sha256: The SHA-256 its bytes had when the merge read it, or
+            None to delete without checking. The merged note carries what the
+            secondary said when it was read; if it says something else now, that
+            newer writing is in no other file, and deleting it destroys it
+            (#133 review).
+
+    Raises:
+        FileNotFoundError: If the secondary is not there.
+        NoteChanged: If `expected_sha256` is given and the secondary no longer
+            matches it. Nothing is deleted.
+    """
+    if expected_sha256 is not None:
+        verify_note_unchanged(secondary_path, expected_sha256)
     secondary_path.unlink()
 
 

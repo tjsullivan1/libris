@@ -547,6 +547,28 @@ class TestDeleteSecondaryFile:
 
         assert not path.exists()
 
+    def test_a_secondary_edited_since_the_merge_read_it_is_not_deleted(self, tmp_path):
+        # Given a secondary edited after the merge read it, so the merged note
+        # carries what it said before that edit
+        from libris.markdown import NoteChanged, note_fingerprint
+
+        path = tmp_path / "book.md"
+        path.write_text("---\ntitle: Book\n---\n\n## Notes\n", encoding="utf-8")
+        fingerprint = note_fingerprint(path)
+        path.write_text(
+            "---\ntitle: Book\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+
+        # When the merge deletes it
+        # Then it refuses, and the writing survives. Deleting a note is not a
+        # write that can be taken back: this edit is in no other file, and the
+        # merged note never saw it (#133 review).
+        with pytest.raises(NoteChanged):
+            delete_secondary_file(path, fingerprint)
+        assert path.exists()
+        assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
+
 
 class TestMergeEdgeCases:
     """Edge case tests for merge functionality."""

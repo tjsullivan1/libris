@@ -1613,9 +1613,9 @@ def test_merge_counts_a_merge_whose_secondary_vanished_after_it_was_written(
 
     real_delete = cli_module.delete_secondary_file
 
-    def _already_gone(secondary_path):
+    def _already_gone(secondary_path, *args):
         secondary_path.unlink()
-        return real_delete(secondary_path)
+        return real_delete(secondary_path, *args)
 
     monkeypatch.setattr("libris.cli.delete_secondary_file", _already_gone)
 
@@ -1788,11 +1788,11 @@ def test_merge_says_a_moved_secondary_was_not_deleted(monkeypatch, tmp_path):
 
     real_delete = cli_module.delete_secondary_file
 
-    def _moved(secondary_path):
+    def _moved(secondary_path, *args):
         secondary_path.rename(
             secondary_path.with_name(f"{secondary_path.stem} moved.md")
         )
-        return real_delete(secondary_path)
+        return real_delete(secondary_path, *args)
 
     monkeypatch.setattr("libris.cli.delete_secondary_file", _moved)
 
@@ -2487,6 +2487,98 @@ def test_cleanup_reports_a_note_edited_while_it_ran_and_carries_on(
     assert "libris_id" in kept.read_text(encoding="utf-8")
 
 
+def test_merge_keeps_a_secondary_edited_between_the_check_and_the_delete(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, the secondary edited after it was checked and
+    # after the merged note was written - the last instant before the deletion
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_write = cli_module.write_merged_book
+
+    def _edit_secondary_after_writing(primary_path, *args, **kwargs):
+        result = real_write(primary_path, *args, **kwargs)
+        secondary_path = next(
+            path for path in vault.glob("*.md") if path != primary_path
+        )
+        secondary_path.write_text(
+            "---\ntitle: Dune\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr("libris.cli.write_merged_book", _edit_secondary_after_writing)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then the merge counts as done, and the secondary is kept rather than
+    # deleted: it holds writing the merged note never saw. Checked only before
+    # the write, this instant deleted it (#133 review).
+    assert result.exit_code == 0, result.output
+    assert "was kept" in result.output
+    assert len(list(vault.glob("*.md"))) == 2
+    assert any(
+        "Typed in Obsidian." in path.read_text(encoding="utf-8")
+        for path in vault.glob("*.md")
+    )
+
+
+def test_merge_keeps_both_notes_when_the_secondary_is_edited_mid_merge(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, the secondary edited after the merge read it
+    # - the note the merge deletes, not the one it keeps
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_check = cli_module.check_auto_merge
+
+    def _edited_after_reading(primary, secondary):
+        result = real_check(primary, secondary)
+        secondary.write_text(
+            "---\ntitle: Dune\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr("libris.cli.check_auto_merge", _edited_after_reading)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then the secondary is not deleted and the edit survives. The merged text
+    # was worked out from the secondary's older bytes, so deleting it would have
+    # destroyed the only copy of that edit - worse than overwriting the primary,
+    # which #132 fixed while leaving this open (#133 review).
+    assert result.exit_code == 0, result.output
+    assert "changed" in result.output
+    assert len(list(vault.glob("*.md"))) == 2
+    assert any(
+        "Typed in Obsidian." in path.read_text(encoding="utf-8")
+        for path in vault.glob("*.md")
+    )
+
+
 def test_the_auto_enrich_callout_refuses_a_note_edited_while_it_was_written(
     monkeypatch, tmp_path
 ):
@@ -2515,6 +2607,49 @@ def test_the_auto_enrich_callout_refuses_a_note_edited_while_it_was_written(
     # written since (#132).
     with pytest.raises(NoteChanged):
         cli_module._append_auto_enrich_note(path, "Dune", "dune")
+    assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
+
+
+def test_auto_enrichment_counts_a_book_whose_callout_was_refused_as_enriched(
+    monkeypatch, tmp_path
+):
+    # Given a note edited after its enrichment was written but before the review
+    # callout could be added - auto-enrichment writes twice
+    from libris import cli as cli_module
+    from libris.api import BookCandidate
+
+    path = tmp_path / "Dune.md"
+    path.write_text(
+        "---\ntitle: Dune\nisbn: null\ngoogle_books_id: null\n---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search",
+        lambda self, q: [
+            BookCandidate(title="Dune", authors=["Frank Herbert"], isbn="9780441013593")
+        ],
+    )
+    real = cli_module.parse_frontmatter_yaml
+
+    def _edited_meanwhile(text):
+        path.write_text(
+            "---\ntitle: Dune\nisbn: '9780441013593'\n---\n\n## Notes\n"
+            "\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return real(text)
+
+    monkeypatch.setattr(cli_module, "parse_frontmatter_yaml", _edited_meanwhile)
+    unmatched: list[str] = []
+
+    # When the book is auto-enriched
+    enriched = cli_module._enrich_auto(path, unmatched)
+
+    # Then it counts as enriched, because it was: the enrichment landed and only
+    # the callout was refused. Counted as not enriched, a rerun would pass the
+    # book over - its fields are filled now - so it would never be tagged for
+    # review, and the summary would call an enriched book untouched (#133 review).
+    assert enriched is True
     assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
 
 

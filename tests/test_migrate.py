@@ -471,6 +471,41 @@ def test_a_migration_skips_a_note_removed_after_it_was_planned(tmp_path):
     assert outcome.gone == 1
 
 
+def test_a_plan_is_worked_out_from_one_version_of_a_note(tmp_path, monkeypatch):
+    # Given a note edited between the two reads the planner used to make: the
+    # text it hashes, and the frontmatter it parsed by reading the file again
+    from pathlib import Path as _Path
+
+    path = tmp_path / "Two Reads.md"
+    path.write_text(
+        "---\ntitle: Old Title\nStatus: Read\n---\n\n## Notes\n", encoding="utf-8"
+    )
+    real_read_bytes = _Path.read_bytes
+    done: list[str] = []
+
+    def _edited_after_the_first_read(self, *args, **kwargs):
+        raw = real_read_bytes(self, *args, **kwargs)
+        if self.name == "Two Reads.md" and not done:
+            done.append(self.name)
+            self.write_text(
+                "---\ntitle: New Title\nStatus: Read\n---\n\n## Notes\n",
+                encoding="utf-8",
+            )
+        return raw
+
+    monkeypatch.setattr(_Path, "read_bytes", _edited_after_the_first_read)
+
+    # When the note is planned
+    plan = plan_note_migration(path)
+
+    # Then the plan describes one version of the note throughout. Built from a
+    # second read, it paired the old body and fingerprint with newer
+    # frontmatter, and the diff shown to a reader described a note that never
+    # existed (#133 review).
+    assert "Old Title" in plan.migrated
+    assert "New Title" not in plan.migrated
+
+
 def test_a_migration_refuses_a_note_edited_after_it_was_planned(tmp_path):
     # Given a note planned for migration, then edited while the reader read the
     # diffs - the migration waits for confirmation, so this window is minutes

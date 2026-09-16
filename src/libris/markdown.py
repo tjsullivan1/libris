@@ -416,6 +416,27 @@ def read_note_with_fingerprint(path: Path) -> tuple[str, str]:
     return content, hashlib.sha256(raw).hexdigest()
 
 
+def verify_note_unchanged(path: Path, expected_sha256: str) -> None:
+    """Refuse to go on if a note is no longer the one that was read.
+
+    For an act that destroys a note rather than writing one. `rewrite_note`
+    checks the note it writes, but a merge also deletes the note it merged away,
+    and a deletion writes nothing for that check to guard. A secondary edited
+    after the merge read it holds writing the merged note never saw, so deleting
+    it destroys the only copy of that writing (#133 review).
+
+    Args:
+        path: The Book Note to check.
+        expected_sha256: The SHA-256 its bytes had when it was read.
+
+    Raises:
+        FileNotFoundError: If the note is not there.
+        NoteChanged: If its bytes no longer match.
+    """
+    if note_fingerprint(path) != expected_sha256:
+        raise NoteChanged(f"{path.name} has changed since it was read.")
+
+
 def _dominant_newline(raw: bytes) -> str:
     """The line ending most of a note's lines use, or the platform's if none."""
     crlf = raw.count(b"\r\n")

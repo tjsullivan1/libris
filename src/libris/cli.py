@@ -37,6 +37,7 @@ from .markdown import (
     rewrite_note,
     split_frontmatter,
     update_frontmatter_from_book,
+    verify_note_unchanged,
 )
 from .matching import (
     best_match,
@@ -784,8 +785,18 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
         # working on. Caught here and returned as False, it looked like a book
         # with no match to every caller (#128, #131 second review).
         if update_frontmatter_from_book(file_path, first):
-            # Append a note to the body indicating this was an automatic match
-            _append_auto_enrich_note(file_path, first.title, query)
+            # The enrichment is written by here. The callout is a second write,
+            # so a note edited between the two keeps the enrichment and loses the
+            # callout. Said as exactly that: reported as a book that was not
+            # enriched, a rerun would pass it over - its fields are filled now -
+            # and it would never be tagged for review (#133 review).
+            try:
+                _append_auto_enrich_note(file_path, first.title, query)
+            except NoteChanged:
+                typer.echo(
+                    f"{file_path.name} changed before the review callout could be "
+                    "added, so it is enriched but not tagged for review."
+                )
             typer.echo(
                 f'Auto-enriched: {file_path.name} → "{first.title}" by {", ".join(first.authors)}'
             )
@@ -1726,7 +1737,11 @@ def merge(
                 # Taken before the merge reads the pair, and per secondary: the
                 # primary is rewritten by each merge in turn, so one fingerprint
                 # for the group would refuse every merge after the first (#132).
+                # The secondary is fingerprinted too - it is deleted at the end
+                # of this, and a deletion destroys an edit rather than
+                # overwriting it (#133 review).
                 primary_fingerprint = note_fingerprint(primary)
+                secondary_fingerprint = note_fingerprint(secondary)
 
                 if auto:
                     can_merge, reason, merge_result = check_auto_merge(
@@ -1738,7 +1753,12 @@ def merge(
 
                     merged_fm, merged_body, _ = merge_result
                     if _write_merge(
-                        primary, secondary, merged_fm, merged_body, primary_fingerprint
+                        primary,
+                        secondary,
+                        merged_fm,
+                        merged_body,
+                        primary_fingerprint,
+                        secondary_fingerprint,
                     ):
                         typer.echo("    Auto-merged successfully")
                         total_merged += 1
@@ -1774,7 +1794,12 @@ def merge(
                             continue
 
                     if _write_merge(
-                        primary, secondary, merged_fm, merged_body, primary_fingerprint
+                        primary,
+                        secondary,
+                        merged_fm,
+                        merged_body,
+                        primary_fingerprint,
+                        secondary_fingerprint,
                     ):
                         typer.echo("    Merged successfully")
                         total_merged += 1
@@ -1802,6 +1827,7 @@ def _write_merge(
     merged_fm: dict,
     merged_body: str,
     expected_sha256: str | None = None,
+    secondary_sha256: str | None = None,
 ) -> bool:
     """Write a merged note, then delete its secondary, reporting a note gone.
 
@@ -1818,6 +1844,10 @@ def _write_merge(
         expected_sha256: The primary's fingerprint when the merge read it. A
             primary edited since - the reader answers a conflict prompt in that
             gap - is left alone and its secondary kept (#132).
+        secondary_sha256: The secondary's fingerprint when the merge read it.
+            Checked before anything is written, so a secondary edited in that
+            same gap ends the merge rather than being deleted with writing the
+            merged note never saw (#133 review).
 
     Returns:
         True when the merged note was written, including when the secondary was
@@ -1825,6 +1855,17 @@ def _write_merge(
         not deleted, since it may have been moved. False when the primary was
         gone, so nothing was written and nothing deleted.
     """
+    if secondary_sha256 is not None:
+        try:
+            verify_note_unchanged(secondary, secondary_sha256)
+        except NoteChanged:
+            # Checked before the write, so this ends the merge with both notes as
+            # they stand, rather than after the primary has been rewritten.
+            typer.echo(
+                f"    {secondary.name} changed while the merge was being decided. "
+                "Nothing merged; nothing deleted."
+            )
+            return False
     try:
         write_merged_book(primary, merged_fm, merged_body, expected_sha256)
     except FileNotFoundError:
@@ -1845,7 +1886,16 @@ def _write_merge(
         )
         return False
     try:
-        delete_secondary_file(secondary)
+        delete_secondary_file(secondary, secondary_sha256)
+    except NoteChanged:
+        # Edited between the check above and this instant. The merged note is
+        # written, so the merge happened, but the secondary now holds writing the
+        # merge never saw: it is kept rather than deleted (#133 review).
+        typer.echo(
+            f"    Merged into {primary.name}, but {secondary.name} changed just "
+            "before it was deleted, so it was kept. Its newer writing is not in "
+            "the merged note - `libris doctor` will show the pair."
+        )
     except FileNotFoundError:
         # The merged note is written, so this merge is done - but a missing path
         # cannot tell a deleted secondary from a moved one. A moved copy is still
