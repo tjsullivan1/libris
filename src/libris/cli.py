@@ -260,7 +260,7 @@ def status(
     to: str | None = typer.Option(
         None, "--set", "-s", help="The status to set, instead of being asked for it"
     ),
-):
+) -> None:
     """Update the status of a book in your vault.
 
     Asks which book and which status when neither is named. Name the book - by
