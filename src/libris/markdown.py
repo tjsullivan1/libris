@@ -374,6 +374,48 @@ def note_newline(path: Path) -> str:
     return _dominant_newline(raw)
 
 
+def note_fingerprint(path: Path) -> str:
+    """The SHA-256 of a Book Note's bytes as they stand on disk.
+
+    What a write carries to say which note it was worked out from. A write that
+    reads the note itself wants `read_note_with_fingerprint`, which hashes the
+    one read rather than reading twice.
+
+    Args:
+        path: The Book Note to fingerprint.
+
+    Returns:
+        The hex digest of its bytes.
+
+    Raises:
+        FileNotFoundError: If the note is not there.
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def read_note_with_fingerprint(path: Path) -> tuple[str, str]:
+    """Read a note's text, and the fingerprint of the bytes it came from.
+
+    One read, so the text and the fingerprint describe the same note - reading
+    again to hash is a second chance for the file to be replaced (#127 review).
+    The text is newline-normalised exactly as `read_text` leaves it, so nothing
+    downstream sees a carriage return it did not see before.
+
+    Args:
+        path: The Book Note to read.
+
+    Returns:
+        Its text, and the hex digest of the bytes it was decoded from.
+
+    Raises:
+        FileNotFoundError: If the note is not there.
+        UnicodeDecodeError: If it is not UTF-8, as `read_text` raises.
+    """
+    raw = path.read_bytes()
+    content = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return content, hashlib.sha256(raw).hexdigest()
+
+
 def _dominant_newline(raw: bytes) -> str:
     """The line ending most of a note's lines use, or the platform's if none."""
     crlf = raw.count(b"\r\n")
@@ -416,7 +458,7 @@ def write_note(path: Path, content: str) -> None:
     path.write_bytes(_encode_with_newline(content, note_newline(path)))
 
 
-def rewrite_note(path: Path, content: str) -> None:
+def rewrite_note(path: Path, content: str, expected_sha256: str | None = None) -> None:
     """Replace the text of a Book Note that exists, never creating one.
 
     `write_note` opens for writing, which creates a missing file. A write that
@@ -426,16 +468,36 @@ def rewrite_note(path: Path, content: str) -> None:
     marking it Read, beside the renamed copy of itself. Opening the existing
     file for update cannot create one.
 
+    Refusing to create a note covers one removed before the write. A note
+    *replaced* at the same path in that gap - a sync client writing a newer copy,
+    a save in Obsidian - is still a file, so there is nothing for that check to
+    see, and the rewrite puts back text worked out before the edit existed.
+    `expected_sha256` closes that: the note the caller read is named, and any
+    other note under that name is refused (#132).
+
     Args:
         path: The Book Note to rewrite.
         content: The note's full new text.
+        expected_sha256: The SHA-256 the note's bytes must have when opened for
+            writing, or None to write without checking.
 
     Raises:
         FileNotFoundError: If the note is not there to rewrite, or stopped being
             the file at that path before the write finished.
+        NoteChanged: If `expected_sha256` is given and the note's bytes do not
+            match it. Nothing is written.
     """
     with path.open("r+b") as handle:
-        _write_through(handle, path, content, handle.read())
+        raw = handle.read()
+        # Checked through the handle that will write, as `edit_note` does, so the
+        # note compared is the note written. An edit landing after this read is
+        # not caught: no lock Obsidian honours exists, and a plain file offers no
+        # atomic compare-and-write (#129 sixth review).
+        if expected_sha256 is not None and (
+            hashlib.sha256(raw).hexdigest() != expected_sha256
+        ):
+            raise NoteChanged(f"{path.name} has changed since it was read.")
+        _write_through(handle, path, content, raw)
 
 
 def _write_through(handle: BinaryIO, path: Path, content: str, raw: bytes) -> None:
@@ -686,8 +748,10 @@ def ensure_frontmatter_fields(
     Raises:
         FileNotFoundError: If the note is gone when read, or removed before the
             repair is written. It is never recreated (#128).
+        NoteChanged: If the note was edited between being read here and being
+            written back. Nothing is written (#132).
     """
-    content = file_path.read_text(encoding="utf-8")
+    content, fingerprint = read_note_with_fingerprint(file_path)
 
     # Split by line rather than by regex. The regex this replaced ended
     # `---\s*\n?(.*)`, and `\s*` is greedy over all whitespace: on a body opening
@@ -775,8 +839,10 @@ def ensure_frontmatter_fields(
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
         # Rewritten, never created: a note removed since it was read above - moved
         # in Obsidian while `cleanup` works through the Shelf - came back under
-        # its old name through `write_note` (#128).
-        rewrite_note(file_path, new_content)
+        # its old name through `write_note` (#128). Carrying the fingerprint of
+        # what was read refuses a note edited in that same gap, rather than
+        # putting the pre-edit text back over it (#132).
+        rewrite_note(file_path, new_content, fingerprint)
 
     return updated, data
 
@@ -928,8 +994,10 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
     Raises:
         FileNotFoundError: If the note is gone when read, or removed before the
             enrichment is written. It is never recreated (#128).
+        NoteChanged: If the note was edited between being read here and being
+            written back. Nothing is written (#132).
     """
-    content = file_path.read_text(encoding="utf-8")
+    content, fingerprint = read_note_with_fingerprint(file_path)
     split = split_frontmatter(content)
     if split is None:
         return False
@@ -980,8 +1048,9 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
         # As in ensure_frontmatter_fields: the body carries its own leading
         # newlines, and stripping them cost an indented block its indent (#99).
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
-        # Rewritten, never created, as in ensure_frontmatter_fields (#128).
-        rewrite_note(file_path, new_content)
+        # Rewritten, never created, and refused if the note was edited since it
+        # was read, as in ensure_frontmatter_fields (#128, #132).
+        rewrite_note(file_path, new_content, fingerprint)
         return True
 
     return False
@@ -1024,17 +1093,50 @@ def update_wikilinks_in_vault(
             if exclude_resolved and md_file.resolve() == exclude_resolved:
                 continue
             try:
-                content = md_file.read_text(encoding="utf-8")
-                new_content = content.replace(f"[[{old_stem}]]", f"[[{new_stem}]]")
-                new_content = new_content.replace(f"[[{old_stem}|", f"[[{new_stem}|")
-                new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
-                new_content = new_content.replace(f"[[{old_stem}^", f"[[{new_stem}^")
-                if new_content != content:
-                    rewrite_note(md_file, new_content)
+                if _sweep_one_note(md_file, old_stem, new_stem):
                     updated_count += 1
             except FileNotFoundError:
                 continue
     return updated_count
+
+
+def _sweep_one_note(md_file: Path, old_stem: str, new_stem: str) -> bool:
+    """Point one note's links at a renamed note, redoing it if the note changes.
+
+    A note edited between being read and being written is read again and the
+    replacement redone, rather than the older text being written back over the
+    edit (#132). That is sound here and nowhere else in the sweep's company: the
+    new text is not a decision made earlier, it is whatever the note says with
+    one link spelled differently, so it is the same answer against the newer
+    note. A note being written continuously gives up after a few passes and is
+    left alone, with its links unchanged rather than its text lost.
+
+    Args:
+        md_file: The note to sweep.
+        old_stem: The renamed note's old filename, without its extension.
+        new_stem: Its new filename, without its extension.
+
+    Returns:
+        True when a link was updated.
+
+    Raises:
+        FileNotFoundError: If the note is gone when read, or removed before the
+            sweep writes it. It is never recreated (#128).
+    """
+    for _ in range(3):
+        content, fingerprint = read_note_with_fingerprint(md_file)
+        new_content = content.replace(f"[[{old_stem}]]", f"[[{new_stem}]]")
+        new_content = new_content.replace(f"[[{old_stem}|", f"[[{new_stem}|")
+        new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
+        new_content = new_content.replace(f"[[{old_stem}^", f"[[{new_stem}^")
+        if new_content == content:
+            return False
+        try:
+            rewrite_note(md_file, new_content, fingerprint)
+        except NoteChanged:
+            continue
+        return True
+    return False
 
 
 RenameStatus = Literal[

@@ -18,7 +18,14 @@ from pathlib import Path
 
 import yaml
 
-from .markdown import BookNote, list_books, rewrite_note, split_frontmatter
+from .markdown import (
+    BookNote,
+    NoteChanged,
+    list_books,
+    read_note_with_fingerprint,
+    rewrite_note,
+    split_frontmatter,
+)
 from .note_format import (
     FORMAT_VALUES,
     LEAKED_HEADINGS,
@@ -46,6 +53,10 @@ class NoteMigration:
     migrated: str
     changes: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # The note this plan was worked out from, so applying it can refuse a note
+    # edited since. The migration plans every note, prints the diffs and waits
+    # for confirmation, so that gap is minutes long (#132).
+    fingerprint: str | None = None
 
     @property
     def changed(self) -> bool:
@@ -205,7 +216,7 @@ def plan_note_migration(path: Path) -> NoteMigration:
         The planned rewrite, the changes it represents, and anything about the
         note that wants a human eye before it is written.
     """
-    original = path.read_text(encoding="utf-8")
+    original, fingerprint = read_note_with_fingerprint(path)
     split = split_frontmatter(original)
     if split is None:
         return NoteMigration(
@@ -288,6 +299,7 @@ def plan_note_migration(path: Path) -> NoteMigration:
         migrated=migrated,
         changes=changes,
         warnings=warnings,
+        fingerprint=fingerprint,
     )
 
 
@@ -331,7 +343,7 @@ def plan_note_format_migration(path: Path) -> NoteMigration:
     # Read through universal newlines and write plain ones, exactly as
     # plan_note_migration does. The Shelf is stored CRLF, and the platform adds
     # that back on write - emitting it here too produced \r\r\n on 1,345 notes.
-    original = path.read_text(encoding="utf-8")
+    original, fingerprint = read_note_with_fingerprint(path)
 
     split = split_frontmatter(original)
     if split is None:
@@ -393,7 +405,11 @@ def plan_note_format_migration(path: Path) -> NoteMigration:
 
     changes = ["format"] if migrated != original else []
     return NoteMigration(
-        path=path, original=original, migrated=migrated, changes=changes
+        path=path,
+        original=original,
+        migrated=migrated,
+        changes=changes,
+        fingerprint=fingerprint,
     )
 
 
@@ -445,7 +461,7 @@ def plan_note_isbn_migration(path: Path) -> NoteMigration:
         The plan, unchanged when the note's ISBN needs nothing or cannot be
         repaired without guessing.
     """
-    original = path.read_text(encoding="utf-8")
+    original, fingerprint = read_note_with_fingerprint(path)
 
     split = split_frontmatter(original)
     if split is None:
@@ -529,7 +545,11 @@ def plan_note_isbn_migration(path: Path) -> NoteMigration:
 
     changes = ["isbn: restored leading zero"] if migrated != original else []
     return NoteMigration(
-        path=path, original=original, migrated=migrated, changes=changes
+        path=path,
+        original=original,
+        migrated=migrated,
+        changes=changes,
+        fingerprint=fingerprint,
     )
 
 
@@ -545,23 +565,45 @@ def plan_isbn_migration(vault_path: Path) -> list[NoteMigration]:
     return [plan_note_isbn_migration(path) for path in list_books(vault_path)]
 
 
-def apply_migration(plans: list[NoteMigration]) -> int:
+@dataclass(frozen=True)
+class MigrationOutcome:
+    """What applying a set of plans did to the Shelf."""
+
+    written: int
+    gone: int
+    changed: int
+
+
+def apply_migration(plans: list[NoteMigration]) -> MigrationOutcome:
     """Write the planned rewrites to disk.
+
+    A note that moved or was removed after it was planned is skipped: rewritten,
+    never created from its plan, so it does not come back under its old name
+    (#128). A note *edited* after it was planned is skipped too, and counted
+    apart from it - the plan was worked out from text the note no longer holds,
+    and writing it would discard the edit the reader made while reading the
+    diffs (#132). The two are counted separately because they are different
+    news: one note left the Shelf, the other is on it and newer than the plan.
 
     Args:
         plans: Plans from `plan_migration`.
 
     Returns:
-        How many notes were rewritten. A note removed after it was planned is
-        skipped and not counted: rewritten, never created from its plan, so it
-        does not come back under its old name (#128).
+        How many notes were rewritten, were gone, and had changed since they
+        were planned.
     """
     written = 0
+    gone = 0
+    changed = 0
     for plan in plans:
         if plan.changed:
             try:
-                rewrite_note(plan.path, plan.migrated)
+                rewrite_note(plan.path, plan.migrated, plan.fingerprint)
             except FileNotFoundError:
+                gone += 1
+                continue
+            except NoteChanged:
+                changed += 1
                 continue
             written += 1
-    return written
+    return MigrationOutcome(written=written, gone=gone, changed=changed)

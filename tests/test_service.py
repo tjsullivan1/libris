@@ -370,10 +370,10 @@ def test_a_primary_removed_before_its_merge_is_written_keeps_the_secondary(
     removed = []
     real = service.write_merged_book
 
-    def _removed_first(primary_path, merged_frontmatter, merged_body):
+    def _removed_first(primary_path, merged_frontmatter, merged_body, *args):
         removed.append(primary_path)
         primary_path.unlink()
-        return real(primary_path, merged_frontmatter, merged_body)
+        return real(primary_path, merged_frontmatter, merged_body, *args)
 
     monkeypatch.setattr(service, "write_merged_book", _removed_first)
 
@@ -419,11 +419,11 @@ def test_a_later_decision_naming_a_drifted_note_drifts_too(tmp_path, monkeypatch
     real = service.write_merged_book
     calls = []
 
-    def _removed_once(primary_path, merged_frontmatter, merged_body):
+    def _removed_once(primary_path, merged_frontmatter, merged_body, *args):
         if not calls:
             primary_path.unlink()
         calls.append(primary_path)
-        return real(primary_path, merged_frontmatter, merged_body)
+        return real(primary_path, merged_frontmatter, merged_body, *args)
 
     monkeypatch.setattr(service, "write_merged_book", _removed_once)
 
@@ -3163,3 +3163,35 @@ def test_a_file_with_no_fence_at_all_is_still_all_body(tmp_path):
     # Then it is body, not frontmatter. Only a file that opens a fence gets the
     # benefit of the doubt about what its author meant.
     assert list(damaged["loose.md"].fields) == ["body"]
+
+
+def test_a_primary_edited_before_its_merge_is_written_keeps_both_notes(
+    tmp_path, monkeypatch
+):
+    # Given a pair judged one Book, whose primary is edited between the merge
+    # being worked out and written
+    first, second = _pair(tmp_path)
+    real = service.merge_two_books
+
+    def _edited_after_reading(primary_path, secondary_path, **kwargs):
+        merged = real(primary_path, secondary_path, **kwargs)
+        primary_path.write_text(
+            "---\ntitle: The Brass Verdict\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return merged
+
+    monkeypatch.setattr(service, "merge_two_books", _edited_after_reading)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then nothing is merged and nothing is deleted: the merged content was
+    # worked out from a note that no longer says that, and writing it would have
+    # traded the reader's edit for a deletion of the secondary (#132)
+    assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
+    assert len(list(tmp_path.glob("*.md"))) == 2
+    assert any(
+        "Typed in Obsidian." in path.read_text(encoding="utf-8")
+        for path in tmp_path.glob("*.md")
+    )
