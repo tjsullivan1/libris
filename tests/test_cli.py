@@ -1290,6 +1290,174 @@ def test_repair_names_each_note_left_for_a_rename(monkeypatch, tmp_path):
     assert "S�ren.md" in result.output
 
 
+def _confirm_with(monkeypatch, answer=True):
+    """Answer every questionary.confirm with `answer`."""
+
+    def _confirm(_message, **_kwargs):
+        class _Answer:
+            def ask(self):
+                return answer
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.confirm", _confirm)
+
+
+def _filename_damaged_note(vault, name, title, author):
+    """A note whose filename lost a character but whose frontmatter is clean."""
+    note = vault / name
+    note.write_text(
+        f'---\ntitle: "{title}"\nauthors:\n  - "{author}"\n---\n\n## Notes\n\nMine.\n',
+        encoding="utf-8",
+    )
+    return note
+
+
+def test_repair_rename_renames_a_note_whose_filename_lost_a_character(
+    monkeypatch, tmp_path
+):
+    # Given a note whose filename carries the lost character and whose
+    # frontmatter is already repaired - which is every one of the 38 left on the
+    # real Shelf after parts 1 and 2 (#78)
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = _filename_damaged_note(
+        vault, "Jane Eyre - Charlotte Bront�.md", "Jane Eyre", "Charlotte Bronte"
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _confirm_with(monkeypatch, True)
+
+    # When the repair is asked to rename
+    result = runner.invoke(app, ["repair", "--rename"])
+
+    # Then the file takes the name its frontmatter says it should have
+    assert result.exit_code == 0, result.output
+    assert (vault / "Jane Eyre - Charlotte Bronte.md").exists()
+    assert not note.exists()
+
+
+def test_repair_leaves_filenames_alone_without_the_flag(monkeypatch, tmp_path):
+    # Given the same note, and a repair run that was not asked to rename
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = _filename_damaged_note(
+        vault, "Jane Eyre - Charlotte Bront�.md", "Jane Eyre", "Charlotte Bronte"
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    # When it runs
+    result = runner.invoke(app, ["repair"])
+
+    # Then nothing is renamed: this rewrites wikilinks across the vault, so it
+    # happens because it was asked for, not as a side effect of a repair
+    assert result.exit_code == 0, result.output
+    assert note.exists()
+    assert not (vault / "Jane Eyre - Charlotte Bronte.md").exists()
+
+
+def test_repair_rename_leaves_a_note_whose_frontmatter_is_still_damaged(
+    monkeypatch, tmp_path
+):
+    # Given a note damaged in both its filename and its title, whose title the
+    # reader leaves alone when asked
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = vault / "S�ren Kierkegaard.md"
+    note.write_text(
+        '---\ntitle: "S�ren Kierkegaard"\nauthors:\n  - "Kierkegaard"\n'
+        "---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _answer_text(monkeypatch, "")
+    _confirm_with(monkeypatch, True)
+
+    # When the repair is asked to rename
+    result = runner.invoke(app, ["repair", "--rename"])
+
+    # Then it renames nothing: the name it would write still carries the lost
+    # character, so renaming would move the damage rather than repair it
+    assert result.exit_code == 0, result.output
+    assert note.exists()
+    assert not any("�" not in p.name for p in vault.glob("*.md"))
+
+
+def test_repair_rename_reports_a_collision_and_renames_nothing(monkeypatch, tmp_path):
+    # Given a damaged filename whose canonical name is already taken by another
+    # note - which is the Calendar of Wisdom pair on the real Shelf
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    damaged = _filename_damaged_note(
+        vault, "Jane Eyre - Charlotte Bront�.md", "Jane Eyre", "Charlotte Bronte"
+    )
+    taken = _filename_damaged_note(
+        vault, "Jane Eyre - Charlotte Bronte.md", "Jane Eyre", "Charlotte Bronte"
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _confirm_with(monkeypatch, True)
+
+    # When the repair is asked to rename
+    result = runner.invoke(app, ["repair", "--rename"])
+
+    # Then both notes are still there and the collision is said, rather than one
+    # note being written over the other
+    assert result.exit_code == 0, result.output
+    assert damaged.exists()
+    assert taken.exists()
+    assert "already exists" in result.output
+
+
+def test_repair_rename_leaves_the_note_alone_when_the_answer_is_no(
+    monkeypatch, tmp_path
+):
+    # Given a damaged filename and a reader who declines the rename
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    note = _filename_damaged_note(
+        vault, "Jane Eyre - Charlotte Bront�.md", "Jane Eyre", "Charlotte Bronte"
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _confirm_with(monkeypatch, False)
+
+    # When the repair is asked to rename
+    result = runner.invoke(app, ["repair", "--rename"])
+
+    # Then the file keeps its name. Renaming is per note and confirmed, as every
+    # other write in this command is.
+    assert result.exit_code == 0, result.output
+    assert note.exists()
+    assert not (vault / "Jane Eyre - Charlotte Bronte.md").exists()
+
+
+def test_repair_rename_points_the_wikilinks_at_the_new_name(monkeypatch, tmp_path):
+    # Given a note linking to the damaged one by its damaged name
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    _filename_damaged_note(
+        vault, "Jane Eyre - Charlotte Bront�.md", "Jane Eyre", "Charlotte Bronte"
+    )
+    linking = vault / "Reading Log.md"
+    linking.write_text(
+        "---\ntitle: Log\n---\n\nSee [[Jane Eyre - Charlotte Bront�]].\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    monkeypatch.setattr("libris.cli.get_obsidian_vault_root", lambda: vault)
+    # The linking note holds the damaged name in its body, so it is itself a
+    # note that has lost a character and `repair` asks about that line. Left
+    # alone here: what this test is about is the sweep that follows the rename.
+    _answer_text(monkeypatch, "")
+    _confirm_with(monkeypatch, True)
+
+    # When the repair renames it
+    result = runner.invoke(app, ["repair", "--rename"])
+
+    # Then the link points at the new name. A rename that leaves the links behind
+    # is what made this half of #78 wait for the sweep to be safe (#128, #132).
+    assert result.exit_code == 0, result.output
+    assert "[[Jane Eyre - Charlotte Bronte]]" in linking.read_text(encoding="utf-8")
+
+
 def test_repair_says_a_not_a_book_note_records_that_it_is_not_one(
     monkeypatch, tmp_path
 ):

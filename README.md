@@ -170,7 +170,7 @@ Three checks so far, each ending in a judgement Libris will not make for you.
 
 **Lost characters**: a note carrying `�` where an accented letter used to be. The letter itself is gone from the file, so `doctor` says which notes are affected and what identifies them — it never guesses at the correct spelling, because there is no way to tell `S�ren` from Søren, Sören or Suren without asking the API or a reader.
 
-Notes whose *filename* carries the damage are counted separately: renaming a note rewrites the wikilinks pointing at it, which is its own piece of work.
+Notes whose *filename* carries the damage are counted separately: renaming a note rewrites the wikilinks pointing at it, so `repair` does it only when you ask with `--rename`.
 
 **Not UTF-8**: a note saved in another encoding, such as Latin-1. Unlike a lost character, its letters are still in the file, but nothing else in Libris can read it: search passes over it and `libris status` refuses it. `doctor` lists these notes on their own, separate from lost characters, since their fix is saving the file as UTF-8 rather than looking up a spelling. The file doesn't record which encoding it was written in, so `doctor` doesn't guess. A note like this still counts toward a contested identity, because its Libris ID survives the decode.
 
@@ -205,7 +205,24 @@ An empty answer leaves that string alone. An answer that still carries a `�` -
 
 Frontmatter and body are written together in one pass, because a damaged title and the `# Title` heading rendered from it are the same damage in two places.
 
-Filenames are left alone. Renaming a note rewrites the wikilinks pointing at it, which is its own piece of work.
+Filenames are left alone unless you ask for them. `libris repair --rename` gives each note the name its frontmatter says it should have, and points the wikilinks at the new name.
+
+```bash
+libris repair --rename
+```
+
+```
+38 have damage in the filename. Renaming rewrites the wikilinks pointing at a note, so each is shown before it is asked:
+
+Jane Eyre - Charlotte Bront�.md
+  -> Jane Eyre - Charlotte Bronte.md
+  rename it? Yes
+  Renamed to Jane Eyre - Charlotte Bronte.md
+
+Renamed 1 note(s); left 0 alone.
+```
+
+The name comes from the frontmatter rather than from another question, so the file ends up saying exactly what the note says. Two things follow from that, and both are why it asks per note rather than sweeping: where a filename carries more than its note does - an author's dates, a pen name, an alternative spelling - that text is not carried across; and a note whose frontmatter is still damaged is refused, because the name it would be given would carry the lost character too.
 
 ## Browser extension
 
