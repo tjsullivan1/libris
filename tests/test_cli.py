@@ -2437,20 +2437,24 @@ def test_a_shelf_that_is_not_there_is_reported_rather_than_raised(
 
 
 def _edited_while_it_worked(monkeypatch, path, text):
-    """Edit `path` the first time the repair pass standardises a title.
+    """Edit `path` while the repair pass is working on that same note.
 
     The repair pass reads a note, works out its new text and writes it back. The
     edit lands inside that window, which is what a sync client or a save in
     Obsidian does.
+
+    Keyed on the title of the note being repaired, which `_legacy_note` writes
+    from its filename. Keyed on the first call instead, the edit landed while
+    the pass was working on whichever note the Shelf listed first: on Linux that
+    was the other note, so the target was already edited by the time it was
+    read, nothing had changed under it, and the test passed the bug.
     """
     from libris import markdown
 
     real = markdown.standardize_title
-    done: list[str] = []
 
     def _edit_once(title):
-        if not done:
-            done.append(title)
+        if title == path.stem:
             path.write_text(text, encoding="utf-8")
         return real(title)
 
