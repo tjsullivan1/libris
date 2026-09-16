@@ -1520,9 +1520,9 @@ def test_merge_keeps_the_secondary_when_the_primary_is_removed_mid_merge(
 
     real_write = cli_module.write_merged_book
 
-    def _primary_removed(primary_path, merged_frontmatter, merged_body):
+    def _primary_removed(primary_path, merged_frontmatter, merged_body, *args):
         primary_path.unlink()
-        return real_write(primary_path, merged_frontmatter, merged_body)
+        return real_write(primary_path, merged_frontmatter, merged_body, *args)
 
     monkeypatch.setattr("libris.cli.write_merged_book", _primary_removed)
 
@@ -1613,9 +1613,9 @@ def test_merge_counts_a_merge_whose_secondary_vanished_after_it_was_written(
 
     real_delete = cli_module.delete_secondary_file
 
-    def _already_gone(secondary_path):
+    def _already_gone(secondary_path, *args):
         secondary_path.unlink()
-        return real_delete(secondary_path)
+        return real_delete(secondary_path, *args)
 
     monkeypatch.setattr("libris.cli.delete_secondary_file", _already_gone)
 
@@ -1788,11 +1788,11 @@ def test_merge_says_a_moved_secondary_was_not_deleted(monkeypatch, tmp_path):
 
     real_delete = cli_module.delete_secondary_file
 
-    def _moved(secondary_path):
+    def _moved(secondary_path, *args):
         secondary_path.rename(
             secondary_path.with_name(f"{secondary_path.stem} moved.md")
         )
-        return real_delete(secondary_path)
+        return real_delete(secondary_path, *args)
 
     monkeypatch.setattr("libris.cli.delete_secondary_file", _moved)
 
@@ -2431,3 +2431,365 @@ def test_a_shelf_that_is_not_there_is_reported_rather_than_raised(
     assert result.exit_code == 1
     assert "The Shelf is not there" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+# --- a note edited while a command worked is not overwritten (#132) ----------
+
+
+def _edited_while_it_worked(monkeypatch, path, text):
+    """Edit `path` while the repair pass is working on that same note.
+
+    The repair pass reads a note, works out its new text and writes it back. The
+    edit lands inside that window, which is what a sync client or a save in
+    Obsidian does.
+
+    Keyed on the title of the note being repaired, which `_legacy_note` writes
+    from its filename. Keyed on the first call instead, the edit landed while
+    the pass was working on whichever note the Shelf listed first: on Linux that
+    was the other note, so the target was already edited by the time it was
+    read, nothing had changed under it, and the test passed the bug.
+    """
+    from libris import markdown
+
+    real = markdown.standardize_title
+
+    def _edit_once(title):
+        if title == path.stem:
+            path.write_text(text, encoding="utf-8")
+        return real(title)
+
+    monkeypatch.setattr(markdown, "standardize_title", _edit_once)
+
+
+def test_cleanup_reports_a_note_edited_while_it_ran_and_carries_on(
+    monkeypatch, tmp_path
+):
+    # Given two notes due a repair, one of them edited as the pass works on it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    edited = _legacy_note(vault, "Edited.md")
+    kept = _legacy_note(vault, "Kept.md")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _edited_while_it_worked(
+        monkeypatch,
+        edited,
+        "---\ntitle: Edited\nstatus: To Read\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+    )
+
+    # When cleanup runs over the Shelf
+    result = runner.invoke(app, ["cleanup"])
+
+    # Then the edit survives, it is reported rather than passed over in silence,
+    # and the rest of the Shelf is still repaired (#132)
+    assert result.exit_code == 0, result.output
+    assert "Typed in Obsidian." in edited.read_text(encoding="utf-8")
+    assert "changed" in result.output
+    assert "libris_id" in kept.read_text(encoding="utf-8")
+
+
+def test_cleanup_rename_does_not_call_names_canonical_when_a_note_changed(
+    monkeypatch, tmp_path
+):
+    # Given a Shelf whose only note changes while cleanup --rename repairs it, so
+    # no rename is ever attempted
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    edited = _legacy_note(vault, "Edited.md")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _edited_while_it_worked(
+        monkeypatch,
+        edited,
+        "---\ntitle: Edited\nstatus: To Read\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+    )
+
+    # When cleanup runs with --rename
+    result = runner.invoke(app, ["cleanup", "--rename"])
+
+    # Then it does not claim every filename is canonical - nothing was looked at,
+    # the same reason a vanished note suppresses it (#131 second review, #133)
+    assert result.exit_code == 0, result.output
+    assert "All files already have canonical names." not in result.output
+    assert "1 note(s) changed" in result.output
+
+
+def test_merge_says_a_secondary_that_went_missing_after_the_merge_read_it(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, the secondary removed after the merge read it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_check = cli_module.check_auto_merge
+
+    def _secondary_removed_after_reading(primary, secondary):
+        result = real_check(primary, secondary)
+        secondary.unlink()
+        return result
+
+    monkeypatch.setattr("libris.cli.check_auto_merge", _secondary_removed_after_reading)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then it says when the note went missing. Left to the command's handler this
+    # read "before the merge was read", which is untrue: the merge had already
+    # been worked out from it (#133 review).
+    assert result.exit_code == 0, result.output
+    assert "before the merge was read" not in result.output
+    assert "while the merge was being decided" in result.output
+
+
+def test_merge_keeps_a_secondary_edited_between_the_check_and_the_delete(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, the secondary edited after it was checked and
+    # after the merged note was written - the last instant before the deletion
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_write = cli_module.write_merged_book
+
+    def _edit_secondary_after_writing(primary_path, *args, **kwargs):
+        result = real_write(primary_path, *args, **kwargs)
+        secondary_path = next(
+            path for path in vault.glob("*.md") if path != primary_path
+        )
+        secondary_path.write_text(
+            "---\ntitle: Dune\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr("libris.cli.write_merged_book", _edit_secondary_after_writing)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then the merge counts as done, and the secondary is kept rather than
+    # deleted: it holds writing the merged note never saw. Checked only before
+    # the write, this instant deleted it (#133 review).
+    assert result.exit_code == 0, result.output
+    assert "was kept" in result.output
+    assert len(list(vault.glob("*.md"))) == 2
+    assert any(
+        "Typed in Obsidian." in path.read_text(encoding="utf-8")
+        for path in vault.glob("*.md")
+    )
+
+
+def test_merge_keeps_both_notes_when_the_secondary_is_edited_mid_merge(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, the secondary edited after the merge read it
+    # - the note the merge deletes, not the one it keeps
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_check = cli_module.check_auto_merge
+
+    def _edited_after_reading(primary, secondary):
+        result = real_check(primary, secondary)
+        secondary.write_text(
+            "---\ntitle: Dune\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr("libris.cli.check_auto_merge", _edited_after_reading)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then the secondary is not deleted and the edit survives. The merged text
+    # was worked out from the secondary's older bytes, so deleting it would have
+    # destroyed the only copy of that edit - worse than overwriting the primary,
+    # which #132 fixed while leaving this open (#133 review).
+    assert result.exit_code == 0, result.output
+    assert "changed" in result.output
+    assert len(list(vault.glob("*.md"))) == 2
+    assert any(
+        "Typed in Obsidian." in path.read_text(encoding="utf-8")
+        for path in vault.glob("*.md")
+    )
+
+
+def test_the_auto_enrich_callout_refuses_a_note_edited_while_it_was_written(
+    monkeypatch, tmp_path
+):
+    # Given a note edited between the callout being worked out and written
+    from libris import cli as cli_module
+    from libris.markdown import NoteChanged
+
+    path = tmp_path / "Dune.md"
+    path.write_text(
+        "---\ntitle: Dune\ntags:\n  - book\n---\n\n## Notes\n", encoding="utf-8"
+    )
+    real = cli_module.parse_frontmatter_yaml
+
+    def _edited_meanwhile(text):
+        path.write_text(
+            "---\ntitle: Dune\ntags:\n  - book\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return real(text)
+
+    monkeypatch.setattr(cli_module, "parse_frontmatter_yaml", _edited_meanwhile)
+
+    # When the callout is appended
+    # Then it refuses, and the reader's writing survives. The callout is built
+    # from the body as it was read, so writing it back replaces everything
+    # written since (#132).
+    with pytest.raises(NoteChanged):
+        cli_module._append_auto_enrich_note(path, "Dune", "dune")
+    assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
+
+
+def test_auto_enrichment_counts_a_book_whose_callout_was_refused_as_enriched(
+    monkeypatch, tmp_path
+):
+    # Given a note edited after its enrichment was written but before the review
+    # callout could be added - auto-enrichment writes twice
+    from libris import cli as cli_module
+    from libris.api import BookCandidate
+
+    path = tmp_path / "Dune.md"
+    path.write_text(
+        "---\ntitle: Dune\nisbn: null\ngoogle_books_id: null\n---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search",
+        lambda self, q: [
+            BookCandidate(title="Dune", authors=["Frank Herbert"], isbn="9780441013593")
+        ],
+    )
+    real = cli_module.parse_frontmatter_yaml
+
+    def _edited_meanwhile(text):
+        path.write_text(
+            "---\ntitle: Dune\nisbn: '9780441013593'\n---\n\n## Notes\n"
+            "\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return real(text)
+
+    monkeypatch.setattr(cli_module, "parse_frontmatter_yaml", _edited_meanwhile)
+    unmatched: list[str] = []
+
+    # When the book is auto-enriched
+    enriched = cli_module._enrich_auto(path, unmatched)
+
+    # Then it counts as enriched, because it was: the enrichment landed and only
+    # the callout was refused. Counted as not enriched, a rerun would pass the
+    # book over - its fields are filled now - so it would never be tagged for
+    # review, and the summary would call an enriched book untouched (#133 review).
+    assert enriched is True
+    assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
+
+
+def test_migrate_reports_notes_edited_since_they_were_planned(monkeypatch, tmp_path):
+    # Given two notes due a migration, one edited while the reader read the diffs
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("Edited.md", "Kept.md"):
+        (vault / name).write_text(
+            "---\ntitle: A Book\nStatus: Read\n---\n\n## Notes\n", encoding="utf-8"
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    def _confirm(_message, **_kwargs):
+        class _Answer:
+            def ask(self):
+                # Answered after the plans were made, which is where the reader's
+                # own edit lands: the migration waits here.
+                (vault / "Edited.md").write_text(
+                    "---\ntitle: A Book\nStatus: Read\n---\n\n## Notes\n"
+                    "\nTyped in Obsidian.\n",
+                    encoding="utf-8",
+                )
+                return True
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.confirm", _confirm)
+
+    # When the migration is applied
+    result = runner.invoke(app, ["migrate", "--apply"])
+
+    # Then the edited note keeps its edit and is counted as changed since it was
+    # planned - not overwritten with text worked out before the edit, and not
+    # reported as moved or removed, which it was not (#132)
+    assert result.exit_code == 0, result.output
+    assert "Migrated 1 notes." in result.output
+    assert "1 changed since" in result.output
+    assert "Typed in Obsidian." in (vault / "Edited.md").read_text(encoding="utf-8")
+
+
+def test_merge_keeps_both_notes_when_the_primary_is_edited_mid_merge(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, the primary edited after the merge read it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_check = cli_module.check_auto_merge
+
+    def _edited_after_reading(primary, secondary):
+        result = real_check(primary, secondary)
+        primary.write_text(
+            "---\ntitle: Dune\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr("libris.cli.check_auto_merge", _edited_after_reading)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then nothing is merged and nothing is deleted: the merge was worked out
+    # from a note that no longer says that, and the reader's edit is not traded
+    # for the secondary's deletion (#132)
+    assert result.exit_code == 0, result.output
+    assert "changed" in result.output
+    assert len(list(vault.glob("*.md"))) == 2
+    assert any(
+        "Typed in Obsidian." in path.read_text(encoding="utf-8")
+        for path in vault.glob("*.md")
+    )

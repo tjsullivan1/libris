@@ -461,13 +461,75 @@ def test_a_migration_skips_a_note_removed_after_it_was_planned(tmp_path):
     gone.unlink()
 
     # When they are applied
-    written = apply_migration(plans)
+    outcome = apply_migration(plans)
 
     # Then the removed note is not recreated from its plan, and only the note
     # still there is counted. Written with `write_note`, the plan brought the
     # note back under its old name (#128).
     assert not gone.exists()
-    assert written == 1
+    assert outcome.written == 1
+    assert outcome.gone == 1
+
+
+def test_a_plan_is_worked_out_from_one_version_of_a_note(tmp_path, monkeypatch):
+    # Given a note edited between the two reads the planner used to make: the
+    # text it hashes, and the frontmatter it parsed by reading the file again
+    from pathlib import Path as _Path
+
+    path = tmp_path / "Two Reads.md"
+    path.write_text(
+        "---\ntitle: Old Title\nStatus: Read\n---\n\n## Notes\n", encoding="utf-8"
+    )
+    real_read_bytes = _Path.read_bytes
+    done: list[str] = []
+
+    def _edited_after_the_first_read(self, *args, **kwargs):
+        raw = real_read_bytes(self, *args, **kwargs)
+        if self.name == "Two Reads.md" and not done:
+            done.append(self.name)
+            self.write_text(
+                "---\ntitle: New Title\nStatus: Read\n---\n\n## Notes\n",
+                encoding="utf-8",
+            )
+        return raw
+
+    monkeypatch.setattr(_Path, "read_bytes", _edited_after_the_first_read)
+
+    # When the note is planned
+    plan = plan_note_migration(path)
+
+    # Then the plan describes one version of the note throughout. Built from a
+    # second read, it paired the old body and fingerprint with newer
+    # frontmatter, and the diff shown to a reader described a note that never
+    # existed (#133 review).
+    assert "Old Title" in plan.migrated
+    assert "New Title" not in plan.migrated
+
+
+def test_a_migration_refuses_a_note_edited_after_it_was_planned(tmp_path):
+    # Given a note planned for migration, then edited while the reader read the
+    # diffs - the migration waits for confirmation, so this window is minutes
+    from libris.migrate import apply_migration
+
+    path = tmp_path / "Edited.md"
+    path.write_text(
+        "---\ntitle: A Book\nStatus: Read\n---\n\n## Notes\n", encoding="utf-8"
+    )
+    plan = plan_note_migration(path)
+    assert plan.changed
+    path.write_text(
+        "---\ntitle: A Book\nStatus: Read\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+        encoding="utf-8",
+    )
+
+    # When the plan is applied
+    outcome = apply_migration([plan])
+
+    # Then the note is left as it stands and counted as changed since planning,
+    # rather than overwritten with content worked out before the edit (#132)
+    assert outcome.written == 0
+    assert outcome.changed == 1
+    assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
 
 
 def _isbn_note(tmp_path, name, isbn_line):

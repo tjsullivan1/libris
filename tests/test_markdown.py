@@ -441,14 +441,19 @@ def test_the_wikilink_sweep_skips_a_linking_note_removed_while_it_ran(
         linking.write_text("See [[Old Name]].\n", encoding="utf-8")
 
     real_read = _Path.read_text
+    real_read_bytes = _Path.read_bytes
 
+    # Hooked on `read_bytes`, which is what the sweep reads through: it hashes
+    # the bytes it read so the write can refuse a note edited since (#132).
+    # Hooked on `read_text`, this stopped firing and the test passed while
+    # removing nothing.
     def _read_then_remove(self, *args, **kwargs):
-        text = real_read(self, *args, **kwargs)
+        raw = real_read_bytes(self, *args, **kwargs)
         if self.name == "Gone.md":
             self.unlink()
-        return text
+        return raw
 
-    monkeypatch.setattr(_Path, "read_text", _read_then_remove)
+    monkeypatch.setattr(_Path, "read_bytes", _read_then_remove)
 
     # When the sweep runs
     updated = update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
@@ -1047,3 +1052,139 @@ def test_rename_book_file_whitespace_title(tmp_path):
     f.write_text("---\ntitle: '   '\nauthors:\n- Author\n---\n")
     result = rename_book_file(f, tmp_path)
     assert result.status == "missing_title"
+
+
+# --- a rewrite refuses a note that changed since it was read (#132) ----------
+
+
+def _note_to_repair(path):
+    """A note the repair pass rewrites, with a title it standardises."""
+    path.write_text(
+        "---\ntitle: dune\nstatus: To Read\n---\n\n## Notes\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_a_rewrite_refuses_a_note_that_changed_since_it_was_read(tmp_path):
+    # Given a note read, then replaced at the same path - a sync client writing
+    # a newer copy, or Obsidian saving an edit
+    from libris.markdown import NoteChanged, note_fingerprint, rewrite_note
+
+    path = tmp_path / "Dune.md"
+    path.write_text("---\ntitle: Dune\n---\n\n## Notes\n", encoding="utf-8")
+    fingerprint = note_fingerprint(path)
+    path.write_text(
+        "---\ntitle: Dune\n---\n\n## Notes\n\nTyped in Obsidian.\n", encoding="utf-8"
+    )
+
+    # When a rewrite worked out from the earlier read is written
+    # Then it refuses, and the newer writing survives. `rewrite_note` checks only
+    # that a file is there, and the same path is still a file, so the edit was
+    # overwritten by content decided before it existed (#132).
+    with pytest.raises(NoteChanged):
+        rewrite_note(path, "---\ntitle: Dune\nstatus: Read\n---\n", fingerprint)
+    assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
+
+
+def test_a_rewrite_writes_when_the_note_is_the_one_that_was_read(tmp_path):
+    # Given a note that has not changed since it was read
+    from libris.markdown import note_fingerprint, rewrite_note
+
+    path = tmp_path / "Dune.md"
+    path.write_text("---\ntitle: Dune\n---\n", encoding="utf-8")
+
+    # When a rewrite carrying its fingerprint is written
+    rewrite_note(path, "---\ntitle: Dune\nstatus: Read\n---\n", note_fingerprint(path))
+
+    # Then it lands: the check refuses a changed note, not every note
+    assert "status: Read" in path.read_text(encoding="utf-8")
+
+
+def test_the_repair_pass_refuses_a_note_edited_while_it_worked(tmp_path, monkeypatch):
+    # Given a note edited between the repair pass reading it and writing it back
+    from libris import markdown
+
+    path = _note_to_repair(tmp_path / "dune.md")
+    real = markdown.standardize_title
+
+    def _edited_meanwhile(title):
+        path.write_text(
+            "---\ntitle: dune\nstatus: To Read\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return real(title)
+
+    monkeypatch.setattr(markdown, "standardize_title", _edited_meanwhile)
+
+    # When the repair is written
+    # Then it refuses, and the reader's writing survives (#132)
+    with pytest.raises(markdown.NoteChanged):
+        markdown.ensure_frontmatter_fields(path)
+    assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
+
+
+def test_enrichment_refuses_a_note_edited_while_it_worked(tmp_path, monkeypatch):
+    # Given a note edited between enrichment reading it and writing it back
+    from libris import markdown
+    from libris.api import BookCandidate
+
+    path = tmp_path / "Dune.md"
+    path.write_text("---\ntitle: Dune\nisbn: null\n---\n\n## Notes\n", encoding="utf-8")
+    real = markdown.has_description_callout
+
+    def _edited_meanwhile(body):
+        path.write_text(
+            "---\ntitle: Dune\nisbn: null\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return real(body)
+
+    monkeypatch.setattr(markdown, "has_description_callout", _edited_meanwhile)
+    candidate = BookCandidate(
+        title="Dune",
+        authors=["Frank Herbert"],
+        isbn="9780441013593",
+        description="A desert planet.",
+    )
+
+    # When the enrichment is written
+    # Then it refuses, and the reader's writing survives (#132)
+    with pytest.raises(markdown.NoteChanged):
+        markdown.update_frontmatter_from_book(path, candidate)
+    assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
+
+
+def test_the_wikilink_sweep_reapplies_to_a_note_edited_while_it_swept(
+    tmp_path, monkeypatch
+):
+    # Given a linking note edited between the sweep reading it and writing it
+    from libris import markdown
+
+    linking = tmp_path / "Linking.md"
+    linking.write_text(
+        "---\ntitle: Linking\n---\n\nSee [[Old Name]].\n", encoding="utf-8"
+    )
+    real = markdown.rewrite_note
+    seen: list[Path] = []
+
+    def _edited_once(path, content, expected_sha256=None):
+        if not seen:
+            seen.append(path)
+            path.write_text(
+                "---\ntitle: Linking\n---\n\nSee [[Old Name]]. Typed in Obsidian.\n",
+                encoding="utf-8",
+            )
+        return real(path, content, expected_sha256)
+
+    monkeypatch.setattr(markdown, "rewrite_note", _edited_once)
+
+    # When the sweep runs
+    updated = markdown.update_wikilinks_in_vault(tmp_path, "Old Name", "New Name")
+
+    # Then the link is fixed against the newer text rather than the older text
+    # being put back. The replacement is worked out from whatever the note says,
+    # so redoing it on the new content is the same answer, not a lost edit (#132).
+    text = linking.read_text(encoding="utf-8")
+    assert updated == 1
+    assert "[[New Name]]" in text
+    assert "Typed in Obsidian." in text

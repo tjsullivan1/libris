@@ -25,9 +25,11 @@ from .markdown import (
     create_book_note,
     edit_note,
     list_books,
+    note_fingerprint,
     set_frontmatter_fields,
     split_frontmatter,
     unterminated_frontmatter,
+    verify_note_unchanged,
 )
 from .matching import best_match, normalize_for_match, titles_match
 from .merge import (
@@ -1948,6 +1950,51 @@ def apply_decisions(
             primary = get_primary_book(first.path, second.path)
             secondary = second.path if primary == first.path else first.path
 
+            # Taken before the merge reads the pair, so the write can tell that
+            # the primary is still the note the merge was worked out from (#132),
+            # and the deletion can tell the same about the secondary - which it
+            # destroys rather than overwrites (#133 review).
+            primary_fingerprint = note_fingerprint(primary)
+            secondary_fingerprint = note_fingerprint(secondary)
+
+            # The index resolved these ids to paths before any of this was read,
+            # and a fingerprint taken here describes whatever sits at the path
+            # now - including a different book written there since. A decision
+            # names a book by its identity, not by where it sat, so the identity
+            # is checked again at the point it is acted on: nothing else would
+            # notice, and what follows merges one note into another and deletes
+            # it (#133 third review). Superseded ids count, because a note that
+            # absorbed another answers for it too (ADR 0014).
+            # Each path against the id it resolved for, rather than against both
+            # of them together. A note replaced at one path by one carrying the
+            # *other* named id satisfies a check that asks only whether a path
+            # holds one of the two, and the pair then merges and deletes a book
+            # the decision never named while the note it did name sits elsewhere,
+            # untouched (#133 fourth review).
+            stale = None
+            for path, wanted in (
+                (first.path, shorter.strip()),
+                (second.path, longer.strip()),
+            ):
+                note_now = BookNote.read(path)
+                identities = (
+                    {note_now.libris_id} | set(note_now.superseded_ids)
+                    if note_now is not None
+                    else set()
+                )
+                if wanted not in identities:
+                    stale = path
+                    break
+            if stale is not None:
+                outcomes.append(
+                    DecisionOutcome(
+                        DecisionStatus.DRIFTED,
+                        f"{label}: {stale.name} is no longer the note the "
+                        "decision named; nothing merged",
+                    )
+                )
+                continue
+
             merged_fm, merged_body, conflicts = merge_two_books(
                 primary, secondary, allow_conflicts=allow_conflicts
             )
@@ -1982,7 +2029,51 @@ def apply_decisions(
             continue
 
         try:
-            write_merged_book(primary, merged_fm, merged_body)
+            verify_note_unchanged(secondary, secondary_fingerprint)
+        except NoteChanged:
+            # Checked before the write, so the pair is left exactly as it stands.
+            # Its entries stay in the index: only its text changed, and a note
+            # that still answers for the identity a decision names is still the
+            # note to act on. An earlier round of this PR forgot it here, which
+            # drifted a later decision about a note that was present and was the
+            # right one - identity is revalidated where a decision is acted on
+            # instead, which is where a replacement does damage (#133 third
+            # review).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {secondary.name} changed since it was read; "
+                    "nothing merged",
+                )
+            )
+            continue
+        except FileNotFoundError:
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {secondary.name} is gone; nothing merged",
+                )
+            )
+            continue
+
+        try:
+            write_merged_book(primary, merged_fm, merged_body, primary_fingerprint)
+        except NoteChanged:
+            # The primary was edited after the merge read it. The merged text
+            # describes a note that no longer says that, so nothing is written
+            # and the secondary is kept: applying it would have traded the
+            # reader's edit for a deletion (#132).
+            # Left in the index for the same reason the changed secondary is: it
+            # still answers for its identity, and that is what a decision names
+            # (#133 third review).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {primary.name} changed since it was read; "
+                    "nothing merged",
+                )
+            )
+            continue
         except FileNotFoundError:
             # The primary moved or was removed after the merge was worked out.
             # The write refuses rather than recreating it, and the secondary is
@@ -1997,8 +2088,18 @@ def apply_decisions(
             )
             continue
         notes: list[str] = []
+        secondary_kept = False
         try:
-            delete_secondary_file(secondary)
+            delete_secondary_file(secondary, secondary_fingerprint)
+        except NoteChanged:
+            secondary_kept = True
+            # Edited between the check above and this instant. The merge is
+            # written, so it happened, but the secondary holds writing the merged
+            # note never saw and is kept rather than deleted (#133 review).
+            notes.append(
+                f"{secondary.name} changed just before it was deleted, so it was "
+                "kept; its newer writing is not in the merged note"
+            )
         except FileNotFoundError:
             # The merged note is written, so the merge is done - but a missing path
             # cannot tell a deleted secondary from a moved one, and a moved copy is
@@ -2025,8 +2126,17 @@ def apply_decisions(
             notes.append(f"{primary.name} was then moved or removed")
         if survivor is not None:
             for key, note in list(index.items()):
-                if note.path in (primary, secondary):
+                if note.path == primary or (
+                    note.path == secondary and not secondary_kept
+                ):
                     index[key] = survivor
+                elif note.path == secondary:
+                    # Kept, because it changed under the merge. It is still its
+                    # own note and the merged note does not answer for what it
+                    # now says, so its identities are forgotten rather than
+                    # pointed at the primary - a later decision naming it would
+                    # otherwise have acted on the wrong file (#133 review).
+                    del index[key]
 
         detail = f"{label} -> {primary.name}"
         if notes:

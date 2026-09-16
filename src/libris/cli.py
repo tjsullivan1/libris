@@ -23,17 +23,21 @@ from .markdown import (
     EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
     FrontmatterUnreadable,
+    NoteChanged,
     RenameResult,
     create_book_note,
     ensure_frontmatter_fields,
     find_duplicate_candidates,
     find_duplicates,
     list_books,
+    note_fingerprint,
     read_frontmatter,
+    read_note_with_fingerprint,
     rename_book_file,
     rewrite_note,
     split_frontmatter,
     update_frontmatter_from_book,
+    verify_note_unchanged,
 )
 from .matching import (
     best_match,
@@ -563,6 +567,15 @@ def clean(
             "cleaned. Nothing more written."
         )
         raise typer.Exit(code=1) from None
+    except NoteChanged:
+        # Edited while the repair was worked out. The repair describes text the
+        # note no longer holds, so it is refused rather than written over the
+        # edit (#132).
+        typer.echo(
+            f"{selected_file_name} changed while it was being cleaned - saved in "
+            "Obsidian, or synced. Nothing written; run it again."
+        )
+        raise typer.Exit(code=1) from None
 
 
 @app.command()
@@ -606,6 +619,7 @@ def cleanup(
     renamed_count = 0
     skipped_count = 0
     gone_count = 0
+    changed_count = 0
     action_count = 0
     unmatched_files: list[str] = []
     for i, book_file in enumerate(books, 1):
@@ -678,6 +692,18 @@ def cleanup(
                 "ran. Skipped.",
                 nl=False,
             )
+        except NoteChanged:
+            # Edited between being read and being written. Counted apart from a
+            # note that vanished: this one is on the Shelf and newer than the
+            # repair worked out for it, so the repair is dropped, not the edit
+            # (#132).
+            changed_count += 1
+            file_had_action = True
+            typer.echo(
+                f"\n  {book_file.name} changed while cleanup ran - saved in "
+                "Obsidian, or synced. Skipped.",
+                nl=False,
+            )
 
         typer.echo("")  # final newline for this file
         if file_had_action:
@@ -686,8 +712,15 @@ def cleanup(
     typer.echo("")
     if updated_count:
         typer.echo(f"Finished. Updated {updated_count} books.")
-    elif not gone_count:
+    elif not gone_count and not changed_count:
         typer.echo("All books are already up to date.")
+    if changed_count:
+        # Said for the same reason a vanished note is: a note whose repair was
+        # dropped is not a note already in order (#131 review, #132).
+        typer.echo(
+            f"{changed_count} note(s) changed while cleanup ran and were left "
+            "alone. Run it again to repair them."
+        )
     if gone_count:
         # Counted apart from the rename skips, and said: a note that vanished was
         # never repaired, so a run where nothing was updated is not a Shelf
@@ -703,9 +736,10 @@ def cleanup(
             typer.echo(
                 f"No files renamed. {skipped_count} file(s) could not be renamed."
             )
-        elif not gone_count:
-            # Not when a note vanished: it was never looked at, so nothing says
-            # its name is canonical (#131 second review).
+        elif not gone_count and not changed_count:
+            # Not when a note vanished, and not when one changed: neither was
+            # renamed, so nothing here says its name is canonical (#131 second
+            # review, #133 review).
             typer.echo("All files already have canonical names.")
 
     if unmatched_files:
@@ -752,8 +786,18 @@ def _enrich_auto(file_path: Path, unmatched_log: list[str]) -> bool:
         # working on. Caught here and returned as False, it looked like a book
         # with no match to every caller (#128, #131 second review).
         if update_frontmatter_from_book(file_path, first):
-            # Append a note to the body indicating this was an automatic match
-            _append_auto_enrich_note(file_path, first.title, query)
+            # The enrichment is written by here. The callout is a second write,
+            # so a note edited between the two keeps the enrichment and loses the
+            # callout. Said as exactly that: reported as a book that was not
+            # enriched, a rerun would pass it over - its fields are filled now -
+            # and it would never be tagged for review (#133 review).
+            try:
+                _append_auto_enrich_note(file_path, first.title, query)
+            except NoteChanged:
+                typer.echo(
+                    f"{file_path.name} changed before the review callout could be "
+                    "added, so it is enriched but not tagged for review."
+                )
             typer.echo(
                 f'Auto-enriched: {file_path.name} → "{first.title}" by {", ".join(first.authors)}'
             )
@@ -772,7 +816,7 @@ def _append_auto_enrich_note(
 
     import yaml
 
-    content = file_path.read_text(encoding="utf-8")
+    content, fingerprint = read_note_with_fingerprint(file_path)
 
     # Add 'review' to the tags in frontmatter
     split = split_frontmatter(content)
@@ -805,8 +849,9 @@ def _append_auto_enrich_note(
         f"> Please verify this is the correct book.\n"
     )
     # Rewritten, never created: the note was read above, and one removed since
-    # must not come back to take the callout (#128).
-    rewrite_note(file_path, content.rstrip() + note + "\n")
+    # must not come back to take the callout (#128). One edited since is refused
+    # too, rather than losing the edit to a callout about an earlier read (#132).
+    rewrite_note(file_path, content.rstrip() + note + "\n", fingerprint)
 
 
 def _enrich_interactive(file_path: Path, results: list | None = None) -> bool:
@@ -926,6 +971,7 @@ def autoenrich(
     enriched_interactive = 0
     skipped = 0
     gone: list[str] = []
+    changed_notes: list[str] = []
     needs_interactive: list[str] = []
     unmatched: list[str] = []
     action_count = 0
@@ -1009,6 +1055,17 @@ def autoenrich(
             gone.append(book_file.name)
             action_count += 1
             continue
+        except NoteChanged:
+            # Edited while the run worked on it - the interactive flow waits for
+            # the reader here. Counted apart from a note that vanished and from a
+            # book already complete: this one was never enriched (#132).
+            typer.echo(
+                f" — {book_file.name} changed while autoenrich ran - saved in "
+                "Obsidian, or synced. Skipped."
+            )
+            changed_notes.append(book_file.name)
+            action_count += 1
+            continue
 
         action_count += 1
 
@@ -1018,12 +1075,14 @@ def autoenrich(
         # A vanished note used an action but was never going to be enriched, so
         # it is not counted as one that would be - and it is said here, because
         # the dry run returns before the full summary (#131 third review).
-        would = action_count - len(gone)
+        would = action_count - len(gone) - len(changed_notes)
         typer.echo(
             f"Dry run: {would} book(s) would be enriched, {skipped} already complete."
         )
         if gone:
             typer.echo(f"Gone (moved or removed while running): {len(gone)}")
+        if changed_notes:
+            typer.echo(f"Changed while running, so not enriched: {len(changed_notes)}")
         return
 
     typer.echo(f"Enriched (auto): {enriched_auto}")
@@ -1035,6 +1094,10 @@ def autoenrich(
         # skipped total, a vanished note was reported as a finished one (#131
         # review).
         typer.echo(f"Gone (moved or removed while running): {len(gone)}")
+    if changed_notes:
+        # Also not "already complete", and not gone either: these notes are on
+        # the Shelf, newer than the enrichment worked out for them (#132).
+        typer.echo(f"Changed while running, so not enriched: {len(changed_notes)}")
 
     if needs_interactive:
         typer.echo(
@@ -1091,6 +1154,15 @@ def enrich(
         typer.echo(
             f"{selected_file.name} is gone - moved or removed while it was being "
             "enriched. Nothing written."
+        )
+        raise typer.Exit(code=1) from None
+    except NoteChanged:
+        # Edited while the reader chose a match. The enrichment fills fields that
+        # were empty when the note was read, and they may not be empty now, so it
+        # is refused rather than written over the edit (#132).
+        typer.echo(
+            f"{selected_file.name} changed while it was being enriched - saved in "
+            "Obsidian, or synced. Nothing written; run it again."
         )
         raise typer.Exit(code=1) from None
 
@@ -1663,6 +1735,15 @@ def merge(
             typer.echo(f"\n  Merging {secondary.name} into {primary.name}...")
 
             try:
+                # Taken before the merge reads the pair, and per secondary: the
+                # primary is rewritten by each merge in turn, so one fingerprint
+                # for the group would refuse every merge after the first (#132).
+                # The secondary is fingerprinted too - it is deleted at the end
+                # of this, and a deletion destroys an edit rather than
+                # overwriting it (#133 review).
+                primary_fingerprint = note_fingerprint(primary)
+                secondary_fingerprint = note_fingerprint(secondary)
+
                 if auto:
                     can_merge, reason, merge_result = check_auto_merge(
                         primary, secondary
@@ -1672,7 +1753,14 @@ def merge(
                         continue
 
                     merged_fm, merged_body, _ = merge_result
-                    if _write_merge(primary, secondary, merged_fm, merged_body):
+                    if _write_merge(
+                        primary,
+                        secondary,
+                        merged_fm,
+                        merged_body,
+                        primary_fingerprint,
+                        secondary_fingerprint,
+                    ):
                         typer.echo("    Auto-merged successfully")
                         total_merged += 1
                 else:
@@ -1706,7 +1794,14 @@ def merge(
                             typer.echo("    Skipped by user")
                             continue
 
-                    if _write_merge(primary, secondary, merged_fm, merged_body):
+                    if _write_merge(
+                        primary,
+                        secondary,
+                        merged_fm,
+                        merged_body,
+                        primary_fingerprint,
+                        secondary_fingerprint,
+                    ):
                         typer.echo("    Merged successfully")
                         total_merged += 1
             except FileNotFoundError:
@@ -1728,7 +1823,12 @@ def merge(
 
 
 def _write_merge(
-    primary: Path, secondary: Path, merged_fm: dict, merged_body: str
+    primary: Path,
+    secondary: Path,
+    merged_fm: dict,
+    merged_body: str,
+    expected_sha256: str | None = None,
+    secondary_sha256: str | None = None,
 ) -> bool:
     """Write a merged note, then delete its secondary, reporting a note gone.
 
@@ -1742,6 +1842,13 @@ def _write_merge(
         secondary: The note merged into it, deleted once the merge is written.
         merged_fm: The merged frontmatter.
         merged_body: The merged body.
+        expected_sha256: The primary's fingerprint when the merge read it. A
+            primary edited since - the reader answers a conflict prompt in that
+            gap - is left alone and its secondary kept (#132).
+        secondary_sha256: The secondary's fingerprint when the merge read it.
+            Checked before anything is written, so a secondary edited in that
+            same gap ends the merge rather than being deleted with writing the
+            merged note never saw (#133 review).
 
     Returns:
         True when the merged note was written, including when the secondary was
@@ -1749,8 +1856,29 @@ def _write_merge(
         not deleted, since it may have been moved. False when the primary was
         gone, so nothing was written and nothing deleted.
     """
+    if secondary_sha256 is not None:
+        try:
+            verify_note_unchanged(secondary, secondary_sha256)
+        except NoteChanged:
+            # Checked before the write, so this ends the merge with both notes as
+            # they stand, rather than after the primary has been rewritten.
+            typer.echo(
+                f"    {secondary.name} changed while the merge was being decided. "
+                "Nothing merged; nothing deleted."
+            )
+            return False
+        except FileNotFoundError:
+            # Gone after the merge read it, not before. Left to the command's
+            # own handler, this was reported as gone "before the merge was
+            # read", which is untrue and says nothing about what was written
+            # (#133 review).
+            typer.echo(
+                f"    {secondary.name} is gone - moved or removed while the merge "
+                "was being decided. Nothing merged; nothing deleted."
+            )
+            return False
     try:
-        write_merged_book(primary, merged_fm, merged_body)
+        write_merged_book(primary, merged_fm, merged_body, expected_sha256)
     except FileNotFoundError:
         # Moved or removed after the merge was worked out. The write refuses
         # rather than recreating it, and the secondary is kept (#128).
@@ -1759,8 +1887,26 @@ def _write_merge(
             "Nothing merged; nothing deleted."
         )
         return False
+    except NoteChanged:
+        # Edited after the merge read it. The merged text was worked out from
+        # what the note said before the edit, so writing it would discard the
+        # edit - and delete the secondary in exchange for it (#132).
+        typer.echo(
+            f"    {primary.name} changed while the merge was being decided. "
+            "Nothing merged; nothing deleted."
+        )
+        return False
     try:
-        delete_secondary_file(secondary)
+        delete_secondary_file(secondary, secondary_sha256)
+    except NoteChanged:
+        # Edited between the check above and this instant. The merged note is
+        # written, so the merge happened, but the secondary now holds writing the
+        # merge never saw: it is kept rather than deleted (#133 review).
+        typer.echo(
+            f"    Merged into {primary.name}, but {secondary.name} changed just "
+            "before it was deleted, so it was kept. Its newer writing is not in "
+            "the merged note - `libris doctor` will show the pair."
+        )
     except FileNotFoundError:
         # The merged note is written, so this merge is done - but a missing path
         # cannot tell a deleted secondary from a moved one. A moved copy is still
@@ -1990,15 +2136,24 @@ def migrate(
         typer.echo("Cancelled. Nothing written.")
         return
 
-    written = apply_migration(plans)
-    typer.echo(f"Migrated {written} notes.")
-    unwritten = len(changing) - written
-    if unwritten:
+    outcome = apply_migration(plans)
+    typer.echo(f"Migrated {outcome.written} notes.")
+    if outcome.gone:
         # Planned, then moved or removed before the migration reached them. Not
         # recreated from their plans, and said, rather than left for the reader
         # to find by counting (#128).
         typer.echo(
-            f"{unwritten} could not be written: moved or removed while migrating."
+            f"{outcome.gone} could not be written: moved or removed while migrating."
+        )
+    if outcome.changed:
+        # Edited between being planned and being written - the reader was shown
+        # the diffs and the migration waited here, which is exactly when an
+        # Obsidian save or a sync lands. Their plans describe text those notes no
+        # longer hold, so they are left alone and named apart from the notes that
+        # left the Shelf (#132).
+        typer.echo(
+            f"{outcome.changed} changed since they were planned and were left "
+            "alone. Re-run the migration to plan them again."
         )
 
 

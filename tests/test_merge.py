@@ -547,6 +547,28 @@ class TestDeleteSecondaryFile:
 
         assert not path.exists()
 
+    def test_a_secondary_edited_since_the_merge_read_it_is_not_deleted(self, tmp_path):
+        # Given a secondary edited after the merge read it, so the merged note
+        # carries what it said before that edit
+        from libris.markdown import NoteChanged, note_fingerprint
+
+        path = tmp_path / "book.md"
+        path.write_text("---\ntitle: Book\n---\n\n## Notes\n", encoding="utf-8")
+        fingerprint = note_fingerprint(path)
+        path.write_text(
+            "---\ntitle: Book\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+
+        # When the merge deletes it
+        # Then it refuses, and the writing survives. Deleting a note is not a
+        # write that can be taken back: this edit is in no other file, and the
+        # merged note never saw it (#133 review).
+        with pytest.raises(NoteChanged):
+            delete_secondary_file(path, fingerprint)
+        assert path.exists()
+        assert "Typed in Obsidian." in path.read_text(encoding="utf-8")
+
 
 class TestMergeEdgeCases:
     """Edge case tests for merge functionality."""
@@ -1105,3 +1127,27 @@ def test_genres_still_dedupe_on_the_exact_string(tmp_path):
 
     # Then both are kept; merging does not quietly pick a spelling
     assert merged_fm["genres"] == ["Science Fiction", "science fiction"]
+
+
+def test_a_primary_edited_since_the_merge_read_it_is_not_overwritten(tmp_path):
+    # Given a primary edited between the merge reading it and writing it - the
+    # interactive merge asks about conflicts in that gap
+    from libris.markdown import NoteChanged, note_fingerprint
+
+    primary = _write_book(tmp_path, "A.md", title="Dune", isbn="9780441013593")
+    secondary = _write_book(tmp_path, "B.md", title="Dune", isbn="9780441013593")
+    fingerprint = note_fingerprint(primary)
+    merged_fm, merged_body, _ = merge_two_books(
+        primary, secondary, allow_conflicts=True
+    )
+    primary.write_text(
+        "---\ntitle: Dune\n---\n\n## Notes\n\nTyped in Obsidian.\n", encoding="utf-8"
+    )
+
+    # When the merged note is written
+    # Then it refuses, and the reader's writing survives. The caller deletes the
+    # secondary only after this succeeds, so the edit is not traded for a
+    # deletion either (#132).
+    with pytest.raises(NoteChanged):
+        write_merged_book(primary, merged_fm, merged_body, fingerprint)
+    assert "Typed in Obsidian." in primary.read_text(encoding="utf-8")
