@@ -1957,6 +1957,36 @@ def apply_decisions(
             primary_fingerprint = note_fingerprint(primary)
             secondary_fingerprint = note_fingerprint(secondary)
 
+            # The index resolved these ids to paths before any of this was read,
+            # and a fingerprint taken here describes whatever sits at the path
+            # now - including a different book written there since. A decision
+            # names a book by its identity, not by where it sat, so the identity
+            # is checked again at the point it is acted on: nothing else would
+            # notice, and what follows merges one note into another and deletes
+            # it (#133 third review). Superseded ids count, because a note that
+            # absorbed another answers for it too (ADR 0014).
+            named = {shorter.strip(), longer.strip()}
+            stale = None
+            for path in (primary, secondary):
+                note_now = BookNote.read(path)
+                identities = (
+                    {note_now.libris_id} | set(note_now.superseded_ids)
+                    if note_now is not None
+                    else set()
+                )
+                if not named & identities:
+                    stale = path
+                    break
+            if stale is not None:
+                outcomes.append(
+                    DecisionOutcome(
+                        DecisionStatus.DRIFTED,
+                        f"{label}: {stale.name} is no longer the note the "
+                        "decision named; nothing merged",
+                    )
+                )
+                continue
+
             merged_fm, merged_body, conflicts = merge_two_books(
                 primary, secondary, allow_conflicts=allow_conflicts
             )
@@ -1994,14 +2024,13 @@ def apply_decisions(
             verify_note_unchanged(secondary, secondary_fingerprint)
         except NoteChanged:
             # Checked before the write, so the pair is left exactly as it stands.
-            # The index was built before this note changed, so what it holds about
-            # the note's identity may no longer be true - a replacement at the
-            # same path can carry a different Libris ID. It is forgotten, so a
-            # later decision in this batch naming it drifts rather than resolving
-            # to a path that no longer answers for that identity (#133 review).
-            for key, note in list(index.items()):
-                if note.path == secondary:
-                    del index[key]
+            # Its entries stay in the index: only its text changed, and a note
+            # that still answers for the identity a decision names is still the
+            # note to act on. An earlier round of this PR forgot it here, which
+            # drifted a later decision about a note that was present and was the
+            # right one - identity is revalidated where a decision is acted on
+            # instead, which is where a replacement does damage (#133 third
+            # review).
             outcomes.append(
                 DecisionOutcome(
                     DecisionStatus.DRIFTED,
@@ -2026,12 +2055,9 @@ def apply_decisions(
             # describes a note that no longer says that, so nothing is written
             # and the secondary is kept: applying it would have traded the
             # reader's edit for a deletion (#132).
-            # Forgotten for the same reason the changed secondary is: the index
-            # describes a note this batch has just been told it no longer
-            # matches (#133 review).
-            for key, note in list(index.items()):
-                if note.path == primary:
-                    del index[key]
+            # Left in the index for the same reason the changed secondary is: it
+            # still answers for its identity, and that is what a decision names
+            # (#133 third review).
             outcomes.append(
                 DecisionOutcome(
                     DecisionStatus.DRIFTED,

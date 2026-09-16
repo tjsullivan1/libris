@@ -3165,6 +3165,43 @@ def test_a_file_with_no_fence_at_all_is_still_all_body(tmp_path):
     assert list(damaged["loose.md"].fields) == ["body"]
 
 
+def test_a_decision_whose_note_was_replaced_by_another_book_drifts(
+    tmp_path, monkeypatch
+):
+    # Given a pair, one of whose notes is replaced at the same path by a
+    # different book - after the index resolved the decision to that path, and
+    # before anything about it is read. Its title matches the note it replaced,
+    # so nothing downstream reports a conflict and the merge simply proceeds.
+    first, second = _pair(tmp_path)
+    real = service.get_primary_book
+
+    def _replaced_after_the_index(path1, path2):
+        primary = real(path1, path2)
+        secondary = path2 if primary == path1 else path1
+        secondary.write_text(
+            f"---\ntitle: {BookNote.read(primary).title}\n"
+            "libris_id: lb-2099-9999\n---\n\n## Notes\n\nAnother book entirely.\n",
+            encoding="utf-8",
+        )
+        return primary
+
+    monkeypatch.setattr(service, "get_primary_book", _replaced_after_the_index)
+
+    # When the decision is applied
+    outcomes = apply_decisions(tmp_path, [_decision(first, second)])
+
+    # Then it drifts, and the book that was written there is still on the Shelf.
+    # Checked only by fingerprint, the hash described the replacement, so the
+    # decision merged a book it never named into another and then deleted it
+    # (#133 third review).
+    assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
+    assert len(list(tmp_path.glob("*.md"))) == 2
+    assert any(
+        "Another book entirely." in path.read_text(encoding="utf-8")
+        for path in tmp_path.glob("*.md")
+    )
+
+
 def test_a_kept_secondary_is_forgotten_rather_than_answered_for_by_the_primary(
     tmp_path, monkeypatch
 ):
@@ -3204,11 +3241,10 @@ def test_a_kept_secondary_is_forgotten_rather_than_answered_for_by_the_primary(
     assert third.path.exists()
 
 
-def test_a_secondary_that_changed_before_the_write_is_forgotten_too(
-    tmp_path, monkeypatch
-):
-    # Given a pair whose secondary changes before the merge is written, so
-    # nothing is merged - and a later decision naming that same note
+def test_a_secondary_that_only_changed_is_still_the_note_it_was(tmp_path, monkeypatch):
+    # Given a pair whose secondary changes before the merge is written - keeping
+    # its Libris ID, so it is the same note carrying newer writing - and a later
+    # decision in the same batch naming that note and a third book
     from libris.merge import get_primary_book
 
     first, second = _pair(tmp_path)
@@ -3219,8 +3255,10 @@ def test_a_secondary_that_changed_before_the_write_is_forgotten_too(
 
     def _edited_after_reading(path, secondary_path, **kwargs):
         merged = real(path, secondary_path, **kwargs)
+        note = BookNote.read(secondary_path)
         secondary_path.write_text(
-            "---\ntitle: The Brass Verdict\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            f"---\ntitle: {note.title}\nlibris_id: {note.libris_id}\n---\n"
+            "\n## Notes\n\nTyped in Obsidian.\n",
             encoding="utf-8",
         )
         return merged
@@ -3232,11 +3270,13 @@ def test_a_secondary_that_changed_before_the_write_is_forgotten_too(
         tmp_path, [_decision(first, second), _decision(changed, third)]
     )
 
-    # Then both drift: a note this batch was told had changed is not one the
-    # index can still answer for (#133 review)
+    # Then the first drifts - nothing was merged - and the second still acts on
+    # the changed note. It kept the identity the decision names, so it is the
+    # note to act on; forgetting it because its text moved drifted a decision
+    # about a note that was there and was right (#133 third review).
     assert [o.status for o in outcomes] == [
         DecisionStatus.DRIFTED,
-        DecisionStatus.DRIFTED,
+        DecisionStatus.MERGED,
     ]
 
 
