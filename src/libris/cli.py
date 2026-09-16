@@ -1441,6 +1441,104 @@ def _suggestions_for(
     }, None
 
 
+def _rename_damaged_filenames(damaged: list[EncodingDamage], vault_path: Path) -> None:
+    """Rename the notes whose filename still carries a lost character (#78).
+
+    The name comes from the note's own frontmatter, which parts 1 and 2 have
+    already repaired, so nothing is asked for a second time. What is asked is
+    whether to rename at all: the canonical name carries what the frontmatter
+    carries and nothing else, and on the real Shelf 8 of these filenames say
+    more than their notes do - an author's dates, an alternative spelling, a
+    pen name - which the move does not carry across.
+
+    Args:
+        damaged: The notes from `find_encoding_damage` whose filename is
+            damaged.
+        vault_path: The Shelf, used to sweep wikilinks when no wider Obsidian
+            vault is configured.
+    """
+    import questionary
+
+    vault_root = get_obsidian_vault_root() or vault_path
+    renamed = left = gone = 0
+
+    for damage in damaged:
+        path = damage.path
+        typer.echo(f"\n{path.name}")
+
+        try:
+            note = BookNote.read(path)
+        except FileNotFoundError:
+            # Moved or removed between the report and here, as any note may be
+            # while a command works through the Shelf (#128).
+            typer.echo("  is gone - moved or removed since it was reported. Skipped.")
+            gone += 1
+            continue
+
+        if note is None:
+            # Read through `BookNote` rather than `compute_canonical_filename`,
+            # which answers None both for a note nothing can parse and for one
+            # that simply has no title. Told apart because what the reader does
+            # next differs: repair the frontmatter by hand, or put a title in it.
+            # `repair` already draws this distinction when it decides what it can
+            # write to, and this branch dropped it (#135 review).
+            typer.echo(
+                "  has invalid or missing frontmatter, so nothing here can say "
+                "what it should be called. Left alone."
+            )
+            left += 1
+            continue
+
+        canonical = note.canonical_filename
+        if canonical is None:
+            typer.echo("  has no title or author to take a name from. Left alone.")
+            left += 1
+            continue
+
+        if LOST_CHARACTER in canonical:
+            # The frontmatter it reads from is still damaged, so this rename
+            # would move the lost character into the new name rather than
+            # repair anything.
+            typer.echo(
+                "  the name it would take still carries the lost character - "
+                "repair its frontmatter first. Left alone."
+            )
+            left += 1
+            continue
+
+        if canonical == path.name:
+            typer.echo("  already has the name its frontmatter gives it.")
+            continue
+
+        typer.echo(f"  -> {canonical}")
+        if not questionary.confirm("  rename it?", default=True).ask():
+            typer.echo("  Left alone.")
+            left += 1
+            continue
+
+        try:
+            result = rename_book_file(path, vault_root)
+        except FileNotFoundError:
+            typer.echo("  is gone - moved or removed mid-rename. Nothing renamed.")
+            gone += 1
+            continue
+
+        if result.status == "renamed":
+            typer.echo(f"  Renamed to {result.new_path.name}")
+            renamed += 1
+            continue
+
+        # Collision, or frontmatter that stopped being readable since it was
+        # reported. Said in the same words `cleanup --rename` uses for it.
+        message = _format_rename_skip(path.name, result)
+        typer.echo(f"  {message}" if message else "  Left alone.")
+        left += 1
+
+    typer.echo(f"\nRenamed {renamed} note(s); left {left} alone.")
+    if gone:
+        typer.echo(f"{gone} were gone - moved or removed while renaming.")
+
+
 @app.command()
 def repair(
     limit: int = typer.Option(
@@ -1448,6 +1546,11 @@ def repair(
         "--limit",
         min=0,
         help="Stop after considering this many notes (0 for all)",
+    ),
+    rename: bool = typer.Option(
+        False,
+        "--rename",
+        help="Also rename notes whose filename lost a character (rewrites wikilinks)",
     ),
 ) -> None:
     """Put back characters lost to a bad decode, one string at a time (#78).
@@ -1463,8 +1566,16 @@ def repair(
     carries a replacement character, and nothing is written without your typing
     it: guessing at an author's name is the silent wrongness ADR 0003 refuses.
 
-    Filenames are left alone. Renaming a note rewrites the wikilinks pointing at
-    it, which is its own piece of work.
+    Filenames are left alone unless you pass --rename, which gives each note the
+    name its frontmatter says it should have and points the wikilinks at it. It
+    asks per note, and it refuses a note whose frontmatter is still damaged,
+    because the name it would write would carry the lost character too.
+
+    The rename takes the spelling from the frontmatter rather than asking again,
+    so a filename ends up saying exactly what the note says. Where the filename
+    carries more than the frontmatter does - an author's dates, an alternative
+    spelling - that extra text is not carried across, which is why it shows the
+    new name and waits for an answer (#78).
     """
     import questionary
 
@@ -1592,15 +1703,26 @@ def repair(
 
     typer.echo(f"Repaired {repaired} note(s); left {untouched} alone.")
     renames = [note for note in damaged if note.touches_filename]
-    if renames:
+    if not renames:
+        return
+
+    if rename:
         typer.echo(
-            f"{len(renames)} still have damage in the filename. Renaming rewrites "
-            "the wikilinks pointing at a note, so it is left for that work:"
+            f"\n{len(renames)} have damage in the filename. Renaming rewrites the "
+            "wikilinks pointing at a note, so each is shown before it is asked:"
         )
-        # Named, not only counted: #78 asks for the notes wanting a rename to be
-        # recorded, and a count cannot be acted on (#129 fifth review).
-        for note in renames:
-            typer.echo(f"  {note.path.name}")
+        _rename_damaged_filenames(renames, vault_path)
+        return
+
+    typer.echo(
+        f"{len(renames)} still have damage in the filename. Renaming rewrites "
+        "the wikilinks pointing at a note, so it is not done unless asked for - "
+        "re-run with --rename to do it now:"
+    )
+    # Named, not only counted: #78 asks for the notes wanting a rename to be
+    # recorded, and a count cannot be acted on (#129 fifth review).
+    for note in renames:
+        typer.echo(f"  {note.path.name}")
 
 
 @app.command()
