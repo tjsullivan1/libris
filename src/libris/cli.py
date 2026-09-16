@@ -736,9 +736,10 @@ def cleanup(
             typer.echo(
                 f"No files renamed. {skipped_count} file(s) could not be renamed."
             )
-        elif not gone_count:
-            # Not when a note vanished: it was never looked at, so nothing says
-            # its name is canonical (#131 second review).
+        elif not gone_count and not changed_count:
+            # Not when a note vanished, and not when one changed: neither was
+            # renamed, so nothing here says its name is canonical (#131 second
+            # review, #133 review).
             typer.echo("All files already have canonical names.")
 
     if unmatched_files:
@@ -1864,6 +1865,16 @@ def _write_merge(
             typer.echo(
                 f"    {secondary.name} changed while the merge was being decided. "
                 "Nothing merged; nothing deleted."
+            )
+            return False
+        except FileNotFoundError:
+            # Gone after the merge read it, not before. Left to the command's
+            # own handler, this was reported as gone "before the merge was
+            # read", which is untrue and says nothing about what was written
+            # (#133 review).
+            typer.echo(
+                f"    {secondary.name} is gone - moved or removed while the merge "
+                "was being decided. Nothing merged; nothing deleted."
             )
             return False
     try:

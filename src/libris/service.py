@@ -1994,6 +1994,14 @@ def apply_decisions(
             verify_note_unchanged(secondary, secondary_fingerprint)
         except NoteChanged:
             # Checked before the write, so the pair is left exactly as it stands.
+            # The index was built before this note changed, so what it holds about
+            # the note's identity may no longer be true - a replacement at the
+            # same path can carry a different Libris ID. It is forgotten, so a
+            # later decision in this batch naming it drifts rather than resolving
+            # to a path that no longer answers for that identity (#133 review).
+            for key, note in list(index.items()):
+                if note.path == secondary:
+                    del index[key]
             outcomes.append(
                 DecisionOutcome(
                     DecisionStatus.DRIFTED,
@@ -2018,6 +2026,12 @@ def apply_decisions(
             # describes a note that no longer says that, so nothing is written
             # and the secondary is kept: applying it would have traded the
             # reader's edit for a deletion (#132).
+            # Forgotten for the same reason the changed secondary is: the index
+            # describes a note this batch has just been told it no longer
+            # matches (#133 review).
+            for key, note in list(index.items()):
+                if note.path == primary:
+                    del index[key]
             outcomes.append(
                 DecisionOutcome(
                     DecisionStatus.DRIFTED,
@@ -2040,9 +2054,11 @@ def apply_decisions(
             )
             continue
         notes: list[str] = []
+        secondary_kept = False
         try:
             delete_secondary_file(secondary, secondary_fingerprint)
         except NoteChanged:
+            secondary_kept = True
             # Edited between the check above and this instant. The merge is
             # written, so it happened, but the secondary holds writing the merged
             # note never saw and is kept rather than deleted (#133 review).
@@ -2076,8 +2092,17 @@ def apply_decisions(
             notes.append(f"{primary.name} was then moved or removed")
         if survivor is not None:
             for key, note in list(index.items()):
-                if note.path in (primary, secondary):
+                if note.path == primary or (
+                    note.path == secondary and not secondary_kept
+                ):
                     index[key] = survivor
+                elif note.path == secondary:
+                    # Kept, because it changed under the merge. It is still its
+                    # own note and the merged note does not answer for what it
+                    # now says, so its identities are forgotten rather than
+                    # pointed at the primary - a later decision naming it would
+                    # otherwise have acted on the wrong file (#133 review).
+                    del index[key]
 
         detail = f"{label} -> {primary.name}"
         if notes:

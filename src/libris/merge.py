@@ -381,6 +381,14 @@ def delete_secondary_file(
             newer writing is in no other file, and deleting it destroys it
             (#133 review).
 
+    The check and the deletion are two operations, and nothing makes them one:
+    a plain file offers no compare-and-delete, and `unlink` names a path rather
+    than the bytes that were just hashed. A replacement landing in that window
+    is deleted. The window is the microseconds between the two calls rather than
+    the minutes a merge spends waiting for a reader, which is what this guards,
+    but it is not closed - said here rather than left for someone to assume
+    otherwise (#133 review).
+
     Raises:
         FileNotFoundError: If the secondary is not there.
         NoteChanged: If `expected_sha256` is given and the secondary no longer

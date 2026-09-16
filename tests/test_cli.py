@@ -2487,6 +2487,67 @@ def test_cleanup_reports_a_note_edited_while_it_ran_and_carries_on(
     assert "libris_id" in kept.read_text(encoding="utf-8")
 
 
+def test_cleanup_rename_does_not_call_names_canonical_when_a_note_changed(
+    monkeypatch, tmp_path
+):
+    # Given a Shelf whose only note changes while cleanup --rename repairs it, so
+    # no rename is ever attempted
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    edited = _legacy_note(vault, "Edited.md")
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    _edited_while_it_worked(
+        monkeypatch,
+        edited,
+        "---\ntitle: Edited\nstatus: To Read\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+    )
+
+    # When cleanup runs with --rename
+    result = runner.invoke(app, ["cleanup", "--rename"])
+
+    # Then it does not claim every filename is canonical - nothing was looked at,
+    # the same reason a vanished note suppresses it (#131 second review, #133)
+    assert result.exit_code == 0, result.output
+    assert "All files already have canonical names." not in result.output
+    assert "1 note(s) changed" in result.output
+
+
+def test_merge_says_a_secondary_that_went_missing_after_the_merge_read_it(
+    monkeypatch, tmp_path
+):
+    # Given two copies of one Book, the secondary removed after the merge read it
+    vault = tmp_path / "shelf"
+    vault.mkdir()
+    for name in ("A.md", "B.md"):
+        (vault / name).write_text(
+            "---\ntitle: Dune\nauthors:\n  - Frank Herbert\nisbn: '9780441013593'\n"
+            "google_books_id: gb1\n---\n\n## Notes\n\nMine.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+
+    from libris import cli as cli_module
+
+    real_check = cli_module.check_auto_merge
+
+    def _secondary_removed_after_reading(primary, secondary):
+        result = real_check(primary, secondary)
+        secondary.unlink()
+        return result
+
+    monkeypatch.setattr("libris.cli.check_auto_merge", _secondary_removed_after_reading)
+
+    # When the pair is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then it says when the note went missing. Left to the command's handler this
+    # read "before the merge was read", which is untrue: the merge had already
+    # been worked out from it (#133 review).
+    assert result.exit_code == 0, result.output
+    assert "before the merge was read" not in result.output
+    assert "while the merge was being decided" in result.output
+
+
 def test_merge_keeps_a_secondary_edited_between_the_check_and_the_delete(
     monkeypatch, tmp_path
 ):

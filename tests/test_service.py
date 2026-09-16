@@ -3165,6 +3165,81 @@ def test_a_file_with_no_fence_at_all_is_still_all_body(tmp_path):
     assert list(damaged["loose.md"].fields) == ["body"]
 
 
+def test_a_kept_secondary_is_forgotten_rather_than_answered_for_by_the_primary(
+    tmp_path, monkeypatch
+):
+    # Given a pair judged one Book whose secondary is edited between the check
+    # and the deletion, so it is kept - and a later decision in the same batch
+    # naming that kept note and a third book
+    from libris.merge import get_primary_book
+
+    first, second = _pair(tmp_path)
+    third = BookNote.read(create_book_note(_candidate(title="The Reversal"), tmp_path))
+    primary_path = get_primary_book(first.path, second.path)
+    kept = second if primary_path == first.path else first
+    real = service.write_merged_book
+
+    def _edit_secondary_after_writing(path, *args, **kwargs):
+        result = real(path, *args, **kwargs)
+        kept.path.write_text(
+            "---\ntitle: The Brass Verdict\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(service, "write_merged_book", _edit_secondary_after_writing)
+
+    # When both decisions are applied in one batch
+    outcomes = apply_decisions(
+        tmp_path, [_decision(first, second), _decision(kept, third)]
+    )
+
+    # Then the second drifts. The index went on mapping the kept note's identity
+    # to the primary, so a decision naming the note that was deliberately kept
+    # resolved to the wrong file and merged it (#133 review).
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.MERGED,
+        DecisionStatus.DRIFTED,
+    ]
+    assert third.path.exists()
+
+
+def test_a_secondary_that_changed_before_the_write_is_forgotten_too(
+    tmp_path, monkeypatch
+):
+    # Given a pair whose secondary changes before the merge is written, so
+    # nothing is merged - and a later decision naming that same note
+    from libris.merge import get_primary_book
+
+    first, second = _pair(tmp_path)
+    third = BookNote.read(create_book_note(_candidate(title="The Reversal"), tmp_path))
+    primary_path = get_primary_book(first.path, second.path)
+    changed = second if primary_path == first.path else first
+    real = service.merge_two_books
+
+    def _edited_after_reading(path, secondary_path, **kwargs):
+        merged = real(path, secondary_path, **kwargs)
+        secondary_path.write_text(
+            "---\ntitle: The Brass Verdict\n---\n\n## Notes\n\nTyped in Obsidian.\n",
+            encoding="utf-8",
+        )
+        return merged
+
+    monkeypatch.setattr(service, "merge_two_books", _edited_after_reading)
+
+    # When both decisions are applied in one batch
+    outcomes = apply_decisions(
+        tmp_path, [_decision(first, second), _decision(changed, third)]
+    )
+
+    # Then both drift: a note this batch was told had changed is not one the
+    # index can still answer for (#133 review)
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.DRIFTED,
+        DecisionStatus.DRIFTED,
+    ]
+
+
 def test_a_secondary_edited_after_the_check_and_before_the_delete_is_kept(
     tmp_path, monkeypatch
 ):
