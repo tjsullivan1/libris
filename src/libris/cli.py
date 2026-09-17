@@ -1785,11 +1785,12 @@ def duplicates():
     """Find and report duplicate books in the vault."""
     vault_path = _require_vault_path()
 
-    # Read once and handed to both. Each of these parsed the whole Shelf
+    # Parsed once, then handed to both. Each of these read the whole Shelf
     # itself, and `find_duplicate_candidates` called `find_duplicates` again
     # inside, so this command made three passes over 3,073 notes to answer one
     # question - 85% of its time, by cProfile (#107).
     notes = read_shelf_notes(vault_path)
+    by_path = {note.path: note for note in notes}
     groups = find_duplicates(vault_path, notes)
 
     if not groups:
@@ -1799,7 +1800,12 @@ def duplicates():
     for i, group in enumerate(groups, 1):
         typer.echo(f"Group {i}:")
         for path in group:
-            fm = read_frontmatter(path)
+            # From the notes already parsed above, not read again. Parsing each
+            # reported duplicate a second time here meant the one-pass claim
+            # held only on a Shelf with no duplicates to report - which is the
+            # Shelf it was measured on (#139 review).
+            note = by_path.get(path)
+            fm = note.frontmatter if note is not None else read_frontmatter(path)
             isbn = fm.get("isbn") if fm else None
             gid = fm.get("google_books_id") if fm else None
             details = []
