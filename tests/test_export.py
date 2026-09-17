@@ -216,6 +216,47 @@ def test_export_csv_has_one_line_per_book(tmp_path):
     assert all(line.strip() for line in lines)
 
 
+def test_export_csv_to_stdout_carries_no_carriage_returns(tmp_path, monkeypatch):
+    # Given a Shelf
+    _shelf(tmp_path)
+
+    # Asserted on the string handed to the stream, not on what CliRunner
+    # captured. CliRunner writes into an in-memory buffer that translates
+    # nothing, so the doubling this guards against is invisible there - which
+    # is exactly why it shipped: the harness said stdout was fine while a real
+    # shell redirect produced 3,074 "\r\r\n" sequences (#144 review).
+    printed: list[str] = []
+    monkeypatch.setattr("libris.cli.typer.echo", lambda text, **_: printed.append(text))
+
+    # When it is exported as CSV to the terminal
+    result = runner.invoke(app, ["export", "--format", "csv"])
+
+    # Then nothing carrying a carriage return reaches the stream: the one
+    # translation the stream applies then produces the right ending, instead of
+    # doubling one that is already there.
+    assert result.exit_code == 0, result.output
+    assert printed, "nothing was printed"
+    assert "\r" not in printed[-1]
+    assert printed[-1].count("\n") >= 1
+
+
+def test_export_csv_to_a_file_keeps_its_own_line_endings(tmp_path):
+    # Given the same Shelf, written to a file rather than printed
+    _shelf(tmp_path)
+    out = tmp_path / "library.csv"
+
+    # When it is exported
+    result = runner.invoke(app, ["export", "--format", "csv", "--out", str(out)])
+
+    # Then the file holds csv's own "\r\n" exactly, doubled by nothing. The
+    # two destinations want different things, and normalising for the terminal
+    # must not reach the file.
+    assert result.exit_code == 0, result.output
+    raw = out.read_bytes()
+    assert b"\r\r\n" not in raw
+    assert raw.count(b"\r\n") == len(out.read_text(encoding="utf-8").splitlines())
+
+
 def test_export_refuses_a_format_it_does_not_know(tmp_path):
     # Given a Shelf
     _shelf(tmp_path)

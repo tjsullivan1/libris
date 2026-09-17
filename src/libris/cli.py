@@ -1846,6 +1846,20 @@ def export(
             writer.writerow(fields)
         rendered = buffer.getvalue()
 
+    if not out and chosen == "csv":
+        # Normalised for the terminal only. `csv` writes its own "\r\n", and
+        # this process's stdout is a translating text stream, so those
+        # terminators arrive as "\r\r\n" - measured through a shell redirect at
+        # 6,149 lines and 3,074 doubled endings for 3,073 books. Handing it
+        # "\n" lets the stream's one translation produce the right ending
+        # rather than doubling one that is already there.
+        #
+        # Measured through a real redirect rather than Typer's CliRunner, which
+        # captures into an in-memory buffer and translates nothing: against
+        # that harness stdout looked correct, which is how this shipped while
+        # the file path was being fixed (#144 review).
+        rendered = rendered.replace("\r\n", "\n")
+
     if out:
         out_path = Path(out).expanduser()
         # newline="" rather than `write_text`, which leaves newline=None and
