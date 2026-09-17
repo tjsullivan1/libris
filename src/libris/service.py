@@ -878,15 +878,19 @@ def _json_safe(value: object) -> object:
 def export_notes(vault_path: Path, include_bodies: bool = True) -> list[dict]:
     """Every Book Note on the Shelf, in a shape that can be written out (#12).
 
-    The Shelf is parsed once. A body is read from the file when it is wanted,
-    because `BookNote.read` fills in frontmatter only - which is also what makes
-    leaving bodies out a real saving rather than a cosmetic flag.
+    Every note is read once to parse its frontmatter, whatever is asked for.
+    Asking for bodies reads each file a *second* time, because `BookNote.read`
+    keeps the frontmatter and not the text it came from - so `include_bodies`
+    halves the reads rather than avoiding them: 8 against 4 on a four-note
+    Shelf. Worth stating plainly, because the comment that used to sit here
+    claimed the first read as the saving too (#144 review).
 
     Args:
         vault_path: The Shelf to export.
-        include_bodies: Whether each note's own writing travels with it. Every
-            note on the real Shelf has a body, and ADR 0009 calls that writing
-            the irreplaceable part, so an export meant as a backup keeps it.
+        include_bodies: Whether each note's own writing travels with it, at the
+            cost of a second read per note. Every note on the real Shelf has a
+            body, and ADR 0009 calls that writing the irreplaceable part, so an
+            export meant as a backup keeps it.
 
     Returns:
         One row per readable note: its filename, its frontmatter with dates as

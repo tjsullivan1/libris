@@ -1827,8 +1827,9 @@ def export(
         # Bodies are not fetched here, and that is about cost rather than
         # safety: the writer below is built over the modelled fields with
         # extrasaction="ignore", so a body would be dropped from the output
-        # anyway. Asking for one would mean reading 3,073 files to discard
-        # what they hold.
+        # anyway. What it saves is the *second* read of each note - parsing
+        # the frontmatter already reads every file once - measured at 8 reads
+        # against 4 for a four-note Shelf (#144 review).
         rows = export_notes(vault_path, include_bodies=False)
         buffer = io.StringIO()
         writer = csv.DictWriter(
@@ -1872,6 +1873,14 @@ def export(
         # exists (#100).
         with out_path.open("w", encoding="utf-8", newline="") as handle:
             handle.write(rendered)
+            # JSON has no terminator of its own, so a file written from it ends
+            # mid-line while the same JSON printed to the terminal ends with
+            # one. The same request through two routes should not produce two
+            # different files - the argument that settled the CSV ending, and
+            # it applies here too (#144 review). CSV needs nothing: `csv`
+            # terminates its last record itself.
+            if chosen == "json":
+                handle.write("\n")
         typer.echo(f"{len(rows)} note(s) written to {out_path}")
         return
 

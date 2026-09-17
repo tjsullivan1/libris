@@ -269,6 +269,24 @@ def test_export_csv_to_a_file_keeps_its_own_line_endings(tmp_path):
     assert raw.count(b"\r\n") == len(out.read_text(encoding="utf-8").splitlines())
 
 
+def test_export_json_to_a_file_ends_with_a_newline(tmp_path):
+    # Given a Shelf exported as JSON to a file
+    _shelf(tmp_path)
+    out = tmp_path / "library.json"
+
+    # When it is written
+    result = runner.invoke(app, ["export", "--out", str(out)])
+
+    # Then the file ends with a newline, as the same JSON printed to the
+    # terminal does. `json.dumps` supplies no terminator, so the file ended
+    # mid-line while stdout ended with one - the same route-dependent
+    # difference that was fixed for CSV (#144 review).
+    assert result.exit_code == 0, result.output
+    raw = out.read_bytes()
+    assert raw.endswith(b"\n")
+    assert raw.rstrip(b"\r\n").endswith(b"]")
+
+
 def test_export_refuses_a_format_it_does_not_know(tmp_path):
     # Given a Shelf
     _shelf(tmp_path)
