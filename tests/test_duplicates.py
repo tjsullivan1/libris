@@ -268,6 +268,35 @@ def test_a_confirmed_duplicate_is_not_also_a_candidate(tmp_path):
     assert candidates == []
 
 
+def test_finding_candidates_parses_each_note_once(tmp_path, monkeypatch):
+    # Given a Shelf of notes
+    from libris import markdown
+
+    for index in range(5):
+        _write_book(
+            tmp_path, f"{index}.md", title=f"Book {index}", authors=["An Author"]
+        )
+    notes_on_shelf = len(list(tmp_path.glob("*.md")))
+
+    parsed = []
+    real = markdown.read_frontmatter
+
+    def _counting(path):
+        parsed.append(path)
+        return real(path)
+
+    monkeypatch.setattr(markdown, "read_frontmatter", _counting)
+
+    # When candidates are found
+    find_duplicate_candidates(tmp_path)
+
+    # Then every note was read once, not twice. This function parsed the Shelf
+    # itself and then called `find_duplicates(vault_path)`, which parsed it
+    # again - measured at 6,146 parses of a 3,073-note Shelf, and the command
+    # above it made that three passes (#107).
+    assert len(parsed) == notes_on_shelf
+
+
 def test_duplicates_lists_candidates_separately(tmp_path):
     # Given a subtitle variant, which is a judgement rather than a fact
     set_config("book_vault", str(tmp_path))

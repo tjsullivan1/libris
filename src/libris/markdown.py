@@ -692,7 +692,33 @@ def list_books(vault_path: Path):
     ]
 
 
-def find_duplicate_candidates(vault_path: Path) -> list[list[BookNote]]:
+def read_shelf_notes(vault_path: Path) -> list[BookNote]:
+    """Parse every readable Book Note on the Shelf, once.
+
+    Reading and parsing notes is what a Shelf-wide query costs: profiled
+    against the real 3,073-note Shelf, `read_frontmatter` accounts for 85% of
+    `libris duplicates`, most of it inside `yaml.load`. Anything that needs the
+    whole Shelf more than once should read it here and pass the result on,
+    rather than reaching for the disk again (#107).
+
+    Args:
+        vault_path: The Shelf to read.
+
+    Returns:
+        A Book Note per file that could be parsed, in the order the Shelf lists
+        them. A file that cannot be read is left out rather than raising, the
+        same answer `find_duplicates` has always given for one.
+    """
+    return [
+        note
+        for note in (BookNote.read(path) for path in list_books(vault_path))
+        if note is not None
+    ]
+
+
+def find_duplicate_candidates(
+    vault_path: Path, notes: list[BookNote] | None = None
+) -> list[list[BookNote]]:
     """Find pairs of Book Notes that may describe one Book.
 
     Matched by title containment rather than by a shared identifier, which is a
@@ -706,25 +732,32 @@ def find_duplicate_candidates(vault_path: Path) -> list[list[BookNote]]:
 
     Args:
         vault_path: The Shelf to search.
+        notes: The Shelf already parsed, when the caller has it. This function
+            parsed the Shelf itself and then called `find_duplicates`, which
+            parsed it again - 6,146 parses of a 3,073-note Shelf for one
+            answer (#107).
 
     Returns:
         Pairs of Book Notes, shorter title first, ordered by author then title.
     """
-    notes: list[BookNote] = []
-    for book_path in list_books(vault_path):
-        note = BookNote.read(book_path)
-        if note is not None and note.title and note.first_author:
-            notes.append(note)
+    if notes is None:
+        notes = read_shelf_notes(vault_path)
 
+    # Every readable note goes to `find_duplicates`, not just the named ones
+    # below: a note missing an author can still share an ISBN, and settling
+    # pairs from a smaller Shelf than it used to see would change what this
+    # reports rather than only what it costs.
     settled = set()
-    for group in find_duplicates(vault_path):
+    for group in find_duplicates(vault_path, notes):
         for a in group:
             for b in group:
                 if a != b:
                     settled.add(frozenset((str(a), str(b))))
 
+    named = [note for note in notes if note.title and note.first_author]
+
     by_author: dict[str, list[BookNote]] = {}
-    for note in notes:
+    for note in named:
         by_author.setdefault(normalize_for_match(note.first_author), []).append(note)
 
     seen = set()
@@ -887,17 +920,22 @@ EXCLUDED_GOOGLE_BOOKS_IDS = {
 }
 
 
-def find_duplicates(vault_path: Path) -> list[list[Path]]:
+def find_duplicates(
+    vault_path: Path, notes: list[BookNote] | None = None
+) -> list[list[Path]]:
     """Find groups of duplicate book notes by title, ISBN, or Google Books ID.
 
     Returns a list of groups where each group contains two or more paths
     that share at least one matching identifier.
+
+    Args:
+        vault_path: The Shelf to search.
+        notes: The Shelf already parsed, when the caller has it. Parsing is
+            what this costs, so a caller holding the notes already should not
+            pay for them twice (#107).
     """
-    notes: list[BookNote] = []
-    for book_path in list_books(vault_path):
-        note = BookNote.read(book_path)
-        if note is not None:
-            notes.append(note)
+    if notes is None:
+        notes = read_shelf_notes(vault_path)
 
     def _author_key(note: BookNote) -> tuple[str, ...]:
         return tuple(sorted(name.lower() for name in note.authors))
