@@ -232,6 +232,131 @@ def test_a_subtitle_variant_is_offered_as_a_candidate(tmp_path):
     assert titles == {"The Brass Verdict", "The Brass Verdict: A Novel"}
 
 
+def test_a_title_contained_at_the_end_is_not_a_candidate(tmp_path):
+    # Given a sequel whose title ends with an earlier book's title - the shape
+    # of "Mercy" and "Long Road to Mercy" on the real Shelf (#136)
+    _write_book(tmp_path, "A.md", title="Mercy", authors=["David Baldacci"])
+    _write_book(
+        tmp_path, "B.md", title="Long Road to Mercy", authors=["David Baldacci"]
+    )
+
+    # When candidates are found
+    # Then nothing is offered. A title that merely ends with another is a
+    # different book far more often than it is the same one: measured across
+    # the Shelf, every such pair was two books.
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_title_contained_in_the_middle_is_not_a_candidate(tmp_path):
+    # Given a title that carries another inside it, the shape of "American
+    # Assassin" and "Kill Shot: An American Assassin Thriller" (#136)
+    _write_book(tmp_path, "A.md", title="American Assassin", authors=["Vince Flynn"])
+    _write_book(
+        tmp_path,
+        "B.md",
+        title='"Kill Shot: An American Assassin Thriller"',
+        authors=["Vince Flynn"],
+    )
+
+    # When candidates are found
+    # Then nothing is offered: a series name inside a longer title says these
+    # belong together, not that they are one book.
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_prefix_that_is_not_a_whole_word_is_not_a_candidate(tmp_path):
+    # Given a title that begins with another only by accident of spelling -
+    # the shape of "Freakonomics" inside "SuperFreakonomics" on the real Shelf,
+    # and here in the form where the prefix test alone would be fooled (#136)
+    _write_book(tmp_path, "A.md", title="Dune", authors=["Frank Herbert"])
+    _write_book(tmp_path, "B.md", title="Dunes of Arrakis", authors=["Frank Herbert"])
+
+    # When candidates are found
+    # Then nothing is offered. "Dune" is a prefix of "Dunes" as a string and
+    # not as a word, and a subtitle begins after the title ends.
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_longer_title_sharing_a_first_word_is_not_a_candidate(tmp_path):
+    # Given the Shelf's own pair, where the shorter title is a suffix of the
+    # longer title's first word
+    _write_book(tmp_path, "A.md", title="Freakonomics", authors=["Steven D. Levitt"])
+    _write_book(
+        tmp_path,
+        "B.md",
+        title='"SuperFreakonomics: Global Cooling"',
+        authors=["Steven D. Levitt"],
+    )
+
+    # When candidates are found
+    # Then nothing is offered
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_companion_volume_is_not_a_candidate(tmp_path):
+    # Given a workbook, which does start with the book's whole title - so the
+    # prefix rule alone still offers it (#136)
+    _write_book(
+        tmp_path,
+        "A.md",
+        title="The 7 Habits of Highly Effective People",
+        authors=["Stephen R. Covey"],
+    )
+    _write_book(
+        tmp_path,
+        "B.md",
+        title="The 7 Habits of Highly Effective People Workbook",
+        authors=["Stephen R. Covey"],
+    )
+
+    # When candidates are found
+    # Then nothing is offered. What the longer title adds is the whole
+    # question, and "Workbook" says companion volume rather than same book.
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_companion_volume_with_an_apostrophe_is_not_a_candidate(tmp_path):
+    # Given a companion volume whose marker carries an apostrophe.
+    # `normalize_for_match` turns punctuation into a space, so this arrives as
+    # "a reader s guide" - and a marker written "readers guide" by hand could
+    # never match it (#141 review).
+    _write_book(tmp_path, "A.md", title="Dune", authors=["Frank Herbert"])
+    _write_book(
+        tmp_path, "B.md", title='"Dune: A Reader\'s Guide"', authors=["Frank Herbert"]
+    )
+
+    # When candidates are found
+    # Then nothing is offered
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_companion_volume_that_says_more_is_not_a_candidate(tmp_path):
+    # Given a workbook that carries an edition after the marker, which an
+    # exact-equality check let through (#141 review)
+    _write_book(tmp_path, "A.md", title="Dune", authors=["Frank Herbert"])
+    _write_book(
+        tmp_path, "B.md", title='"Dune Workbook: Revised"', authors=["Frank Herbert"]
+    )
+
+    # When candidates are found
+    # Then nothing is offered: a workbook is a workbook whatever follows it
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_subtitle_beginning_with_an_article_is_still_a_candidate(tmp_path):
+    # Given the positive the suite has always encoded, whose suffix is "a
+    # novel" - close enough to a companion marker to be worth pinning, so a
+    # broader marker list cannot quietly swallow it
+    _write_book(tmp_path, "A.md", title="The Brass Verdict", authors=["Michael"])
+    _write_book(
+        tmp_path, "B.md", title='"The Brass Verdict: A Novel"', authors=["Michael"]
+    )
+
+    # When candidates are found
+    # Then it is still offered to a person
+    assert len(find_duplicate_candidates(tmp_path)) == 1
+
+
 def test_a_different_book_by_the_same_author_is_not_a_candidate(tmp_path):
     # Given two unrelated books, the case measured on the real Shelf
     _write_book(tmp_path, "A.md", title="Freakonomics", authors=["Steven"])

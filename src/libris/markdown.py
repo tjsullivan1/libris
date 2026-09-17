@@ -692,6 +692,86 @@ def list_books(vault_path: Path):
     ]
 
 
+# What a longer title adds when it is a companion volume rather than the book:
+# a workbook, a study guide, a summary. Measured on the real Shelf, the only
+# prefix-shaped false pair was "The 7 Habits of Highly Effective People" and
+# the same title plus "Workbook" (#136).
+_COMPANION_VOLUMES = frozenset(
+    normalize_for_match(marker)
+    for marker in (
+        "workbook",
+        "study guide",
+        "summary",
+        "companion",
+        "journal",
+        "handbook",
+        "a reader's guide",
+        "reader's guide",
+    )
+)
+
+
+def _is_subtitle_variant(shorter: str, longer: str) -> bool:
+    """Whether `longer` looks like `shorter` with a subtitle, not another book.
+
+    Containment anywhere was the old rule, and on this Shelf it was wrong every
+    time: all 8 pairs it offered were two different books - "Mercy" and "Long
+    Road to Mercy", "American Assassin" and "Kill Shot: An American Assassin
+    Thriller", "Freakonomics" and "SuperFreakonomics". A title that merely ends
+    with or carries another names a sequel, a prequel or a series, which is a
+    relationship rather than an identity (#136).
+
+    What a real subtitle variant does is *begin* with the whole title and add to
+    it - "The Brass Verdict" and "The Brass Verdict: A Novel". So the shorter
+    title must be a prefix, ending on a word boundary, and what the longer adds
+    must not name a companion volume.
+
+    Args:
+        shorter: The title that would be the book, normalized. The caller
+            compares every pair both ways round, so this is not guaranteed to
+            be the shorter string - it is simply the one being tested as the
+            prefix, and the answer is False when it is the longer of the two.
+        longer: The title that would be the variant, normalized.
+
+    Returns:
+        True when the pair is worth offering to a person to settle.
+    """
+    if not longer.startswith(shorter):
+        return False
+
+    # On a word boundary: "Freakonomics" is a prefix of "SuperFreakonomics"
+    # only by accident of spelling, and this Shelf holds that exact pair.
+    rest = longer[len(shorter) :]
+    if not rest.startswith(" "):
+        return False
+
+    return not _names_a_companion(rest.strip())
+
+
+def _names_a_companion(suffix: str) -> bool:
+    """Whether what a longer title adds names a companion volume.
+
+    Matched as a whole-word prefix of the suffix, not by equality: a workbook
+    is still a workbook when it says "Workbook: Revised" or "Workbook Edition",
+    and comparing the whole suffix let both through (#141 review).
+
+    The markers are normalized through `normalize_for_match`, because that is
+    what the titles they are compared against have been through. Written by
+    hand, "readers guide" never matched anything at all: an apostrophe becomes
+    a space, so `A Reader's Guide` arrives here as `a reader s guide`.
+
+    Args:
+        suffix: What the longer title adds, normalized.
+
+    Returns:
+        True when the suffix names a companion volume rather than a subtitle.
+    """
+    return any(
+        suffix == marker or suffix.startswith(f"{marker} ")
+        for marker in _COMPANION_VOLUMES
+    )
+
+
 def read_shelf_notes(vault_path: Path) -> list[BookNote]:
     """Parse every readable Book Note on the Shelf, once.
 
@@ -721,11 +801,15 @@ def find_duplicate_candidates(
 ) -> list[list[BookNote]]:
     """Find pairs of Book Notes that may describe one Book.
 
-    Matched by title containment rather than by a shared identifier, which is a
-    judgement rather than a fact: measured against the real Shelf, containment
-    conflates 83 pairs, of which roughly nine are different books - "Mercy" and
-    "Long Road to Mercy", "Freakonomics" and "SuperFreakonomics". So these are
-    offered to a person and never merged automatically (ADR 0018).
+    Matched by title shape rather than by a shared identifier, which is a
+    judgement rather than a fact, so these are offered to a person and never
+    merged automatically (ADR 0018).
+
+    The rule was once containment anywhere, and by the time the real duplicates
+    had been merged away it was wrong every time: all 8 pairs it still offered
+    were two different books. It now asks for the shape a subtitle variant
+    actually has - see `_is_subtitle_variant` - which leaves none of those 8
+    and keeps the variants the suite encodes (#136).
 
     Pairs that `find_duplicates` already reports are left out; they are settled,
     not candidates.
@@ -769,7 +853,7 @@ def find_duplicate_candidates(
                     continue
                 title_a = normalize_for_match(a.title)
                 title_b = normalize_for_match(b.title)
-                if title_a == title_b or title_a not in title_b:
+                if title_a == title_b or not _is_subtitle_variant(title_a, title_b):
                     continue
                 key = frozenset((str(a.path), str(b.path)))
                 if key in seen or key in settled:
