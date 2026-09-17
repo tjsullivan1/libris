@@ -697,16 +697,17 @@ def list_books(vault_path: Path):
 # prefix-shaped false pair was "The 7 Habits of Highly Effective People" and
 # the same title plus "Workbook" (#136).
 _COMPANION_VOLUMES = frozenset(
-    {
+    normalize_for_match(marker)
+    for marker in (
         "workbook",
         "study guide",
         "summary",
         "companion",
         "journal",
         "handbook",
-        "readers guide",
-        "a readers guide",
-    }
+        "a reader's guide",
+        "reader's guide",
+    )
 )
 
 
@@ -744,7 +745,31 @@ def _is_subtitle_variant(shorter: str, longer: str) -> bool:
     if not rest.startswith(" "):
         return False
 
-    return rest.strip() not in _COMPANION_VOLUMES
+    return not _names_a_companion(rest.strip())
+
+
+def _names_a_companion(suffix: str) -> bool:
+    """Whether what a longer title adds names a companion volume.
+
+    Matched as a whole-word prefix of the suffix, not by equality: a workbook
+    is still a workbook when it says "Workbook: Revised" or "Workbook Edition",
+    and comparing the whole suffix let both through (#141 review).
+
+    The markers are normalized through `normalize_for_match`, because that is
+    what the titles they are compared against have been through. Written by
+    hand, "readers guide" never matched anything at all: an apostrophe becomes
+    a space, so `A Reader's Guide` arrives here as `a reader s guide`.
+
+    Args:
+        suffix: What the longer title adds, normalized.
+
+    Returns:
+        True when the suffix names a companion volume rather than a subtitle.
+    """
+    return any(
+        suffix == marker or suffix.startswith(f"{marker} ")
+        for marker in _COMPANION_VOLUMES
+    )
 
 
 def read_shelf_notes(vault_path: Path) -> list[BookNote]:

@@ -315,6 +315,48 @@ def test_a_companion_volume_is_not_a_candidate(tmp_path):
     assert find_duplicate_candidates(tmp_path) == []
 
 
+def test_a_companion_volume_with_an_apostrophe_is_not_a_candidate(tmp_path):
+    # Given a companion volume whose marker carries an apostrophe.
+    # `normalize_for_match` turns punctuation into a space, so this arrives as
+    # "a reader s guide" - and a marker written "readers guide" by hand could
+    # never match it (#141 review).
+    _write_book(tmp_path, "A.md", title="Dune", authors=["Frank Herbert"])
+    _write_book(
+        tmp_path, "B.md", title='"Dune: A Reader\'s Guide"', authors=["Frank Herbert"]
+    )
+
+    # When candidates are found
+    # Then nothing is offered
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_companion_volume_that_says_more_is_not_a_candidate(tmp_path):
+    # Given a workbook that carries an edition after the marker, which an
+    # exact-equality check let through (#141 review)
+    _write_book(tmp_path, "A.md", title="Dune", authors=["Frank Herbert"])
+    _write_book(
+        tmp_path, "B.md", title='"Dune Workbook: Revised"', authors=["Frank Herbert"]
+    )
+
+    # When candidates are found
+    # Then nothing is offered: a workbook is a workbook whatever follows it
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_a_subtitle_beginning_with_an_article_is_still_a_candidate(tmp_path):
+    # Given the positive the suite has always encoded, whose suffix is "a
+    # novel" - close enough to a companion marker to be worth pinning, so a
+    # broader marker list cannot quietly swallow it
+    _write_book(tmp_path, "A.md", title="The Brass Verdict", authors=["Michael"])
+    _write_book(
+        tmp_path, "B.md", title='"The Brass Verdict: A Novel"', authors=["Michael"]
+    )
+
+    # When candidates are found
+    # Then it is still offered to a person
+    assert len(find_duplicate_candidates(tmp_path)) == 1
+
+
 def test_a_different_book_by_the_same_author_is_not_a_candidate(tmp_path):
     # Given two unrelated books, the case measured on the real Shelf
     _write_book(tmp_path, "A.md", title="Freakonomics", authors=["Steven"])
