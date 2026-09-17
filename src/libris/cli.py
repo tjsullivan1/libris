@@ -1875,7 +1875,12 @@ def export(
         typer.echo(f"{len(rows)} note(s) written to {out_path}")
         return
 
-    typer.echo(rendered)
+    # CSV is already newline-terminated by `csv`, so `typer.echo` would add a
+    # second one and the redirected file would end "\r\n\r\n" - an extra blank
+    # row to some consumers, and a file whose bytes differ from what --out
+    # writes for the same request. JSON keeps its trailing newline, which is
+    # what a text stream should end with (#144 review).
+    typer.echo(rendered, nl=(chosen != "csv"))
 
 
 @app.command()

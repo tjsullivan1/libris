@@ -225,8 +225,12 @@ def test_export_csv_to_stdout_carries_no_carriage_returns(tmp_path, monkeypatch)
     # nothing, so the doubling this guards against is invisible there - which
     # is exactly why it shipped: the harness said stdout was fine while a real
     # shell redirect produced 3,074 "\r\r\n" sequences (#144 review).
-    printed: list[str] = []
-    monkeypatch.setattr("libris.cli.typer.echo", lambda text, **_: printed.append(text))
+    printed: list[tuple[str, bool]] = []
+
+    def _echo(text="", **kwargs):
+        printed.append((text, kwargs.get("nl", True)))
+
+    monkeypatch.setattr("libris.cli.typer.echo", _echo)
 
     # When it is exported as CSV to the terminal
     result = runner.invoke(app, ["export", "--format", "csv"])
@@ -236,8 +240,16 @@ def test_export_csv_to_stdout_carries_no_carriage_returns(tmp_path, monkeypatch)
     # doubling one that is already there.
     assert result.exit_code == 0, result.output
     assert printed, "nothing was printed"
-    assert "\r" not in printed[-1]
-    assert printed[-1].count("\n") >= 1
+    text, newline_added = printed[-1]
+    assert "\r" not in text
+    assert text.count("\n") >= 1
+
+    # And no newline is added on top of the one `csv` already wrote. Asserted
+    # on the call rather than on the captured output, because CliRunner's
+    # capture is what hid the doubling this test was written for: it cannot
+    # show a trailing byte any more than it could show a translated one.
+    assert text.endswith("\n")
+    assert newline_added is False
 
 
 def test_export_csv_to_a_file_keeps_its_own_line_endings(tmp_path):
