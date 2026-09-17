@@ -11,7 +11,7 @@ import math
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -26,6 +26,7 @@ from .markdown import (
     edit_note,
     list_books,
     note_fingerprint,
+    read_shelf_notes,
     set_frontmatter_fields,
     split_frontmatter,
     unterminated_frontmatter,
@@ -845,6 +846,73 @@ def _set_reader_fields(
         written=written,
         derived=derived,
     )
+
+
+def _json_safe(value: object) -> object:
+    """A frontmatter value in a shape JSON can hold.
+
+    PyYAML resolves an unquoted `2020-05-05` to a `datetime.date`, and a quoted
+    one to a string, so the same field holds both types across the Shelf
+    depending on who wrote it - 5,946 values on the real Shelf are dates, the
+    rest strings (#143). `json.dumps` refuses the date objects outright.
+
+    Dates become ISO-8601 strings, which is what Libris itself already writes
+    when it stamps one (`date.today().isoformat()`), so an export settles on the
+    spelling the Library already produces rather than inventing a third.
+
+    Args:
+        value: Whatever the frontmatter held.
+
+    Returns:
+        The value, with dates rendered as ISO strings and containers walked.
+    """
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    return value
+
+
+def export_notes(vault_path: Path, include_bodies: bool = True) -> list[dict]:
+    """Every Book Note on the Shelf, in a shape that can be written out (#12).
+
+    The Shelf is parsed once. A body is read from the file when it is wanted,
+    because `BookNote.read` fills in frontmatter only - which is also what makes
+    leaving bodies out a real saving rather than a cosmetic flag.
+
+    Args:
+        vault_path: The Shelf to export.
+        include_bodies: Whether each note's own writing travels with it. Every
+            note on the real Shelf has a body, and ADR 0009 calls that writing
+            the irreplaceable part, so an export meant as a backup keeps it.
+
+    Returns:
+        One row per readable note: its filename, its frontmatter with dates as
+        ISO strings, and its body when asked for. A file that cannot be parsed
+        is left out, the same answer every other Shelf-wide query gives.
+    """
+    rows: list[dict] = []
+    for note in read_shelf_notes(vault_path):
+        row: dict = {
+            "path": note.path.name,
+            "frontmatter": {
+                key: _json_safe(value) for key, value in note.frontmatter.items()
+            },
+        }
+        if include_bodies:
+            try:
+                content = note.path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # Parsed a moment ago, so this is the note moving or being
+                # replaced mid-export. Its fields are already in hand; the body
+                # is what is missing, and saying so beats failing the export.
+                content = ""
+            split = split_frontmatter(content)
+            row["body"] = split[1] if split else content
+        rows.append(row)
+    return rows
 
 
 # The replacement character. It is what a decoder writes when it is handed bytes

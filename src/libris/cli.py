@@ -61,6 +61,7 @@ from .migrate import (
     plan_migration,
 )
 from .note_format import (
+    MODELLED_FIELDS,
     STATUS_VALUES,
     InvalidFieldValue,
     normalize_field_value,
@@ -78,6 +79,7 @@ from .service import (
     accept_correction,
     apply_decisions,
     apply_encoding_repair,
+    export_notes,
     find_encoding_damage,
     inspect_shelf,
     propose_encoding_repair,
@@ -1778,6 +1780,88 @@ def repair(
     # recorded, and a count cannot be acted on (#129 fifth review).
     for note in renames:
         typer.echo(f"  {note.path.name}")
+
+
+@app.command()
+def export(
+    format: str = typer.Option(
+        "json", "--format", "-f", help="json (lossless) or csv (a spreadsheet view)"
+    ),
+    out: str | None = typer.Option(
+        None, "--out", help="Write to this file instead of printing it"
+    ),
+    no_bodies: bool = typer.Option(
+        False, "--no-bodies", help="Leave each note's own writing out of the JSON"
+    ),
+) -> None:
+    """Write the Library out as JSON or CSV (#12).
+
+    JSON is the lossless shape: every field a note carries, and its body unless
+    you pass --no-bodies. CSV is a view for a spreadsheet - the fields the
+    Library models, one column each - and never carries a body, because a
+    spreadsheet of someone's reading notes is not what it is for.
+
+    Dates are written as ISO-8601 strings in both. The same field holds a date
+    object on some notes and a string on others, depending on who wrote it, and
+    an export has to settle on one (#143).
+    """
+    # Imported here rather than at the top: only this command needs them, and
+    # every command pays for what `cli` imports before Typer has chosen one
+    # (#106).
+    import csv
+    import io
+
+    chosen = format.strip().lower()
+    if chosen not in ("json", "csv"):
+        # Named rather than defaulted quietly: an export that silently wrote
+        # something other than what was asked for is worse than no export.
+        typer.echo(f"No such format: {format!r}. Use json or csv.")
+        raise typer.Exit(code=1)
+
+    vault_path = _require_vault_path()
+
+    if chosen == "json":
+        rows = export_notes(vault_path, include_bodies=not no_bodies)
+        rendered = json.dumps(rows, indent=2, ensure_ascii=False)
+    else:
+        # Bodies are not fetched here, and that is about cost rather than
+        # safety: the writer below is built over the modelled fields with
+        # extrasaction="ignore", so a body would be dropped from the output
+        # anyway. Asking for one would mean reading 3,073 files to discard
+        # what they hold.
+        rows = export_notes(vault_path, include_bodies=False)
+        buffer = io.StringIO()
+        writer = csv.DictWriter(
+            buffer, fieldnames=list(MODELLED_FIELDS), extrasaction="ignore"
+        )
+        writer.writeheader()
+        for row in rows:
+            fields = dict(row["frontmatter"])
+            for key, value in list(fields.items()):
+                if isinstance(value, list):
+                    # Joined rather than left as a list, which `csv` would
+                    # write as a Python repr - "['Frank Herbert']" in a cell.
+                    value = "; ".join(str(item) for item in value)
+                fields[key] = "" if value is None else value
+            writer.writerow(fields)
+        rendered = buffer.getvalue()
+
+    if out:
+        out_path = Path(out).expanduser()
+        # newline="" rather than `write_text`, which leaves newline=None and
+        # translates every "\n" to os.linesep on the way out. `csv` has already
+        # written its own "\r\n", so that second translation produced "\r\r\n"
+        # and a blank line between every record - 6,148 lines for 3,073 books.
+        # `csv.DictReader` skips those blanks and reports the file as fine,
+        # which is how it survived a parser-based test; a spreadsheet shows
+        # them. The same translation is why `markdown._encode_with_newline`
+        # exists (#100).
+        with out_path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(rendered)
+        typer.echo(f"{len(rows)} note(s) written to {out_path}")
+        return
+
+    typer.echo(rendered)
 
 
 @app.command()
