@@ -579,6 +579,164 @@ def test_the_status_prompt_offers_what_the_library_defines(monkeypatch, tmp_path
     assert "Finished" not in offered[-1]
 
 
+def _no_prompts(monkeypatch):
+    """Fail the test if anything tries to ask a question.
+
+    A scripted run has nobody to answer, so asking is the defect rather than a
+    detail of how it is implemented (#43).
+    """
+
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError("a scripted run must not prompt")
+
+    for prompt in ("autocomplete", "select", "text", "confirm"):
+        monkeypatch.setattr(f"questionary.{prompt}", _refuse)
+
+
+def _one_book(tmp_path, title="Dune", author="Frank Herbert"):
+    """A Book Note on a Shelf, at its default status."""
+    from libris.api import BookCandidate
+    from libris.markdown import create_book_note
+
+    return create_book_note(BookCandidate(title=title, authors=[author]), tmp_path)
+
+
+def test_status_sets_a_named_book_without_asking(monkeypatch, tmp_path):
+    # Given a book on the Shelf, named on the command line
+    from libris.markdown import read_frontmatter
+
+    path = _one_book(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _no_prompts(monkeypatch)
+
+    # When its status is set in one call
+    result = runner.invoke(app, ["status", path.name, "--set", "Read"])
+
+    # Then it is written, and nothing was asked. Without this the command could
+    # only be used by hand: it prompted for the book and again for the status,
+    # so no script or shortcut could reach it (#43).
+    assert result.exit_code == 0, result.output
+    assert read_frontmatter(path)["status"] == "Read"
+
+
+def test_status_sets_a_book_named_by_its_libris_id(monkeypatch, tmp_path):
+    # Given a book named by identity rather than by filename
+    from libris.markdown import BookNote, read_frontmatter
+
+    path = _one_book(tmp_path)
+    libris_id = BookNote.read(path).libris_id
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _no_prompts(monkeypatch)
+
+    # When its status is set by that id
+    result = runner.invoke(app, ["status", "--id", libris_id, "--set", "Reading"])
+
+    # Then the note holding that identity is written. An id survives a rename
+    # and a merge, which a filename does not (ADR 0001, ADR 0014).
+    assert result.exit_code == 0, result.output
+    assert read_frontmatter(path)["status"] == "Reading"
+
+
+def test_status_refuses_a_filename_and_an_id_together(monkeypatch, tmp_path):
+    # Given both ways of naming a book, given at once
+    from libris.markdown import BookNote, read_frontmatter
+
+    path = _one_book(tmp_path)
+    libris_id = BookNote.read(path).libris_id
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _no_prompts(monkeypatch)
+
+    # When the status is set
+    result = runner.invoke(
+        app, ["status", path.name, "--id", libris_id, "--set", "Read"]
+    )
+
+    # Then it refuses rather than picking one of them. They can name different
+    # notes, and guessing which was meant is the silent wrongness ADR 0003
+    # refuses.
+    assert result.exit_code == 1
+    assert read_frontmatter(path)["status"] == "To Read"
+
+
+def test_status_refuses_a_value_the_library_does_not_define(monkeypatch, tmp_path):
+    # Given a status no note may hold
+    from libris.markdown import read_frontmatter
+
+    path = _one_book(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _no_prompts(monkeypatch)
+
+    # When it is set
+    result = runner.invoke(app, ["status", path.name, "--set", "Finished"])
+
+    # Then nothing is written. "Finished" is the value this prompt used to offer
+    # and no note has ever held.
+    assert result.exit_code == 1
+    assert read_frontmatter(path)["status"] == "To Read"
+
+
+def test_status_refuses_a_bad_value_before_reading_the_shelf(monkeypatch, tmp_path):
+    # Given a status the Library does not define, and a Shelf that fails the
+    # test if it is read at all
+    path = _one_book(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _no_prompts(monkeypatch)
+
+    def _refuse_to_scan(_vault_path):
+        raise AssertionError("the Shelf should not be read to refuse a bad value")
+
+    monkeypatch.setattr("libris.cli._books_on_the_shelf", _refuse_to_scan)
+
+    # When the bad value is given for a named book
+    result = runner.invoke(app, ["status", path.name, "--set", "Finished"])
+
+    # Then it is refused without reading the Shelf. The service layer refuses it
+    # too, so the command would exit 1 either way - but only after parsing every
+    # note to find the one the value was never going to be written to, which on
+    # the real Shelf is seconds spent to say no (#43).
+    #
+    # Asserted as a *clean* refusal, not merely a non-zero exit. The sabotage
+    # above raises AssertionError, and CliRunner reports that as exit code 1
+    # too: checking the code alone, this test passed while the Shelf was being
+    # read, which is the one thing it exists to catch.
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert result.output.strip()
+
+
+def test_status_says_what_it_derived_when_scripted(monkeypatch, tmp_path):
+    # Given a book being marked as started
+    path = _one_book(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _no_prompts(monkeypatch)
+
+    # When that happens without a prompt
+    result = runner.invoke(app, ["status", path.name, "--set", "Reading"])
+
+    # Then the date it stamped is still said. A stamped date is indistinguishable
+    # from a stated one afterwards, and a script's output is where the reader
+    # would see it (ADR 0024).
+    assert result.exit_code == 0, result.output
+    assert "date_started" in result.output
+
+
+def test_status_refuses_a_filename_that_is_not_on_the_shelf(monkeypatch, tmp_path):
+    # Given a name no Book Note has
+    _one_book(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
+    _no_prompts(monkeypatch)
+
+    # When it is named
+    result = runner.invoke(app, ["status", "../outside.md", "--set", "Read"])
+
+    # Then it is refused by name rather than resolved into a path that could
+    # lead out of the vault - and refused cleanly, saying which name it was.
+    # An exit code on its own does not distinguish a refusal from a crash.
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "is on the Shelf" in result.output
+
+
 # --- what importing the CLI is allowed to cost (#106) -----------------------
 
 # Every command pays for whatever `libris.cli` imports, before Typer has even

@@ -80,6 +80,7 @@ from .service import (
     find_encoding_damage,
     inspect_shelf,
     propose_encoding_repair,
+    update_book,
     update_note,
 )
 
@@ -249,51 +250,103 @@ def _note_on_the_shelf(vault_path: Path, name: str, books: list[Path]) -> Path:
 
 
 @app.command()
-def status():
-    """Update the status of a book in your vault."""
-    import questionary
+def status(
+    book: str | None = typer.Argument(
+        None, help="Filename of the Book Note, e.g. 'Dune - Frank Herbert.md'"
+    ),
+    libris_id: str | None = typer.Option(
+        None, "--id", help="Libris ID of the book, instead of a filename"
+    ),
+    to: str | None = typer.Option(
+        None, "--set", "-s", help="The status to set, instead of being asked for it"
+    ),
+) -> None:
+    """Update the status of a book in your vault.
+
+    Asks which book and which status when neither is named. Name the book - by
+    filename, or by `--id` - and pass `--set`, and it writes without asking,
+    which is what lets a script or a shortcut reach it (#43).
+    """
+    if book is not None and libris_id is not None:
+        # Two ways of naming a book can name two different books, and choosing
+        # between them would be a guess about what was meant (ADR 0003).
+        typer.echo("Name a book by filename or by --id, not both.")
+        raise typer.Exit(code=1)
+
+    # Checked before the Shelf is read, as `add` checks before its search: a
+    # value the Library does not define is refused without first parsing every
+    # note to find the one it was meant for.
+    if to is not None:
+        try:
+            validate_field_value("status", to)
+        except InvalidFieldValue as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from None
 
     vault_path = _require_vault_path()
-    books = _books_on_the_shelf(vault_path)
+    selected_file: Path | None = None
 
-    if not books:
-        typer.echo("No books found in vault.")
-        return
+    # An id is resolved through the index, which also answers for an identity a
+    # merge has since absorbed (ADR 0014). Nothing on that path needs the Shelf
+    # listed, so it is not listed - which is most of what makes a scripted call
+    # quick.
+    if libris_id is None:
+        books = _books_on_the_shelf(vault_path)
 
-    # Autocomplete rather than a list to scroll, as `clean` and `enrich`
-    # already use. A flat select of 3,063 filenames is not something anyone can
-    # find a book in (#43).
-    choices = [p.name for p in books]
-    selected_file_name = questionary.autocomplete(
-        "Select a book to update:",
-        choices=choices,
-        match_middle=True,
-    ).ask()
+        if not books:
+            typer.echo("No books found in vault.")
+            return
 
-    if not selected_file_name:
-        return
+        chosen_name = book
+        if chosen_name is None:
+            # Imported here rather than at the top of the command: a scripted
+            # call names its book and its status, and should not pay for the
+            # prompt stack it never reaches (#106).
+            import questionary
 
-    selected_file = _note_on_the_shelf(vault_path, selected_file_name, books)
+            # Autocomplete rather than a list to scroll, as `clean` and `enrich`
+            # already use. A flat select of 3,063 filenames is not something
+            # anyone can find a book in (#43).
+            chosen_name = questionary.autocomplete(
+                "Select a book to update:",
+                choices=[p.name for p in books],
+                match_middle=True,
+            ).ask()
 
-    # Offered from the Library's own vocabulary rather than a list kept here.
-    # This prompt used to offer "Finished", which no note has ever held, and
-    # omit "Not To Read"; since validation landed, choosing it raised.
-    new_status = questionary.select("New status:", choices=list(STATUS_VALUES)).ask()
+            if not chosen_name:
+                return
 
-    if not new_status:
-        return
+        selected_file = _note_on_the_shelf(vault_path, chosen_name, books)
+
+    new_status = to
+    if new_status is None:
+        import questionary
+
+        # Offered from the Library's own vocabulary rather than a list kept
+        # here. This prompt used to offer "Finished", which no note has ever
+        # held, and omit "Not To Read"; since validation landed, choosing it
+        # raised.
+        new_status = questionary.select(
+            "New status:", choices=list(STATUS_VALUES)
+        ).ask()
+
+        if not new_status:
+            return
 
     # Through the service layer, so this Surface and the MCP tools cannot
     # disagree about what setting a status means (ADR 0008). They did: marking
     # a book Reading through MCP stamped `date_started` and doing it here did
     # not, so the same act left two different notes depending on where it was
     # done (#97).
-    #
-    # By path rather than by identity: this command already holds the note, and
-    # resolving it by id parsed the whole Shelf to find it again - and when two
-    # notes claimed one id (#75), found the other of them (#125).
     try:
-        result = update_note(selected_file, {"status": new_status})
+        if selected_file is not None:
+            # By path rather than by identity when a file is in hand: resolving
+            # it by id parsed the whole Shelf to find a note this command
+            # already held - and when two notes claimed one id (#75), found the
+            # other of them (#125).
+            result = update_note(selected_file, {"status": new_status})
+        else:
+            result = update_book(vault_path, libris_id, {"status": new_status})
     except FrontmatterUnreadable as exc:
         typer.echo(f"{exc} Nothing was written to it.")
         raise typer.Exit(code=1) from None
@@ -301,13 +354,14 @@ def status():
         typer.echo(str(exc))
         raise typer.Exit(code=1) from None
 
-    typer.echo(f"Updated: {selected_file_name} -> {new_status}")
+    typer.echo(f"Updated: {result.note.path.name} -> {new_status}")
 
     # A stamped date is indistinguishable from a stated one afterwards, so the
     # reader is told now, while they can still say it was last Tuesday
-    # (ADR 0024).
-    for name, value in result.derived.items():
-        typer.echo(f"  Also set {name}: {value}")
+    # (ADR 0024). Said on a scripted run too, where its output is the only
+    # place anyone would see it.
+    for field_name, value in result.derived.items():
+        typer.echo(f"  Also set {field_name}: {value}")
 
 
 @app.command(name="list")
