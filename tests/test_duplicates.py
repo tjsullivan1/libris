@@ -278,10 +278,10 @@ def test_finding_candidates_parses_each_note_once(tmp_path, monkeypatch):
         )
     notes_on_shelf = len(list(tmp_path.glob("*.md")))
 
-    parsed = []
+    parsed: list[Path] = []
     real = markdown.read_frontmatter
 
-    def _counting(path):
+    def _counting(path: Path) -> dict | None:
         parsed.append(path)
         return real(path)
 
@@ -294,6 +294,48 @@ def test_finding_candidates_parses_each_note_once(tmp_path, monkeypatch):
     # itself and then called `find_duplicates(vault_path)`, which parsed it
     # again - measured at 6,146 parses of a 3,073-note Shelf, and the command
     # above it made that three passes (#107).
+    assert len(parsed) == notes_on_shelf
+
+
+def test_the_duplicates_command_parses_each_note_once(tmp_path, monkeypatch):
+    # Given a Shelf that holds a real duplicate group, so the command reaches
+    # the code that prints each duplicate's ISBN and Google ID. With no group
+    # to report that branch never runs, and a test written on such a Shelf
+    # passes whether or not it parses those notes again (#139 review).
+    from libris import cli as cli_module
+    from libris import markdown
+
+    set_config("book_vault", str(tmp_path))
+    _write_book(tmp_path, "A.md", title="Dune", authors=["Frank"], isbn="978-0-441-0")
+    _write_book(tmp_path, "B.md", title="Dune", authors=["Frank"], isbn="978-0-441-0")
+    _write_book(tmp_path, "C.md", title="Emma", authors=["Jane"], isbn="978-1-111-1")
+    notes_on_shelf = len(list(tmp_path.glob("*.md")))
+
+    parsed: list[Path] = []
+    real = markdown.read_frontmatter
+
+    def _counting(path: Path) -> dict | None:
+        parsed.append(path)
+        return real(path)
+
+    # Patched in both namespaces. `cli.py` does `from .markdown import
+    # read_frontmatter`, so its name is bound to the original function object
+    # and rebinding `markdown.read_frontmatter` alone leaves the command's own
+    # calls uncounted - which is how the first version of this test passed
+    # against the very re-parsing it was written to catch (#139 review).
+    monkeypatch.setattr(markdown, "read_frontmatter", _counting)
+    monkeypatch.setattr(cli_module, "read_frontmatter", _counting)
+
+    # When the command runs
+    result = runner.invoke(app, ["duplicates"])
+
+    # Then the whole Shelf was parsed exactly once. The command called
+    # `find_duplicates`, then `find_duplicate_candidates` - which parsed the
+    # Shelf itself and called `find_duplicates` again - and then parsed every
+    # reported duplicate once more to print its ISBN: three passes and change,
+    # 9,219 parses of a 3,073-note Shelf (#107).
+    assert result.exit_code == 0, result.output
+    assert "Found 1 group(s)" in result.output
     assert len(parsed) == notes_on_shelf
 
 
