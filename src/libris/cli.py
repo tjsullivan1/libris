@@ -33,6 +33,7 @@ from .markdown import (
     note_fingerprint,
     read_frontmatter,
     read_note_with_fingerprint,
+    read_shelf_notes,
     rename_book_file,
     rewrite_note,
     split_frontmatter,
@@ -1784,7 +1785,12 @@ def duplicates():
     """Find and report duplicate books in the vault."""
     vault_path = _require_vault_path()
 
-    groups = find_duplicates(vault_path)
+    # Read once and handed to both. Each of these parsed the whole Shelf
+    # itself, and `find_duplicate_candidates` called `find_duplicates` again
+    # inside, so this command made three passes over 3,073 notes to answer one
+    # question - 85% of its time, by cProfile (#107).
+    notes = read_shelf_notes(vault_path)
+    groups = find_duplicates(vault_path, notes)
 
     if not groups:
         typer.echo("No duplicates found.")
@@ -1805,7 +1811,7 @@ def duplicates():
             typer.echo(f"  - {path.name}{detail_str}")
         typer.echo()
 
-    candidates = find_duplicate_candidates(vault_path)
+    candidates = find_duplicate_candidates(vault_path, notes)
     if candidates:
         typer.echo(f"\n{len(candidates)} duplicate candidate(s) need a person:")
         typer.echo(
