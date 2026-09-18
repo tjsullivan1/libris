@@ -61,6 +61,7 @@ from .migrate import (
     plan_migration,
 )
 from .note_format import (
+    MODELLED_FIELDS,
     STATUS_VALUES,
     InvalidFieldValue,
     normalize_field_value,
@@ -75,9 +76,12 @@ from .service import (
     FieldRepair,
     IdCollision,
     IsbnAgreement,
+    ShelfExport,
     accept_correction,
     apply_decisions,
     apply_encoding_repair,
+    csv_view,
+    export_notes,
     find_encoding_damage,
     inspect_shelf,
     propose_encoding_repair,
@@ -1778,6 +1782,126 @@ def repair(
     # recorded, and a count cannot be acted on (#129 fifth review).
     for note in renames:
         typer.echo(f"  {note.path.name}")
+
+
+@app.command()
+def export(
+    format: str = typer.Option(
+        "json", "--format", "-f", help="json (lossless) or csv (a spreadsheet view)"
+    ),
+    out: str | None = typer.Option(
+        None, "--out", help="Write to this file instead of printing it"
+    ),
+    no_bodies: bool = typer.Option(
+        False, "--no-bodies", help="Leave each note's own writing out of the JSON"
+    ),
+) -> None:
+    """Write the Library out as JSON or CSV (#12).
+
+    JSON is the lossless shape: every field a note carries, and its body unless
+    you pass --no-bodies. CSV is a view for a spreadsheet - the fields the
+    Library models, one column each - and never carries a body, because a
+    spreadsheet of someone's reading notes is not what it is for.
+
+    Dates are written as ISO-8601 strings in both. The same field holds a date
+    object on some notes and a string on others, depending on who wrote it, and
+    an export has to settle on one (#143).
+    """
+    # Imported here rather than at the top: only this command needs them, and
+    # every command pays for what `cli` imports before Typer has chosen one
+    # (#106).
+    import csv
+    import io
+
+    chosen = format.strip().lower()
+    if chosen not in ("json", "csv"):
+        # Named rather than defaulted quietly: an export that silently wrote
+        # something other than what was asked for is worse than no export.
+        typer.echo(f"No such format: {format!r}. Use json or csv.")
+        raise typer.Exit(code=1)
+
+    vault_path = _require_vault_path()
+
+    if chosen == "json":
+        export = export_notes(vault_path, include_bodies=not no_bodies)
+        rendered = json.dumps(export.rows, indent=2, ensure_ascii=False)
+    else:
+        # Bodies are not fetched here, and that is about cost rather than
+        # safety: `csv_view` keeps only the modelled fields, so a body would
+        # not reach the output anyway. What it saves is the *second* read of
+        # each note - parsing the frontmatter already reads every file once -
+        # measured at 8 reads against 4 for a four-note Shelf (#144 review).
+        export = export_notes(vault_path, include_bodies=False)
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=list(MODELLED_FIELDS))
+        writer.writeheader()
+        writer.writerows(csv_view(export.rows))
+        rendered = buffer.getvalue()
+
+    if out:
+        out_path = Path(out).expanduser()
+        # newline="" rather than `write_text`, which leaves newline=None and
+        # translates every "\n" to os.linesep on the way out. `csv` has already
+        # written its own "\r\n", so that second translation produced "\r\r\n"
+        # and a blank line between every record - 6,148 lines for 3,073 books.
+        # `csv.DictReader` skips those blanks and reports the file as fine,
+        # which is how it survived a parser-based test; a spreadsheet shows
+        # them. The same translation is why `markdown._encode_with_newline`
+        # exists (#100).
+        with out_path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(rendered)
+            # JSON has no terminator of its own, so a file written from it ends
+            # mid-line while the same JSON printed to the terminal ends with
+            # one. The same request through two routes should not produce two
+            # different files - the argument that settled the CSV ending, and
+            # it applies here too (#144 review). CSV needs nothing: `csv`
+            # terminates its last record itself.
+            if chosen == "json":
+                handle.write("\n")
+        typer.echo(f"{len(export.rows)} note(s) written to {out_path}")
+        _report_export_gaps(export)
+        return
+
+    if chosen == "csv":
+        # Handed over as bytes, which `click.echo` writes to the binary stream
+        # untranslated. As text, stdout translates every "\n" it is given, and
+        # `csv` has already written "\r\n" - so its terminators came out doubled
+        # (#144 review). Rewriting "\r\n" to "\n" first fixed the terminators
+        # but also rewrote any line break inside a quoted cell, and on Linux,
+        # where nothing translates it back, changed the value. As bytes there
+        # is nothing to fix: the terminal gets exactly what --out writes, on
+        # every platform. No newline is added - `csv` ended its last record.
+        typer.echo(rendered.encode("utf-8"), nl=False)
+    else:
+        # JSON escapes its line breaks inside strings, so a text stream's
+        # translation touches only the layout, and ends with the newline a text
+        # stream should.
+        typer.echo(rendered)
+    _report_export_gaps(export)
+
+
+def _report_export_gaps(export: ShelfExport) -> None:
+    """Name anything an export could not carry, on stderr.
+
+    An export is offered as a backup, so one missing a note or a body has to say
+    so rather than pass for complete. Written to stderr so that it never lands
+    inside the JSON or CSV on stdout, which is the export itself.
+
+    Args:
+        export: What `export_notes` returned.
+    """
+    if export.unreadable:
+        typer.echo(
+            f"{len(export.unreadable)} file(s) could not be read as a Book Note "
+            f"and are not in this export: {', '.join(export.unreadable)}",
+            err=True,
+        )
+    if export.bodies_unread:
+        typer.echo(
+            f"{len(export.bodies_unread)} note(s) exported without their body, "
+            f"which could not be read back: {', '.join(export.bodies_unread)}",
+            err=True,
+        )
 
 
 @app.command()

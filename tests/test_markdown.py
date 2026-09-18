@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 from datetime import date
@@ -783,6 +784,68 @@ def test_list_books_only_returns_book_notes(tmp_path):
         tmp_path / "note.md",
         tmp_path / "journal.md",
     }
+
+
+def test_list_books_orders_the_shelf_itself_rather_than_trusting_the_filesystem(
+    tmp_path, monkeypatch
+):
+    # Given names whose order depends on whether case is ignored: by codepoint
+    # "Brains" sorts before "and", because "B" precedes "a"
+    names = [
+        "b.md",
+        "A Thousand Brains.md",
+        "a.md",
+        "A Thousand and One Nights.md",
+    ]
+    for name in names:
+        (tmp_path / name).write_text("---\ntitle: x\n---\n", encoding="utf-8")
+
+    # And a filesystem handing them back in the reverse of the expected order.
+    # NTFS returns them already sorted, so without this the test would pass on
+    # Windows with the sort deleted and fail only in CI, where ext4 returns hash
+    # order (#144 review)
+    real_scandir = os.scandir
+
+    def _reversed(path):
+        return sorted(real_scandir(path), key=lambda e: e.name.casefold(), reverse=True)
+
+    monkeypatch.setattr(os, "scandir", _reversed)
+
+    # When the Shelf is listed
+    listed = [path.name for path in list_books(tmp_path)]
+
+    # Then the order is the case-folded filename, whatever the filesystem did
+    assert listed == [
+        "A Thousand and One Nights.md",
+        "A Thousand Brains.md",
+        "a.md",
+        "b.md",
+    ]
+
+
+def test_read_shelf_notes_leaves_out_a_file_it_cannot_open(tmp_path, monkeypatch):
+    # Given two notes, one of which is gone by the time it is opened
+    from libris.markdown import read_shelf_notes
+
+    kept = tmp_path / "Kept.md"
+    kept.write_text("---\ntitle: Kept\n---\n", encoding="utf-8")
+    gone = tmp_path / "Gone.md"
+    gone.write_text("---\ntitle: Gone\n---\n", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def _vanished(self, *args, **kwargs):
+        if self == gone:
+            raise FileNotFoundError(self)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _vanished)
+
+    # When the Shelf is read
+    notes = read_shelf_notes(tmp_path)
+
+    # Then the one that could not be opened is left out, as the docstring has
+    # always said, rather than raising and taking the command down with it
+    assert [note.path.name for note in notes] == ["Kept.md"]
 
 
 def _legacy_list_books_baseline(vault_path: Path):

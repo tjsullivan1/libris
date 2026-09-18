@@ -11,7 +11,7 @@ import math
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -39,6 +39,7 @@ from .merge import (
     write_merged_book,
 )
 from .note_format import (
+    MODELLED_FIELDS,
     READER_FIELDS,
     description_callout_lines,
     is_isbn10,
@@ -847,6 +848,142 @@ def _set_reader_fields(
     )
 
 
+def _json_safe(value: object) -> object:
+    """A frontmatter value in a shape JSON can hold.
+
+    PyYAML resolves an unquoted `2020-05-05` to a `datetime.date`, and a quoted
+    one to a string, so the same field holds both types across the Shelf
+    depending on who wrote it - 5,946 values on the real Shelf are dates, the
+    rest strings (#143). `json.dumps` refuses the date objects outright.
+
+    Dates become ISO-8601 strings, which is what Libris itself already writes
+    when it stamps one (`date.today().isoformat()`), so an export settles on the
+    spelling the Library already produces rather than inventing a third.
+
+    Args:
+        value: Whatever the frontmatter held.
+
+    Returns:
+        The value, with dates rendered as ISO strings and containers walked.
+    """
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    return value
+
+
+@dataclass
+class ShelfExport:
+    """An export of the Shelf, and an account of what it could not carry.
+
+    An export is offered as a backup of the irreplaceable part (ADR 0009), so
+    anything it leaves out has to be named rather than dropped quietly. Both
+    lists are empty on the real 3,073-note Shelf; they exist so that a backup
+    which is missing something says so.
+    """
+
+    rows: list[dict]
+    # Files the Shelf lists that could not be parsed as a Book Note at all, so
+    # appear nowhere in `rows`.
+    unreadable: list[str] = field(default_factory=list)
+    # Notes whose fields were exported but whose body could not be read back:
+    # their row carries `"body": None`, which is not the `""` of an empty note.
+    bodies_unread: list[str] = field(default_factory=list)
+
+
+def export_notes(vault_path: Path, include_bodies: bool = True) -> ShelfExport:
+    """Every Book Note on the Shelf, in a shape that can be written out (#12).
+
+    Every note is read once to parse its frontmatter, whatever is asked for.
+    Asking for bodies reads each file a *second* time, because `BookNote.read`
+    keeps the frontmatter and not the text it came from - so `include_bodies`
+    halves the reads rather than avoiding them: 8 against 4 on a four-note
+    Shelf.
+
+    Args:
+        vault_path: The Shelf to export.
+        include_bodies: Whether each note's own writing travels with it, at the
+            cost of a second read per note. Every note on the real Shelf has a
+            body, and ADR 0009 calls that writing the irreplaceable part, so an
+            export meant as a backup keeps it.
+
+    Returns:
+        One row per readable note - its filename, its frontmatter with dates as
+        ISO strings, and its body when asked for - together with every file
+        that could not be carried whole. A caller writing a backup reports
+        those rather than presenting the export as complete.
+    """
+    export = ShelfExport(rows=[])
+    for path in list_books(vault_path):
+        try:
+            note = BookNote.read(path)
+        except OSError:
+            # Listed, then gone or locked before it could be opened.
+            # `read_frontmatter` catches only a decoding error, so without this
+            # one vanished file aborted the whole export (#144 review).
+            note = None
+        if note is None:
+            export.unreadable.append(path.name)
+            continue
+
+        row: dict = {
+            "path": note.path.name,
+            "frontmatter": {
+                key: _json_safe(value) for key, value in note.frontmatter.items()
+            },
+        }
+        if include_bodies:
+            try:
+                content = note.path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                # Parsed a moment ago, so this is the note moving or being
+                # replaced mid-export. The fields are already in hand, so the
+                # row still goes out - but with a body of None rather than "",
+                # which would pass for a note with nothing written in it.
+                row["body"] = None
+                export.bodies_unread.append(note.path.name)
+            else:
+                split = split_frontmatter(content)
+                row["body"] = split[1] if split else content
+        export.rows.append(row)
+    return export
+
+
+def csv_view(rows: list[dict]) -> list[dict[str, str]]:
+    """Flatten exported rows into the spreadsheet view of the Library (#12).
+
+    One column per modelled field, taken from the Library's own vocabulary
+    rather than from whatever each note happens to hold, so every row has the
+    same columns. Fields a plugin added, and the body, are not columns.
+
+    Shaping lives here rather than in the command so that any Surface can offer
+    the same view without re-deriving it (ADR 0008).
+
+    Args:
+        rows: Rows from `export_notes`.
+
+    Returns:
+        One dict per row, keyed by exactly the modelled fields, every value a
+        string: several values joined on "; ", and nothing as "".
+    """
+    flattened: list[dict[str, str]] = []
+    for row in rows:
+        fields = row["frontmatter"]
+        cells: dict[str, str] = {}
+        for name in MODELLED_FIELDS:
+            value = fields.get(name)
+            if isinstance(value, list):
+                # Joined rather than left as a list, which `csv` would write as
+                # a Python repr - "['Frank Herbert']" in a cell.
+                value = "; ".join(str(item) for item in value)
+            cells[name] = "" if value is None else str(value)
+        flattened.append(cells)
+    return flattened
+
+
 # The replacement character. It is what a decoder writes when it is handed bytes
 # it cannot make sense of, so a note carrying one has already lost the letter
 # that was there - the byte is gone, and no amount of reading the file back will
@@ -1063,9 +1200,11 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
         vault_path: The Shelf to read.
 
     Yields:
-        One `_ShelfFile` per file, in filename order.
+        One `_ShelfFile` per file, in the order `list_books` gives.
     """
-    for path in sorted(list_books(vault_path)):
+    # Not re-sorted here. `list_books` already fixes the order, and sorting its
+    # `Path`s again would reintroduce the platform difference it removes.
+    for path in list_books(vault_path):
         try:
             raw = path.read_bytes()
         except FileNotFoundError:

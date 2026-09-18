@@ -683,13 +683,34 @@ def set_frontmatter_fields(
     return data
 
 
-def list_books(vault_path: Path):
-    """Lists all markdown files in the vault, assuming each is a book note."""
-    return [
+def list_books(vault_path: Path) -> list[Path]:
+    """Every Markdown file on the Shelf, in one order on every platform.
+
+    `os.scandir` returns entries in whatever order the filesystem keeps them:
+    case-insensitive on NTFS, hash order on ext4. So every Shelf-wide command -
+    an export, a migration's diffs, which of two same-keyed notes an index keeps
+    - answered in a different order on Linux than on Windows (#144 review).
+
+    Sorting `Path` objects would not settle it either. `WindowsPath` compares
+    ignoring case and `PosixPath` does not, and on the real 3,073-note Shelf the
+    two orders disagree in 1,417 positions. The key is the filename itself,
+    case-folded, with the exact name breaking a tie - the order NTFS already
+    returns, so nothing moves on Windows, now produced by the code rather than
+    by the filesystem.
+
+    Args:
+        vault_path: The Shelf to list.
+
+    Returns:
+        The path of every `.md` file directly on the Shelf, each assumed to be a
+        Book Note.
+    """
+    paths = [
         Path(entry.path)
         for entry in os.scandir(vault_path)
         if entry.is_file() and entry.name.endswith(".md")
     ]
+    return sorted(paths, key=lambda path: (path.name.casefold(), path.name))
 
 
 # What a longer title adds when it is a companion volume rather than the book:
@@ -789,11 +810,19 @@ def read_shelf_notes(vault_path: Path) -> list[BookNote]:
         them. A file that cannot be read is left out rather than raising, the
         same answer `find_duplicates` has always given for one.
     """
-    return [
-        note
-        for note in (BookNote.read(path) for path in list_books(vault_path))
-        if note is not None
-    ]
+    notes: list[BookNote] = []
+    for path in list_books(vault_path):
+        try:
+            note = BookNote.read(path)
+        except OSError:
+            # Listed, then gone or locked before it could be opened. The
+            # docstring promised this was left out rather than raising, but
+            # `read_frontmatter` catches only a decoding error, so it raised
+            # and took every Shelf-wide command down with it (#144 review).
+            continue
+        if note is not None:
+            notes.append(note)
+    return notes
 
 
 def find_duplicate_candidates(
