@@ -65,6 +65,30 @@ class Outcome(Enum):
     NEEDS_CONFIRMATION = "needs_confirmation"
 
 
+class NearMatchCheck(Enum):
+    """Whether a Near Match check ran, and if not, why not (ADR 0032).
+
+    An empty list of Near Matches reads as "nothing resembles this". That is
+    only true when the check ran, so the answer carries which it was rather
+    than folding "could not look" into "found nothing" (ADR 0029).
+    """
+
+    CHECKED = "checked"
+    # Near Matches are compared among notes by the same first author. With no
+    # author there is no such set, and comparing titles across the whole Shelf
+    # is mostly noise that the remote replica could not answer anyway.
+    NO_AUTHOR = "no_author"
+    NO_TITLE = "no_title"
+
+
+@dataclass
+class NearMatches:
+    """The Book Notes that might be this Book, and whether anyone looked."""
+
+    check: NearMatchCheck
+    notes: list[BookNote] = field(default_factory=list)
+
+
 @dataclass
 class AddResult:
     """The answer to a write: identity first, path only for display (ADR 0016).
@@ -84,6 +108,9 @@ class AddResult:
     # The Book Notes that stopped the write, when one was stopped. Empty in
     # every other case, including a write that went ahead past them.
     near_matches: list[BookNote] = field(default_factory=list)
+    # Whether the Near Match check ran. None when it was not asked for, or the
+    # exact check answered before it was reached.
+    near_match_check: NearMatchCheck | None = None
 
 
 # Amazon states the ASIN in the product URL itself, in one of two shapes. A
@@ -291,7 +318,7 @@ def find_similar(
     title: str | None = None,
     authors: list[str] | None = None,
     limit: int = 5,
-) -> list[BookNote]:
+) -> NearMatches:
     """Find Book Notes that might be the same Book, without deciding that they are.
 
     Title matching is fuzzy on purpose and cannot be trusted to decide. Some
@@ -306,36 +333,41 @@ def find_similar(
     So this decides nothing. It hands candidates back to the Surface, where a
     person is still present to say which one it is.
 
+    Without an author nothing is compared (ADR 0032). The author filter is what
+    makes containment worth offering, and it is an equality test a remote
+    replica can answer; a title compared across every author is neither.
+
     Args:
         vault_path: The Shelf to search.
         title: The title as scraped.
-        authors: The authors as scraped. When given, only notes by the same
-            first author are considered.
+        authors: The authors as scraped. Only notes sharing the first of them
+            are considered.
         limit: The most notes to return.
 
     Returns:
-        Book Notes whose title plausibly describes the same Book, nearest first
-        by title length, or an empty list.
+        Whether the check ran, and the Book Notes whose title plausibly
+        describes the same Book, nearest first by title length.
     """
-    if not title:
-        return []
+    if not title or not normalize_for_match(title):
+        return NearMatches(NearMatchCheck.NO_TITLE)
 
-    wanted_author = normalize_for_match(authors[0]) if authors else None
+    # An author that normalizes to nothing ("-", a stray space) is no author,
+    # not one that no note on the Shelf happens to share.
+    wanted_author = normalize_for_match(authors[0]) if authors else ""
+    if not wanted_author:
+        return NearMatches(NearMatchCheck.NO_AUTHOR)
 
     found: list[BookNote] = []
     for note in index_for(vault_path).notes():
-        if not note.title:
+        if not note.title or not note.first_author:
             continue
-        if wanted_author is not None:
-            if not note.first_author:
-                continue
-            if normalize_for_match(note.first_author) != wanted_author:
-                continue
+        if normalize_for_match(note.first_author) != wanted_author:
+            continue
         if titles_match(title, note.title):
             found.append(note)
 
     found.sort(key=lambda n: len(n.title or ""))
-    return found[:limit]
+    return NearMatches(NearMatchCheck.CHECKED, found[:limit])
 
 
 # What a search returns when the caller does not say, and the most it will
@@ -612,20 +644,27 @@ def add_book(
             authors=existing.authors,
         )
 
+    check: NearMatchCheck | None = None
     if stop_on_near_match:
         near = find_similar(
             vault_path, title=candidate.title, authors=candidate.authors
         )
-        if near:
+        check = near.check
+        if near.notes:
             return AddResult(
                 libris_id=None,
                 path=None,
                 outcome=Outcome.NEEDS_CONFIRMATION,
                 title=candidate.title,
                 authors=candidate.authors,
-                near_matches=near,
+                near_matches=near.notes,
+                near_match_check=check,
             )
 
+    # A check that could not run does not stop the write: ADR 0026 stops on a
+    # Near Match there is to show, and there is none. The result says the check
+    # did not run, so the Surface can tell the person rather than imply that
+    # nothing resembled this Book.
     path = create_book_note(candidate, vault_path, overrides=overrides or None)
     note = BookNote.read(path)
     return AddResult(
@@ -636,6 +675,7 @@ def add_book(
         # cannot be read back rather than leaving the Surface with only a path.
         title=note.title if note else candidate.title,
         authors=note.authors if note else candidate.authors,
+        near_match_check=check,
     )
 
 

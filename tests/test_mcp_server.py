@@ -312,3 +312,34 @@ def test_a_bare_string_format_is_reported_not_dropped(shelved):
     # the frontmatter and testing isinstance(list) returned no format at all for
     # these notes, which would tell an agent a book has none recorded.
     assert answer["books"][0]["format"] == ["Physical"]
+
+
+class _OneVolume:
+    """A Google Books client that knows exactly one volume."""
+
+    def __init__(self, candidate: BookCandidate) -> None:
+        self._candidate = candidate
+
+    def get_volume(self, volume_id: str) -> BookCandidate:
+        return self._candidate
+
+
+def test_an_add_with_no_author_writes_and_says_it_could_not_check(shelved, monkeypatch):
+    # Given a volume Google Books lists with no author, and a note a title-only
+    # comparison would have stopped on
+    create_book_note(
+        BookCandidate(title="Dune Messiah: Deluxe Edition", authors=["Frank Herbert"]),
+        shelved,
+    )
+    volume = BookCandidate(title="Dune Messiah", authors=[], google_books_id="v1")
+    monkeypatch.setattr(
+        "libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(volume)
+    )
+
+    # When the model adds it
+    answer = payload(call("add_book", {"google_books_id": "v1"}))
+
+    # Then it is written, and the model is told the check could not run, so it
+    # can say so rather than implying nothing resembled it (ADR 0032)
+    assert answer["outcome"] == "created"
+    assert answer["near_match_check"] == "no_author"

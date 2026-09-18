@@ -692,6 +692,49 @@ def test_an_exact_match_still_answers_directly(token, tmp_path):
     assert body["near_matches"] == []
 
 
+def test_a_lookup_with_no_author_says_near_matches_were_not_checked(token, tmp_path):
+    # Given a note a title-only comparison would offer
+    config.set_book_vault_path(tmp_path)
+    create_book_note(
+        BookCandidate(title="The Brass Verdict: A Novel", authors=["Michael Connelly"]),
+        tmp_path,
+    )
+
+    # When the extension asks about a Book whose author it does not know
+    response = TestClient(create_app()).get(
+        "/api/v1/books",
+        params={"title": "The Brass Verdict"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then nothing is offered, and the answer says why, so the popup can tell
+    # "nothing resembles this" from "I could not look" (ADR 0032). The list
+    # stays a list: an older extension reads its length.
+    assert response.status_code == 200
+    body = response.json()
+    assert body["found"] is False
+    assert body["near_matches"] == []
+    assert body["near_match_check"] == "no_author"
+
+
+def test_a_lookup_with_an_author_says_near_matches_were_checked(token, tmp_path):
+    # Given a Shelf holding nothing like the Book asked about
+    config.set_book_vault_path(tmp_path)
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path)
+
+    # When the extension asks with a title and an author
+    response = TestClient(create_app()).get(
+        "/api/v1/books",
+        params={"title": "Neuromancer", "authors": ["William Gibson"]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Then the empty list is a finding
+    body = response.json()
+    assert body["near_matches"] == []
+    assert body["near_match_check"] == "checked"
+
+
 # --- GET /api/v1/fields ---
 
 

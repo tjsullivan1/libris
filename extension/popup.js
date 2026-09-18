@@ -177,6 +177,27 @@ function offerNearMatches(notes, proceed) {
   };
 }
 
+const UNCHECKED_BECAUSE = {
+  no_author: "Google Books lists no author for this",
+  no_title: "Google Books lists no title for this",
+};
+
+/**
+ * Say when the daemon could not look for a copy under another title (ADR 0032).
+ * With nothing shown, an empty list of near matches reads as "nothing like this
+ * is in your Library", which is only true when the check ran. A daemon too old
+ * to send the field says nothing, and neither does this.
+ */
+function showUnchecked(check) {
+  const unchecked = Boolean(check) && check !== "checked";
+  if (unchecked) {
+    const reason = UNCHECKED_BECAUSE[check] || "Libris couldn't tell";
+    el("unchecked").textContent =
+      `${reason}, so Libris couldn't check whether you already have it under another title.`;
+  }
+  show("unchecked", unchecked);
+}
+
 async function choose(candidate) {
   state.chosen = candidate;
   show("candidates", false);
@@ -198,6 +219,7 @@ async function choose(candidate) {
       authors: candidate.authors,
     });
     if (answer.found) return heldAlready(answer.book);
+    showUnchecked(answer.near_match_check);
     if (answer.near_matches.length && !state.dismissedNearMatches.has(key)) {
       return offerNearMatches(answer.near_matches, { key, run: showDetails });
     }

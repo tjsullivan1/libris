@@ -155,6 +155,11 @@ class BookLookup(BaseModel):
     found: bool
     book: BookRef | None = None
     near_matches: list[BookRef] = []
+    # Whether near_matches is a finding: "checked", or the reason it could not
+    # be - "no_author", "no_title" (ADR 0032). Absent on a hit, where no check
+    # was made. A separate field rather than a null list, because an extension
+    # that predates it reads near_matches.length and updates on its own schedule.
+    near_match_check: str | None = None
 
 
 class FieldSpec(BaseModel):
@@ -328,12 +333,11 @@ def create_app() -> FastAPI:
         # subtitle the note carries - and deciding that here is exactly what
         # would report "already held" about a Book that is not. The person in
         # the popup settles it.
+        near = service.find_similar(vault_path, title=title, authors=authors)
         return BookLookup(
             found=False,
-            near_matches=[
-                BookRef.of(n)
-                for n in service.find_similar(vault_path, title=title, authors=authors)
-            ],
+            near_matches=[BookRef.of(n) for n in near.notes],
+            near_match_check=near.check.value,
         )
 
     @router.post("/books", response_model=WriteResponse, status_code=201)
