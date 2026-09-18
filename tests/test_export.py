@@ -349,6 +349,35 @@ def test_export_marks_a_body_it_could_not_read_back(tmp_path, monkeypatch):
     assert "Dune.md" in result.stderr
 
 
+def test_export_rows_come_in_one_order_whatever_the_filesystem_returns(
+    tmp_path, monkeypatch
+):
+    # Given a Shelf of three books
+    vault = _shelf(tmp_path)
+    _write_note(vault, "emma.md", libris_id="lb-2", title="Emma", authors=["Austen"])
+    _write_note(vault, "Beloved.md", libris_id="lb-3", title="Beloved")
+
+    # And a filesystem handing them back reversed - NTFS returns them sorted,
+    # which would let this pass on Windows with no sort at all
+    import os
+
+    real_scandir = os.scandir
+
+    def _reversed(path):
+        return sorted(real_scandir(path), key=lambda e: e.name.casefold(), reverse=True)
+
+    monkeypatch.setattr(os, "scandir", _reversed)
+
+    # When it is exported
+    result = runner.invoke(app, ["export", "--no-bodies"])
+
+    # Then the rows are in filename order, case ignored, so two exports of the
+    # same Shelf diff cleanly on any platform (#144 review)
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)
+    assert [row["path"] for row in rows] == ["Beloved.md", "Dune.md", "emma.md"]
+
+
 def test_csv_view_is_reachable_without_the_command(tmp_path):
     # Given the rows an export produces
     from libris.note_format import MODELLED_FIELDS

@@ -683,13 +683,34 @@ def set_frontmatter_fields(
     return data
 
 
-def list_books(vault_path: Path):
-    """Lists all markdown files in the vault, assuming each is a book note."""
-    return [
+def list_books(vault_path: Path) -> list[Path]:
+    """Every Markdown file on the Shelf, in one order on every platform.
+
+    `os.scandir` returns entries in whatever order the filesystem keeps them:
+    case-insensitive on NTFS, hash order on ext4. So every Shelf-wide command -
+    an export, a migration's diffs, which of two same-keyed notes an index keeps
+    - answered in a different order on Linux than on Windows (#144 review).
+
+    Sorting `Path` objects would not settle it either. `WindowsPath` compares
+    ignoring case and `PosixPath` does not, and on the real 3,073-note Shelf the
+    two orders disagree in 1,417 positions. The key is the filename itself,
+    case-folded, with the exact name breaking a tie - the order NTFS already
+    returns, so nothing moves on Windows, now produced by the code rather than
+    by the filesystem.
+
+    Args:
+        vault_path: The Shelf to list.
+
+    Returns:
+        The path of every `.md` file directly on the Shelf, each assumed to be a
+        Book Note.
+    """
+    paths = [
         Path(entry.path)
         for entry in os.scandir(vault_path)
         if entry.is_file() and entry.name.endswith(".md")
     ]
+    return sorted(paths, key=lambda path: (path.name.casefold(), path.name))
 
 
 # What a longer title adds when it is a companion volume rather than the book:

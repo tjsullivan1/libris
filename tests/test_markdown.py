@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 from datetime import date
@@ -783,6 +784,43 @@ def test_list_books_only_returns_book_notes(tmp_path):
         tmp_path / "note.md",
         tmp_path / "journal.md",
     }
+
+
+def test_list_books_orders_the_shelf_itself_rather_than_trusting_the_filesystem(
+    tmp_path, monkeypatch
+):
+    # Given names whose order depends on whether case is ignored: by codepoint
+    # "Brains" sorts before "and", because "B" precedes "a"
+    names = [
+        "b.md",
+        "A Thousand Brains.md",
+        "a.md",
+        "A Thousand and One Nights.md",
+    ]
+    for name in names:
+        (tmp_path / name).write_text("---\ntitle: x\n---\n", encoding="utf-8")
+
+    # And a filesystem handing them back in the reverse of the expected order.
+    # NTFS returns them already sorted, so without this the test would pass on
+    # Windows with the sort deleted and fail only in CI, where ext4 returns hash
+    # order (#144 review)
+    real_scandir = os.scandir
+
+    def _reversed(path):
+        return sorted(real_scandir(path), key=lambda e: e.name.casefold(), reverse=True)
+
+    monkeypatch.setattr(os, "scandir", _reversed)
+
+    # When the Shelf is listed
+    listed = [path.name for path in list_books(tmp_path)]
+
+    # Then the order is the case-folded filename, whatever the filesystem did
+    assert listed == [
+        "A Thousand and One Nights.md",
+        "A Thousand Brains.md",
+        "a.md",
+        "b.md",
+    ]
 
 
 def _legacy_list_books_baseline(vault_path: Path):

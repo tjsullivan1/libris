@@ -1194,9 +1194,11 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
         vault_path: The Shelf to read.
 
     Yields:
-        One `_ShelfFile` per file, in filename order.
+        One `_ShelfFile` per file, in the order `list_books` gives.
     """
-    for path in sorted(list_books(vault_path)):
+    # Not re-sorted here. `list_books` already fixes the order, and sorting its
+    # `Path`s again would reintroduce the platform difference it removes.
+    for path in list_books(vault_path):
         try:
             raw = path.read_bytes()
         except FileNotFoundError:
