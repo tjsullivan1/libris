@@ -543,7 +543,7 @@ class TestWriteMergedBook:
 
         content = path.read_text()
         assert "title: Book" in content
-        assert "isbn: '123'" in content or "isbn: 123" in content
+        assert 'isbn: "123"' in content
         assert "My notes here" in content
 
     def test_a_primary_removed_before_the_merge_is_written_is_not_recreated(

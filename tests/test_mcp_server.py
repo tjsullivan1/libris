@@ -299,8 +299,10 @@ def test_a_bare_string_format_is_reported_not_dropped(shelved):
         if n.title == "Dune"
     )
     raw = note.path.read_text(encoding="utf-8")
+    # The fixture edits the note as Libris spells it; a new spelling must fail here.
+    assert "\nformat:\n" in raw
     note.path.write_text(
-        raw.replace("format: null", "format: physical", 1), encoding="utf-8"
+        raw.replace("\nformat:\n", "\nformat: physical\n", 1), encoding="utf-8"
     )
 
     # When the book is searched for
