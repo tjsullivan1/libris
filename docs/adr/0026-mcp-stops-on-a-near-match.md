@@ -22,5 +22,10 @@ exchange, while a duplicate Book Note is permanent, splits a reader's writing ac
 and is found only by a duplicate sweep months later. The Shelf already carries three such
 groups.
 
+Corrected by ADR 0032 (September 2026): the 83 was the whole-Shelf containment count.
+When given an author, `find_similar` compares titles only among notes by the same first author,
+and among those containment finds 9 pairs. The confirmation is asked for less often than this paragraph assumed. The asymmetry
+argument stands unchanged.
+
 Every write also reports its Duplicate Guarantee (ADR 0016), constant over stdio and not
 constant once Streamable HTTP lands with the same tool definitions (ADR 0007, ADR 0020).

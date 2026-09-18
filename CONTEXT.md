@@ -55,9 +55,10 @@ compared loosely and a wrong answer merges two different Books.
 _Avoid_: possible duplicate, near duplicate
 
 **Near Match**:
-A Book Note the Library may already hold for the Book a Surface is about to add. Offered to a
-person, never acted on alone: confirming one prevents a write and merges nothing, which is what
-separates it from a Duplicate Candidate.
+A Book Note the Library may already hold for the Book a Surface is about to add, sharing that
+Book's first author. Offered to a person, never acted on alone: confirming one prevents a write and
+merges nothing, which is what separates it from a Duplicate Candidate. A Book with no known
+author cannot be checked for Near Matches, and the answer says so rather than reporting none.
 _Avoid_: similar note, fuzzy match
 
 **Matching**:

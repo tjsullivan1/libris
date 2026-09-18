@@ -294,10 +294,12 @@ def find_similar(
 ) -> list[BookNote]:
     """Find Book Notes that might be the same Book, without deciding that they are.
 
-    Title matching is fuzzy on purpose and cannot be trusted to decide. Measured
-    against the real Shelf, containment matching conflates 83 pairs: some are
-    genuine variants ("The Brass Verdict" and "The Brass Verdict: A Novel"), and
-    some are different books entirely ("Mercy" and "Long Road to Mercy"). Telling
+    Title matching is fuzzy on purpose and cannot be trusted to decide. Some
+    containment matches are genuine variants ("The Brass Verdict" and "The Brass
+    Verdict: A Novel") and some are different books entirely ("Mercy" and "Long
+    Road to Mercy"). Measured on the real Shelf in September 2026, containment
+    finds 9 pairs among notes by the same first author and 1,208 across
+    different authors, which is why the author filter matters (ADR 0032). Telling
     a person a Book is already held when it is not means it never gets added and
     nothing surfaces the error, which ADR 0003 refuses.
 
