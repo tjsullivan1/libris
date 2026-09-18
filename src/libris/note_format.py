@@ -25,10 +25,56 @@ import yaml
 # were run over every note on the real Shelf and compared structurally, types
 # included: 3,063 notes, zero disagreements, with 3,055 `date_added`, 2,200
 # `date_published` and 686 `date_finished` values coerced to `date` identically.
+# (They are now built into text instead, by both loaders alike - ADR 0030.)
 #
 # CSafeLoader exists only when PyYAML was built against libyaml, which the
 # dependency does not guarantee, so the Python loader remains the fallback.
 _HAVE_LIBYAML = hasattr(yaml, "CSafeLoader")
+
+# A date field is text (ADR 0030). PyYAML resolves an unquoted `2020-05-05` to a
+# `datetime.date` and leaves a quoted one a string, so the type a field held
+# depended on who wrote it: 3,055 `date_added` values were dates and 13 strings,
+# and comparing the two either raised or quietly disagreed (#143).
+# `date_published` settles it, since 759 of its values are a year or a month
+# that no `date` can hold. Resolution is left alone - the value is still
+# recognised as a timestamp - and only what it is built into changes.
+_TIMESTAMP_TAG = "tag:yaml.org,2002:timestamp"
+
+
+def _timestamp_as_text(loader: yaml.BaseLoader, node: yaml.ScalarNode) -> str:
+    return loader.construct_scalar(node)
+
+
+class _FrontmatterLoader(yaml.SafeLoader):
+    """SafeLoader, with timestamps read as the text that spells them."""
+
+
+_FrontmatterLoader.add_constructor(_TIMESTAMP_TAG, _timestamp_as_text)
+
+if _HAVE_LIBYAML:
+
+    class _FrontmatterCLoader(yaml.CSafeLoader):
+        """CSafeLoader, with timestamps read as the text that spells them."""
+
+    _FrontmatterCLoader.add_constructor(_TIMESTAMP_TAG, _timestamp_as_text)
+
+
+class _FrontmatterDumper(yaml.Dumper):
+    """The writing half of the loaders above.
+
+    PyYAML quotes any string that would read back as another type, so a date
+    held as text went to disk as `'2020-05-05'` while the 3,055 notes Obsidian
+    and earlier imports wrote say `2020-05-05`. Without the timestamp resolver
+    the dumper no longer thinks the text needs protecting: an unquoted note
+    round-trips byte for byte, and Libris's own stamps come out spelled the same
+    way. A year alone stays quoted, because unquoted it would read as a number.
+    """
+
+
+_FrontmatterDumper.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != _TIMESTAMP_TAG]
+    for first, resolvers in yaml.Dumper.yaml_implicit_resolvers.items()
+}
 
 
 def parse_frontmatter_yaml(text: str) -> Any:
@@ -37,7 +83,8 @@ def parse_frontmatter_yaml(text: str) -> Any:
     Both branches name their loader outright rather than passing one chosen
     above. `yaml.load` with a loader it cannot see is how an unsafe one gets
     used by accident, and a reader - or a linter - should be able to tell which
-    loader this is from the call itself.
+    loader this is from the call itself. Both are Safe loaders, differing only
+    in how a timestamp is built, which the linter cannot see through a subclass.
 
     Args:
         text: The YAML between the two `---` fences.
@@ -45,13 +92,28 @@ def parse_frontmatter_yaml(text: str) -> Any:
     Returns:
         Whatever the block holds. A Book Note's is a mapping, but a damaged note
         can hold anything YAML expresses, so callers check before using it.
+        Dates are strings, spelled as the note spells them (ADR 0030).
 
     Raises:
         yaml.YAMLError: If the block cannot be parsed.
     """
     if _HAVE_LIBYAML:
-        return yaml.load(text, Loader=yaml.CSafeLoader)
-    return yaml.load(text, Loader=yaml.SafeLoader)
+        return yaml.load(text, Loader=_FrontmatterCLoader)  # noqa: S506
+    return yaml.load(text, Loader=_FrontmatterLoader)  # noqa: S506
+
+
+def dump_frontmatter_yaml(data: dict[str, Any]) -> str:
+    """Render frontmatter as YAML, the way every writer of a Book Note does.
+
+    Args:
+        data: The frontmatter mapping, in the order its fields are to appear.
+
+    Returns:
+        The YAML for between the `---` fences, ending in a newline.
+    """
+    return yaml.dump(
+        data, Dumper=_FrontmatterDumper, sort_keys=False, allow_unicode=True
+    )
 
 
 IDENTITY_FIELDS = ("libris_id", "title", "authors")

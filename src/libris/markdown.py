@@ -17,6 +17,7 @@ from .matching import normalize_for_match
 from .note_format import (
     MODELLED_FIELDS,
     SUPERSEDED_IDS_FIELD,
+    dump_frontmatter_yaml,
     has_description_callout,
     mint_libris_id,
     normalize_field_value,
@@ -260,7 +261,7 @@ def create_book_note(
             validate_field_value(key, value)
             frontmatter[key] = value
 
-    yaml_content = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
+    yaml_content = dump_frontmatter_yaml(frontmatter)
 
     body = render_body(book.title, "", book.description)
     write_note(file_path, f"---\n{yaml_content}---\n\n{body}")
@@ -643,7 +644,7 @@ def edit_note(
         data.update(changes or {})
         if new_body is not None:
             body = new_body
-        rendered = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+        rendered = dump_frontmatter_yaml(data).strip()
         _write_through(handle, file_path, "---\n" + rendered + "\n---\n" + body, raw)
     return data, body
 
@@ -1000,7 +1001,7 @@ def ensure_frontmatter_fields(
         updated = True
 
     if updated and not dry_run:
-        new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+        new_frontmatter = dump_frontmatter_yaml(data).strip()
         # The body goes back exactly as it was read - it carries its own leading
         # newlines, and stripping them was what cost an indented block its indent.
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"
@@ -1216,7 +1217,7 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
         updated = True
 
     if updated:
-        new_frontmatter = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+        new_frontmatter = dump_frontmatter_yaml(data).strip()
         # As in ensure_frontmatter_fields: the body carries its own leading
         # newlines, and stripping them cost an indented block its indent (#99).
         new_content = f"---\n{new_frontmatter}\n---\n{rest_of_content}"

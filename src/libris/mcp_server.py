@@ -10,7 +10,6 @@ Note's body holds a reader's own writing and stays in Obsidian (ADR 0023), so
 there is no tool that reads one and none that writes one.
 """
 
-from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -101,13 +100,11 @@ def _shelf() -> Path:
 def _text(value: object) -> str | None:
     """Render a frontmatter value as text, or None when it holds nothing.
 
-    Frontmatter arrives from YAML, so a date field is a `date` and a rating is
-    an `int`. Both are shown to a person rather than computed with.
+    Frontmatter arrives from YAML, so a rating is an `int`. It is shown to a
+    person rather than computed with. A date is already text (ADR 0030).
     """
     if value is None or value == "":
         return None
-    if isinstance(value, date):
-        return value.isoformat()
     return str(value)
 
 

@@ -64,6 +64,7 @@ from .note_format import (
     MODELLED_FIELDS,
     STATUS_VALUES,
     InvalidFieldValue,
+    dump_frontmatter_yaml,
     normalize_field_value,
     parse_frontmatter_yaml,
     validate_field_value,
@@ -873,8 +874,6 @@ def _append_auto_enrich_note(
     """Append a note to the document body and add 'review' tag indicating auto-enrichment."""
     from datetime import date
 
-    import yaml
-
     content, fingerprint = read_note_with_fingerprint(file_path)
 
     # Add 'review' to the tags in frontmatter
@@ -896,7 +895,7 @@ def _append_auto_enrich_note(
                     tags.append("review")
             else:
                 data["tags"] = ["review"]
-            new_fm = yaml.dump(data, sort_keys=False, allow_unicode=True).strip()
+            new_fm = dump_frontmatter_yaml(data).strip()
             # The body goes back as it was read, leading newlines and all (#99).
             content = f"---\n{new_fm}\n---\n{split[1]}"
 

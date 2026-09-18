@@ -11,7 +11,7 @@ import math
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from enum import Enum
 from pathlib import Path
 
@@ -848,33 +848,6 @@ def _set_reader_fields(
     )
 
 
-def _json_safe(value: object) -> object:
-    """A frontmatter value in a shape JSON can hold.
-
-    PyYAML resolves an unquoted `2020-05-05` to a `datetime.date`, and a quoted
-    one to a string, so the same field holds both types across the Shelf
-    depending on who wrote it - 5,946 values on the real Shelf are dates, the
-    rest strings (#143). `json.dumps` refuses the date objects outright.
-
-    Dates become ISO-8601 strings, which is what Libris itself already writes
-    when it stamps one (`date.today().isoformat()`), so an export settles on the
-    spelling the Library already produces rather than inventing a third.
-
-    Args:
-        value: Whatever the frontmatter held.
-
-    Returns:
-        The value, with dates rendered as ISO strings and containers walked.
-    """
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
-    return value
-
-
 @dataclass
 class ShelfExport:
     """An export of the Shelf, and an account of what it could not carry.
@@ -929,12 +902,9 @@ def export_notes(vault_path: Path, include_bodies: bool = True) -> ShelfExport:
             export.unreadable.append(path.name)
             continue
 
-        row: dict = {
-            "path": note.path.name,
-            "frontmatter": {
-                key: _json_safe(value) for key, value in note.frontmatter.items()
-            },
-        }
+        # Frontmatter goes out as read. Dates arrive as the text that spells
+        # them (ADR 0030), so there is nothing here `json.dumps` refuses.
+        row: dict = {"path": note.path.name, "frontmatter": dict(note.frontmatter)}
         if include_bodies:
             try:
                 content = note.path.read_text(encoding="utf-8")
