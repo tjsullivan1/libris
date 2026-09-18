@@ -462,7 +462,11 @@ def test_cleanup_repairs_a_format_obsidian_could_have_written(tmp_path):
         BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
     )
     text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace("format: null", "format: audiobook"), encoding="utf-8")
+    # The fixture edits the note as Libris spells it; a new spelling must fail here.
+    assert "\nformat:\n" in text
+    path.write_text(
+        text.replace("\nformat:\n", "\nformat: audiobook\n"), encoding="utf-8"
+    )
 
     # When cleanup runs
     updated, data = ensure_frontmatter_fields(path)
@@ -494,7 +498,9 @@ def test_cleanup_turns_an_empty_format_list_into_unset(tmp_path):
         BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
     )
     text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace("format: null", "format: []"), encoding="utf-8")
+    # The fixture edits the note as Libris spells it; a new spelling must fail here.
+    assert "\nformat:\n" in text
+    path.write_text(text.replace("\nformat:\n", "\nformat: []\n"), encoding="utf-8")
 
     # When cleanup runs
     _, data = ensure_frontmatter_fields(path)
@@ -509,7 +515,11 @@ def test_cleanup_dry_run_reports_without_writing(tmp_path):
         BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
     )
     text = path.read_text(encoding="utf-8")
-    path.write_text(text.replace("format: null", "format: audiobook"), encoding="utf-8")
+    # The fixture edits the note as Libris spells it; a new spelling must fail here.
+    assert "\nformat:\n" in text
+    path.write_text(
+        text.replace("\nformat:\n", "\nformat: audiobook\n"), encoding="utf-8"
+    )
     before = path.read_text(encoding="utf-8")
 
     # When cleanup is asked what it would do
@@ -641,7 +651,7 @@ def test_rewriting_frontmatter_leaves_an_unquoted_date_as_it_was():
     # Given frontmatter spelled the way almost every note on the Shelf is
     from libris.note_format import dump_frontmatter_yaml, parse_frontmatter_yaml
 
-    text = "title: Dune\ndate_added: 2020-05-05\ndate_published: '1965'\n"
+    text = 'title: Dune\ndate_added: 2020-05-05\ndate_published: "1965"\n'
 
     # When it is read and written back unchanged
     written = dump_frontmatter_yaml(parse_frontmatter_yaml(text))
@@ -668,8 +678,74 @@ def test_a_stamped_date_is_written_as_the_shelf_writes_one(tmp_path):
     # YAML would read it as a number.
     content = path.read_text(encoding="utf-8")
     assert f"date_added: {date.today().isoformat()}\n" in content
-    assert "date_published: '1965'\n" in content
+    assert 'date_published: "1965"\n' in content
     assert read_frontmatter(path)["date_added"] == date.today().isoformat()
+
+
+# --- a write leaves the rest of the block as Obsidian wrote it (#146) ---------
+
+# A note as it sits on the real Shelf, spelled by Obsidian: lists indented under
+# their key, empty values blank, double quotes only where a value needs them, a
+# long title on one line, and an ISBN-10 whose leading zero the quotes protect.
+OBSIDIAN_NOTE = (
+    "---\n"
+    "libris_id: 01KQZVQW00D7JWAYAPCBKYYSV4\n"
+    "title: \"Brotopia: Breaking Up the Boys' Club of Silicon Valley, a Title Long"
+    ' Enough That PyYAML Would Fold It"\n'
+    "authors:\n"
+    "  - Emily Chang\n"
+    '  - "#1 Co-Author"\n'
+    'isbn: "0786937521"\n'
+    "page_count: 497\n"
+    "date_published: 2011-10-04\n"
+    'google_books_id: ""\n'
+    "genres: []\n"
+    "series:\n"
+    "status: Read\n"
+    "priority:\n"
+    "rating:\n"
+    "format:\n"
+    "  - Audiobook\n"
+    "tags: Book\n"
+    "date_added: 2026-05-07\n"
+    'date_published_year: "2018"\n'
+    "---\n"
+    "\n"
+    "# Brotopia\n"
+)
+
+
+def test_setting_one_field_changes_only_its_line(tmp_path):
+    # Given a note written in Obsidian's style
+    from libris.markdown import set_frontmatter_fields
+
+    path = tmp_path / "Brotopia - Emily Chang.md"
+    path.write_text(OBSIDIAN_NOTE, encoding="utf-8")
+
+    # When Libris sets its rating
+    set_frontmatter_fields(path, {"rating": 4})
+
+    # Then the rating's line is the only line that moved. Before #146 the whole
+    # block was restyled, and 2,969 of 3,083 notes changed on any write.
+    before = OBSIDIAN_NOTE.splitlines()
+    after = path.read_text(encoding="utf-8").splitlines()
+    changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
+    assert changed == [("rating:", "rating: 4")]
+
+
+@pytest.mark.parametrize("value", ["0786937521", "08", "0o17", "1e3"])
+def test_a_string_yaml_1_2_would_read_as_a_number_is_written_quoted(value):
+    # Given text that YAML 1.1 reads as a string but YAML 1.2 - which Obsidian
+    # reads by - reads as a number. `isbn: 0786937521` unquoted is the integer
+    # 786937521 there, and 35 ISBNs on the Shelf have that shape.
+    from libris.note_format import dump_frontmatter_yaml, parse_frontmatter_yaml
+
+    # When it is written
+    written = dump_frontmatter_yaml({"isbn": value})
+
+    # Then it is quoted, so every reader reads it as the text it is
+    assert written == f'isbn: "{value}"\n'
+    assert parse_frontmatter_yaml(written) == {"isbn": value}
 
 
 def test_the_frontmatter_parser_agrees_on_a_repeated_key():

@@ -175,10 +175,10 @@ def test_import_new_books_apply(tmp_path):
         content = f.read_text(encoding="utf-8")
         if "Book One" in content:
             assert "status: To Read" in content
-            assert "format:\n- Audiobook" in content
+            assert "format:\n  - Audiobook" in content
         elif "Book Two" in content:
             assert "status: Read" in content
-            assert "format:\n- Audiobook" in content
+            assert "format:\n  - Audiobook" in content
 
 
 def test_import_detects_duplicates(tmp_path):
@@ -257,7 +257,7 @@ def test_import_updates_format_on_duplicate(tmp_path):
     assert "format" in result.updated_books[0][2]
 
     content = existing.read_text(encoding="utf-8")
-    assert "format:\n- Audiobook" in content
+    assert "format:\n  - Audiobook" in content
 
 
 def test_import_updates_format_when_field_missing(tmp_path):
@@ -281,7 +281,7 @@ def test_import_updates_format_when_field_missing(tmp_path):
     assert "format" in result.updated_books[0][2]
 
     content = existing.read_text(encoding="utf-8")
-    assert "format:\n- Audiobook" in content
+    assert "format:\n  - Audiobook" in content
 
 
 def test_import_updates_both_status_and_format(tmp_path):
@@ -309,7 +309,7 @@ def test_import_updates_both_status_and_format(tmp_path):
 
     content = existing.read_text(encoding="utf-8")
     assert "status: Read" in content
-    assert "format:\n- Audiobook" in content
+    assert "format:\n  - Audiobook" in content
 
 
 def test_import_skips_up_to_date_duplicate(tmp_path):

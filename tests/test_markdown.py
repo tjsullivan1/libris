@@ -46,7 +46,7 @@ def test_create_book_note(tmp_path):
 
     content = file_path.read_text()
     assert "title: Test Book" in content
-    assert "authors:\n- Author One" in content
+    assert "authors:\n  - Author One" in content
     assert "> [!abstract]- Description" in content
     assert "> A test description" in content
 
@@ -77,7 +77,7 @@ def test_create_book_note_with_overrides(tmp_path):
 
     # Then the overrides appear in frontmatter
     content = file_path.read_text()
-    assert "format:\n- Audiobook" in content
+    assert "format:\n  - Audiobook" in content
     assert "rating: 4" in content
     assert "referred_by: A Friend" in content
 
@@ -486,7 +486,7 @@ Some existing notes here.
 
     content = file_path.read_text()
     assert "tags: Book" in content
-    assert "format: null" in content
+    assert "\nformat:\n" in content
     assert "date_added:" in content
     assert "status: Finished" in content
     assert "Some existing notes here." in content
@@ -548,7 +548,7 @@ def test_ensure_frontmatter_migrates_legacy_author_to_authors_list(tmp_path):
     assert updated is True
 
     content = file_path.read_text()
-    assert "authors:\n- John Doe" in content
+    assert "authors:\n  - John Doe" in content
 
 
 def test_ensuring_frontmatter_mints_a_missing_libris_id(tmp_path):
@@ -641,7 +641,7 @@ rating: 5
     assert "Type Read" not in content
     assert "Rating out of 5" not in content
     # Existing canonical values should be preserved (not overwritten)
-    assert "format:\n- Audiobook" in content
+    assert "format:\n  - Audiobook" in content
     assert "rating: 5" in content
 
 

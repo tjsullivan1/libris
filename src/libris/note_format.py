@@ -59,8 +59,22 @@ if _HAVE_LIBYAML:
     _FrontmatterCLoader.add_constructor(_TIMESTAMP_TAG, _timestamp_as_text)
 
 
+# A string YAML 1.2 would read as a number. PyYAML resolves by YAML 1.1, where
+# `0786937521` is not a number - an octal cannot hold an 8 - so it writes the
+# ISBN bare. Obsidian reads by 1.2, where it is the integer 786937521 and the
+# leading zero is gone (#146). 35 ISBNs on the Shelf have that shape. The 1.1
+# resolvers already protect everything else the 1.2 core schema would take:
+# booleans, nulls, and every number both versions agree on.
+_YAML12_NUMBER = re.compile(
+    r"[-+]?[0-9]+"
+    r"|0o[0-7]+|0x[0-9a-fA-F]+"
+    r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+    r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
+)
+
+
 class _FrontmatterDumper(yaml.Dumper):
-    """The writing half of the loaders above.
+    """The writing half of the loaders above, in the style Obsidian writes.
 
     PyYAML quotes any string that would read back as another type, so a date
     held as text went to disk as `'2020-05-05'` while the 3,055 notes Obsidian
@@ -68,13 +82,43 @@ class _FrontmatterDumper(yaml.Dumper):
     the dumper no longer thinks the text needs protecting: an unquoted note
     round-trips byte for byte, and Libris's own stamps come out spelled the same
     way. A year alone stays quoted, because unquoted it would read as a number.
+
+    The rest is Obsidian's style rather than PyYAML's (ADR 0031). Every write
+    used to restyle the whole block - 2,969 of 3,083 notes changed when written
+    back with nothing edited - so changing one rating was a 20-line diff, and
+    the two tools could flip a note between their styles on every edit. Lists
+    are indented under their key, an empty value is left blank rather than
+    `null`, a string that needs quotes gets double ones, and a long title stays
+    on its line.
     """
+
+    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
+        # PyYAML writes a list inside a mapping flush with its key. Obsidian
+        # indents it, and so do 2,936 notes on the Shelf.
+        super().increase_indent(flow, False)
+
+    def choose_scalar_style(self) -> str:
+        style = super().choose_scalar_style()
+        # A double-quoted scalar can spell anything a single-quoted one can.
+        return '"' if style == "'" else style
+
+
+def _represent_none(dumper: yaml.Dumper, _value: None) -> yaml.ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:null", "")
+
+
+def _represent_str(dumper: yaml.Dumper, value: str) -> yaml.ScalarNode:
+    if _YAML12_NUMBER.fullmatch(value):
+        return dumper.represent_scalar("tag:yaml.org,2002:str", value, style='"')
+    return dumper.represent_str(value)
 
 
 _FrontmatterDumper.yaml_implicit_resolvers = {
     first: [(tag, regexp) for tag, regexp in resolvers if tag != _TIMESTAMP_TAG]
     for first, resolvers in yaml.Dumper.yaml_implicit_resolvers.items()
 }
+_FrontmatterDumper.add_representer(type(None), _represent_none)
+_FrontmatterDumper.add_representer(str, _represent_str)
 
 
 def parse_frontmatter_yaml(text: str) -> Any:
@@ -111,8 +155,14 @@ def dump_frontmatter_yaml(data: dict[str, Any]) -> str:
     Returns:
         The YAML for between the `---` fences, ending in a newline.
     """
+    # `width` is PyYAML's line length, past which it folds a long title onto a
+    # second line. Obsidian never folds, and 277 notes carry a longer title.
     return yaml.dump(
-        data, Dumper=_FrontmatterDumper, sort_keys=False, allow_unicode=True
+        data,
+        Dumper=_FrontmatterDumper,
+        sort_keys=False,
+        allow_unicode=True,
+        width=float("inf"),
     )
 
 

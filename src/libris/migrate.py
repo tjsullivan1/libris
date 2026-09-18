@@ -30,6 +30,7 @@ from .note_format import (
     FORMAT_VALUES,
     LEAKED_HEADINGS,
     MODELLED_FIELDS,
+    dump_frontmatter_yaml,
     has_description_callout,
     has_title_heading,
     is_isbn10,
@@ -136,18 +137,10 @@ def _render_scalar(key: str, value: str) -> str:
     Returns:
         A single `key: value` line, quoted only when YAML requires it.
     """
-    needs_quote = (
-        not value
-        or value != value.strip()
-        or value[:1] in "#&*!|>%@`\"'-?{}[],"
-        or ": " in value
-        or value.endswith(":")
-        or value.lower() in {"true", "false", "null", "yes", "no", "on", "off", "~"}
-    )
-    if needs_quote:
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'{key}: "{escaped}"'
-    return f"{key}: {value}"
+    # Through the one writer rather than a quoting rule of its own. The rule
+    # this replaced missed a title spelled in digits, and wrote `title: 1776`,
+    # which every reader reads back as a number (#146).
+    return dump_frontmatter_yaml({key: value}).rstrip("\n")
 
 
 def recover_title(note: BookNote) -> tuple[str | None, str | None]:

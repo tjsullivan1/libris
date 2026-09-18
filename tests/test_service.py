@@ -1420,8 +1420,10 @@ def test_a_format_written_as_a_bare_string_is_repaired_not_refused(tmp_path, upd
     # Shelf hold and which Obsidian can write at any time (ADR 0017)
     note = _shelve(tmp_path, "Dune", ["Frank Herbert"])
     raw = note.path.read_text(encoding="utf-8")
+    # The fixture edits the note as Libris spells it; a new spelling must fail here.
+    assert "\nformat:\n" in raw
     note.path.write_text(
-        raw.replace("format: null", "format: Physical", 1), encoding="utf-8"
+        raw.replace("\nformat:\n", "\nformat: Physical\n", 1), encoding="utf-8"
     )
 
     # When a second format is recorded

@@ -266,6 +266,23 @@ def test_migrating_a_note_mints_an_id_regroups_and_restructures(tmp_path):
     assert 'title: "Dune"' in plan.migrated
 
 
+def test_a_recovered_title_spelled_in_digits_stays_text(tmp_path):
+    # Given a note titled "1776", whose title the linter replaced with the
+    # Notes heading. Unquoted, `title: 1776` reads back as a number.
+    path = write_note(
+        tmp_path / "1776 - David McCullough.md",
+        'title: "Notes"\nauthors:\n  - David McCullough',
+        "## Notes\n\nmy prose\n",
+    )
+
+    # When the migration is planned
+    plan = plan_note_migration(path)
+
+    # Then the title is recovered from the filename, and quoted so it is still
+    # the title when it is read back (#146)
+    assert '\ntitle: "1776"\n' in plan.migrated
+
+
 def test_migrating_a_note_twice_changes_nothing_the_second_time(tmp_path):
     # Given a note that has already been migrated
     path = write_note(
