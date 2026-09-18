@@ -490,6 +490,34 @@ class TestGetPrimaryBook:
         primary = get_primary_book(path1, path2)
         assert primary == path1
 
+    def test_primary_by_earlier_date_added_however_it_is_spelled(self, tmp_path):
+        """The earlier note wins when one date is quoted and the other not (#143)."""
+        # Given two equally complete notes, the later one's date quoted as
+        # Libris stamps it, the earlier one's unquoted as Obsidian writes it
+        path1 = _write_book(
+            tmp_path,
+            "A.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            date_added="'2024-06-01'",
+        )
+        path2 = _write_book(
+            tmp_path,
+            "B.md",
+            title="Book",
+            isbn="123",
+            google_books_id="gb1",
+            date_added="2024-01-01",
+        )
+
+        # When the keeper is chosen
+        primary = get_primary_book(path1, path2)
+
+        # Then it is the earlier one. A date against a string raised TypeError,
+        # which was caught and fell through to path1 without a word.
+        assert primary == path2
+
 
 class TestWriteMergedBook:
     """Test write_merged_book() function."""
@@ -1017,6 +1045,22 @@ def test_a_reader_field_still_conflicts(tmp_path):
     # means they rated the same book twice (ADR 0018)
     assert [c.field for c in conflicts] == ["rating"]
     assert merged_fm["rating"] == 5
+
+
+def test_one_day_spelled_two_ways_is_not_a_conflict(tmp_path):
+    # Given two notes finished on the same day, one stamped by Libris (quoted)
+    # and one written by hand (unquoted)
+    primary = _write_book(tmp_path, "A.md", title="Dune", date_finished="'2024-03-01'")
+    secondary = _write_book(tmp_path, "B.md", title="Dune", date_finished="2024-03-01")
+
+    # When they are merged
+    merged_fm, _, conflicts = merge_two_books(primary, secondary, allow_conflicts=False)
+
+    # Then nothing is asked: they agree. `date_finished` is a reader field, so a
+    # false disagreement stops the merge for a question with only one answer
+    # (#143).
+    assert conflicts == []
+    assert merged_fm["date_finished"] == "2024-03-01"
 
 
 # --- what a merge asks a person (ADR 0018) ---

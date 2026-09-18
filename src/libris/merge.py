@@ -9,8 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
-
 from .markdown import (
     _normalize_author,
     read_frontmatter,
@@ -23,6 +21,7 @@ from .note_format import (
     MULTI_VALUED_FIELDS,
     READER_FIELDS,
     SUPERSEDED_IDS_FIELD,
+    dump_frontmatter_yaml,
     read_isbn,
     read_superseded_ids,
 )
@@ -361,9 +360,7 @@ def write_merged_book(
         NoteChanged: If `expected_sha256` is given and the primary no longer
             matches it. Nothing is written, and callers delete no secondary.
     """
-    frontmatter_yaml = yaml.dump(
-        merged_frontmatter, sort_keys=False, allow_unicode=True
-    ).strip()
+    frontmatter_yaml = dump_frontmatter_yaml(merged_frontmatter).strip()
     content = f"---\n{frontmatter_yaml}\n---\n{merged_body.lstrip()}"
     rewrite_note(primary_path, content, expected_sha256)
 
@@ -420,17 +417,15 @@ def get_primary_book(path1: Path, path2: Path) -> Path:
     if count1 != count2:
         return path1 if count1 > count2 else path2
 
-    # Tiebreaker: earlier date_added
+    # Tiebreaker: earlier date_added. A date is ISO text (ADR 0030), which sorts
+    # in date order. It used to arrive as a `date` or a `str` depending on who
+    # wrote the note, and comparing the two raised a TypeError that was caught
+    # here and fell through to path1 without a word (#143). Anything that is not
+    # text names no date to compare.
     date1 = fm1.get("date_added")
     date2 = fm2.get("date_added")
 
-    if date1 and date2:
-        try:
-            if date1 < date2:
-                return path1
-            else:
-                return path2
-        except TypeError:
-            pass
+    if isinstance(date1, str) and isinstance(date2, str) and date1 and date2:
+        return path1 if date1 < date2 else path2
 
     return path1

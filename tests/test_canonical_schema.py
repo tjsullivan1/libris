@@ -575,16 +575,19 @@ referred_by: "A friend: with a colon"
 """
 
 
-def test_the_frontmatter_parser_agrees_with_the_python_loader():
+def test_the_frontmatter_parser_agrees_with_the_python_loader(monkeypatch):
     # Given frontmatter shaped like the Shelf's, dates and all
     import yaml
 
-    from libris.note_format import parse_frontmatter_yaml
+    from libris import note_format
 
-    # When it is parsed through the Library's parser and through PyYAML's own
-    # pure-Python safe loader
-    ours = parse_frontmatter_yaml(_REPRESENTATIVE_FRONTMATTER)
-    theirs = yaml.load(_REPRESENTATIVE_FRONTMATTER, Loader=yaml.SafeLoader)
+    if not hasattr(yaml, "CSafeLoader"):
+        pytest.skip("PyYAML was built without libyaml, so there is one loader")
+
+    # When it is parsed through the C loader and through the pure-Python one
+    ours = note_format.parse_frontmatter_yaml(_REPRESENTATIVE_FRONTMATTER)
+    monkeypatch.setattr(note_format, "_HAVE_LIBYAML", False)
+    theirs = note_format.parse_frontmatter_yaml(_REPRESENTATIVE_FRONTMATTER)
 
     # Then they agree on the values and, separately, on their types. Equality
     # would catch a date returned as the string that spells it, since those do
@@ -595,8 +598,78 @@ def test_the_frontmatter_parser_agrees_with_the_python_loader():
     assert {k: type(v) for k, v in ours.items()} == {
         k: type(v) for k, v in theirs.items()
     }
-    assert isinstance(ours["date_published"], date)
     assert isinstance(ours["rating"], int) and not isinstance(ours["rating"], bool)
+
+
+# --- a date field is text (#143, ADR 0030) -----------------------------------
+
+
+@pytest.mark.parametrize("libyaml", [True, False])
+def test_a_date_field_reads_as_the_text_it_spells(monkeypatch, libyaml):
+    # Given a note whose dates are spelled both ways the Shelf spells them -
+    # unquoted, as 3,055 `date_added` values are, and quoted, as Libris wrote
+    # its own stamps
+    import yaml
+
+    from libris import note_format
+
+    if libyaml and not hasattr(yaml, "CSafeLoader"):
+        pytest.skip("PyYAML was built without libyaml")
+    monkeypatch.setattr(note_format, "_HAVE_LIBYAML", libyaml)
+
+    text = (
+        "date_added: 2020-05-05\n"
+        "date_finished: '2020-05-06'\n"
+        "date_published: '1994'\n"
+        "date_modified: 2026-08-01T10:00:00\n"
+    )
+
+    # When it is read
+    frontmatter = note_format.parse_frontmatter_yaml(text)
+
+    # Then every one is the text it spells, whichever way it was written
+    assert frontmatter == {
+        "date_added": "2020-05-05",
+        "date_finished": "2020-05-06",
+        "date_published": "1994",
+        "date_modified": "2026-08-01T10:00:00",
+    }
+    assert all(type(value) is str for value in frontmatter.values())
+
+
+def test_rewriting_frontmatter_leaves_an_unquoted_date_as_it_was():
+    # Given frontmatter spelled the way almost every note on the Shelf is
+    from libris.note_format import dump_frontmatter_yaml, parse_frontmatter_yaml
+
+    text = "title: Dune\ndate_added: 2020-05-05\ndate_published: '1965'\n"
+
+    # When it is read and written back unchanged
+    written = dump_frontmatter_yaml(parse_frontmatter_yaml(text))
+
+    # Then not a byte moves. Reading dates as text must not make every note
+    # Libris touches sprout quotes around its dates.
+    assert written == text
+
+
+def test_a_stamped_date_is_written_as_the_shelf_writes_one(tmp_path):
+    # Given a new Book Note, which Libris stamps with today's `date_added`
+    book = BookCandidate(
+        title="Dune",
+        authors=["Frank Herbert"],
+        isbn="9780441013593",
+        published_date="1965",
+    )
+
+    # When it is written
+    path = create_book_note(book, tmp_path)
+
+    # Then its date is spelled unquoted, like the 3,055 already on the Shelf,
+    # and reads back as the same text. A year alone stays quoted: unquoted,
+    # YAML would read it as a number.
+    content = path.read_text(encoding="utf-8")
+    assert f"date_added: {date.today().isoformat()}\n" in content
+    assert "date_published: '1965'\n" in content
+    assert read_frontmatter(path)["date_added"] == date.today().isoformat()
 
 
 def test_the_frontmatter_parser_agrees_on_a_repeated_key():
