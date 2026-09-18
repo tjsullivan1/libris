@@ -76,9 +76,11 @@ from .service import (
     FieldRepair,
     IdCollision,
     IsbnAgreement,
+    ShelfExport,
     accept_correction,
     apply_decisions,
     apply_encoding_repair,
+    csv_view,
     export_notes,
     find_encoding_damage,
     inspect_shelf,
@@ -1821,30 +1823,19 @@ def export(
     vault_path = _require_vault_path()
 
     if chosen == "json":
-        rows = export_notes(vault_path, include_bodies=not no_bodies)
-        rendered = json.dumps(rows, indent=2, ensure_ascii=False)
+        export = export_notes(vault_path, include_bodies=not no_bodies)
+        rendered = json.dumps(export.rows, indent=2, ensure_ascii=False)
     else:
         # Bodies are not fetched here, and that is about cost rather than
-        # safety: the writer below is built over the modelled fields with
-        # extrasaction="ignore", so a body would be dropped from the output
-        # anyway. What it saves is the *second* read of each note - parsing
-        # the frontmatter already reads every file once - measured at 8 reads
-        # against 4 for a four-note Shelf (#144 review).
-        rows = export_notes(vault_path, include_bodies=False)
+        # safety: `csv_view` keeps only the modelled fields, so a body would
+        # not reach the output anyway. What it saves is the *second* read of
+        # each note - parsing the frontmatter already reads every file once -
+        # measured at 8 reads against 4 for a four-note Shelf (#144 review).
+        export = export_notes(vault_path, include_bodies=False)
         buffer = io.StringIO()
-        writer = csv.DictWriter(
-            buffer, fieldnames=list(MODELLED_FIELDS), extrasaction="ignore"
-        )
+        writer = csv.DictWriter(buffer, fieldnames=list(MODELLED_FIELDS))
         writer.writeheader()
-        for row in rows:
-            fields = dict(row["frontmatter"])
-            for key, value in list(fields.items()):
-                if isinstance(value, list):
-                    # Joined rather than left as a list, which `csv` would
-                    # write as a Python repr - "['Frank Herbert']" in a cell.
-                    value = "; ".join(str(item) for item in value)
-                fields[key] = "" if value is None else value
-            writer.writerow(fields)
+        writer.writerows(csv_view(export.rows))
         rendered = buffer.getvalue()
 
     if not out and chosen == "csv":
@@ -1881,7 +1872,8 @@ def export(
             # terminates its last record itself.
             if chosen == "json":
                 handle.write("\n")
-        typer.echo(f"{len(rows)} note(s) written to {out_path}")
+        typer.echo(f"{len(export.rows)} note(s) written to {out_path}")
+        _report_export_gaps(export)
         return
 
     # CSV is already newline-terminated by `csv`, so `typer.echo` would add a
@@ -1890,6 +1882,31 @@ def export(
     # writes for the same request. JSON keeps its trailing newline, which is
     # what a text stream should end with (#144 review).
     typer.echo(rendered, nl=(chosen != "csv"))
+    _report_export_gaps(export)
+
+
+def _report_export_gaps(export: ShelfExport) -> None:
+    """Name anything an export could not carry, on stderr.
+
+    An export is offered as a backup, so one missing a note or a body has to say
+    so rather than pass for complete. Written to stderr so that it never lands
+    inside the JSON or CSV on stdout, which is the export itself.
+
+    Args:
+        export: What `export_notes` returned.
+    """
+    if export.unreadable:
+        typer.echo(
+            f"{len(export.unreadable)} file(s) could not be read as a Book Note "
+            f"and are not in this export: {', '.join(export.unreadable)}",
+            err=True,
+        )
+    if export.bodies_unread:
+        typer.echo(
+            f"{len(export.bodies_unread)} note(s) exported without their body, "
+            f"which could not be read back: {', '.join(export.bodies_unread)}",
+            err=True,
+        )
 
 
 @app.command()

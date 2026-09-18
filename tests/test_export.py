@@ -170,10 +170,9 @@ def test_export_csv_does_not_read_the_bodies_it_will_not_print(tmp_path, monkeyp
     vault = _shelf(tmp_path)
 
     # Counted rather than searched for. Asserting the prose is absent from the
-    # CSV proves nothing: `DictWriter` is built with extrasaction="ignore" over
-    # the modelled fields, so a body is dropped from the output whether or not
-    # it was ever read. The flag is a read-cost decision, and reads are what
-    # this has to measure (#12).
+    # CSV proves nothing: `csv_view` keeps only the modelled fields, so a body
+    # is dropped from the output whether or not it was ever read. The flag is a
+    # read-cost decision, and reads are what this has to measure (#12).
     reads: list[Path] = []
     real_read_text = Path.read_text
 
@@ -298,3 +297,72 @@ def test_export_refuses_a_format_it_does_not_know(tmp_path):
     assert result.exit_code == 1
     assert isinstance(result.exception, SystemExit)
     assert "xml" in result.output
+
+
+def test_export_names_a_file_it_could_not_read(tmp_path):
+    # Given a Shelf holding a file that cannot be parsed as a Book Note
+    vault = _shelf(tmp_path)
+    (vault / "Broken.md").write_text("no frontmatter here\n", encoding="utf-8")
+
+    # When it is exported
+    result = runner.invoke(app, ["export"])
+
+    # Then the export still holds every note it could read, and names the one
+    # it could not rather than passing for complete. An export is offered as a
+    # backup, so a note missing from it silently is a note lost silently.
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)
+    assert [row["path"] for row in rows] == ["Dune.md"]
+    assert "Broken.md" in result.stderr
+
+    # And the report goes to stderr alone, so the JSON on stdout still parses
+    assert "Broken.md" not in result.stdout
+
+
+def test_export_marks_a_body_it_could_not_read_back(tmp_path, monkeypatch):
+    # Given a note that parses, then moves before its body can be read - the
+    # race between the two reads an export with bodies makes of each note
+    vault = _shelf(tmp_path)
+    note = vault / "Dune.md"
+    real_read_text = Path.read_text
+    reads = {"count": 0}
+
+    def _vanishing_after_first_read(self, *args, **kwargs):
+        if self == note:
+            reads["count"] += 1
+            if reads["count"] > 1:
+                raise FileNotFoundError(self)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _vanishing_after_first_read)
+
+    # When it is exported with bodies
+    result = runner.invoke(app, ["export"])
+
+    # Then its fields still travel, but its body is None rather than "". An
+    # empty string would pass for a note nobody wrote in, and the body is what
+    # ADR 0009 calls the irreplaceable part.
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)
+    assert rows[0]["frontmatter"]["title"] == "Dune"
+    assert rows[0]["body"] is None
+    assert "Dune.md" in result.stderr
+
+
+def test_csv_view_is_reachable_without_the_command(tmp_path):
+    # Given the rows an export produces
+    from libris.note_format import MODELLED_FIELDS
+    from libris.service import csv_view, export_notes
+
+    vault = _shelf(tmp_path)
+    rows = export_notes(vault, include_bodies=False).rows
+
+    # When they are shaped for a spreadsheet by the service alone, as any
+    # Surface other than the CLI would have to (ADR 0008)
+    view = csv_view(rows)
+
+    # Then every row has exactly the modelled columns, several values joined
+    # and nothing written as an empty cell rather than "None"
+    assert list(view[0]) == list(MODELLED_FIELDS)
+    assert view[0]["genres"] == "Science Fiction; Classics"
+    assert view[0]["series"] == ""

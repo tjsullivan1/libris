@@ -26,7 +26,6 @@ from .markdown import (
     edit_note,
     list_books,
     note_fingerprint,
-    read_shelf_notes,
     set_frontmatter_fields,
     split_frontmatter,
     unterminated_frontmatter,
@@ -40,6 +39,7 @@ from .merge import (
     write_merged_book,
 )
 from .note_format import (
+    MODELLED_FIELDS,
     READER_FIELDS,
     description_callout_lines,
     is_isbn10,
@@ -875,15 +875,33 @@ def _json_safe(value: object) -> object:
     return value
 
 
-def export_notes(vault_path: Path, include_bodies: bool = True) -> list[dict]:
+@dataclass
+class ShelfExport:
+    """An export of the Shelf, and an account of what it could not carry.
+
+    An export is offered as a backup of the irreplaceable part (ADR 0009), so
+    anything it leaves out has to be named rather than dropped quietly. Both
+    lists are empty on the real 3,073-note Shelf; they exist so that a backup
+    which is missing something says so.
+    """
+
+    rows: list[dict]
+    # Files the Shelf lists that could not be parsed as a Book Note at all, so
+    # appear nowhere in `rows`.
+    unreadable: list[str] = field(default_factory=list)
+    # Notes whose fields were exported but whose body could not be read back:
+    # their row carries `"body": None`, which is not the `""` of an empty note.
+    bodies_unread: list[str] = field(default_factory=list)
+
+
+def export_notes(vault_path: Path, include_bodies: bool = True) -> ShelfExport:
     """Every Book Note on the Shelf, in a shape that can be written out (#12).
 
     Every note is read once to parse its frontmatter, whatever is asked for.
     Asking for bodies reads each file a *second* time, because `BookNote.read`
     keeps the frontmatter and not the text it came from - so `include_bodies`
     halves the reads rather than avoiding them: 8 against 4 on a four-note
-    Shelf. Worth stating plainly, because the comment that used to sit here
-    claimed the first read as the saving too (#144 review).
+    Shelf.
 
     Args:
         vault_path: The Shelf to export.
@@ -893,12 +911,18 @@ def export_notes(vault_path: Path, include_bodies: bool = True) -> list[dict]:
             export meant as a backup keeps it.
 
     Returns:
-        One row per readable note: its filename, its frontmatter with dates as
-        ISO strings, and its body when asked for. A file that cannot be parsed
-        is left out, the same answer every other Shelf-wide query gives.
+        One row per readable note - its filename, its frontmatter with dates as
+        ISO strings, and its body when asked for - together with every file
+        that could not be carried whole. A caller writing a backup reports
+        those rather than presenting the export as complete.
     """
-    rows: list[dict] = []
-    for note in read_shelf_notes(vault_path):
+    export = ShelfExport(rows=[])
+    for path in list_books(vault_path):
+        note = BookNote.read(path)
+        if note is None:
+            export.unreadable.append(path.name)
+            continue
+
         row: dict = {
             "path": note.path.name,
             "frontmatter": {
@@ -910,13 +934,48 @@ def export_notes(vault_path: Path, include_bodies: bool = True) -> list[dict]:
                 content = note.path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 # Parsed a moment ago, so this is the note moving or being
-                # replaced mid-export. Its fields are already in hand; the body
-                # is what is missing, and saying so beats failing the export.
-                content = ""
-            split = split_frontmatter(content)
-            row["body"] = split[1] if split else content
-        rows.append(row)
-    return rows
+                # replaced mid-export. The fields are already in hand, so the
+                # row still goes out - but with a body of None rather than "",
+                # which would pass for a note with nothing written in it.
+                row["body"] = None
+                export.bodies_unread.append(note.path.name)
+            else:
+                split = split_frontmatter(content)
+                row["body"] = split[1] if split else content
+        export.rows.append(row)
+    return export
+
+
+def csv_view(rows: list[dict]) -> list[dict[str, str]]:
+    """Flatten exported rows into the spreadsheet view of the Library (#12).
+
+    One column per modelled field, taken from the Library's own vocabulary
+    rather than from whatever each note happens to hold, so every row has the
+    same columns. Fields a plugin added, and the body, are not columns.
+
+    Shaping lives here rather than in the command so that any Surface can offer
+    the same view without re-deriving it (ADR 0008).
+
+    Args:
+        rows: Rows from `export_notes`.
+
+    Returns:
+        One dict per row, keyed by exactly the modelled fields, every value a
+        string: several values joined on "; ", and nothing as "".
+    """
+    flattened: list[dict[str, str]] = []
+    for row in rows:
+        fields = row["frontmatter"]
+        cells: dict[str, str] = {}
+        for name in MODELLED_FIELDS:
+            value = fields.get(name)
+            if isinstance(value, list):
+                # Joined rather than left as a list, which `csv` would write as
+                # a Python repr - "['Frank Herbert']" in a cell.
+                value = "; ".join(str(item) for item in value)
+            cells[name] = "" if value is None else str(value)
+        flattened.append(cells)
+    return flattened
 
 
 # The replacement character. It is what a decoder writes when it is handed bytes
