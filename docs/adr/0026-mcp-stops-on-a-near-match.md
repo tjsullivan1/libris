@@ -23,8 +23,8 @@ and is found only by a duplicate sweep months later. The Shelf already carries t
 groups.
 
 Corrected by ADR 0032 (September 2026): the 83 was the whole-Shelf containment count.
-`find_similar` compares only notes by the same first author, and among those containment finds
-9 pairs. The confirmation is asked for less often than this paragraph assumed. The asymmetry
+When given an author, `find_similar` compares titles only among notes by the same first author,
+and among those containment finds 9 pairs. The confirmation is asked for less often than this paragraph assumed. The asymmetry
 argument stands unchanged.
 
 Every write also reports its Duplicate Guarantee (ADR 0016), constant over stdio and not

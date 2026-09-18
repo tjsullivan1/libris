@@ -5,11 +5,12 @@ Follows ADR 0008 and ADR 0020. Settles #88.
 `GET /api/v1/books` has to answer the same way from `libris serve` and from the Container App
 (ADR 0020). Its exact half ports to Cosmos without difficulty. #88 argued that its fuzzy half,
 Near Matches, could not: Cosmos cannot run `titles_match`, so the remote would have to fetch
-all 3,062 documents per request or drop Near Matches entirely.
+every document per request or drop Near Matches entirely.
 
-Measuring showed that premise was wrong. When an author is given, `find_similar` never scans
-the Shelf. It keeps only the notes whose normalized first author is equal to the one asked
-about, and applies containment to those. On the real Shelf of 3,083 notes, the busiest author
+Measuring showed that premise was wrong. When an author is given, `find_similar` still walks
+the Shelf locally, but it applies containment only to the notes whose normalized first author
+is equal to the one asked about. That filter is an equality test, so a store can answer it
+directly and hand back just those notes. On the real Shelf of 3,083 notes, the busiest author
 has 75 notes, the median author has 1, and the 99th percentile has 11. The author filter also
 does almost all of the useful work: among notes by the same first author, containment finds 9
 pairs, and across different authors it finds 1,208, nearly all noise such as "14" matching
@@ -31,7 +32,7 @@ Near Match. Locally the five questions are lookups over `ShelfIndex`; remotely t
 point queries on stored keys.
 
 **No author, no Near Matches, in either location.** A lookup without an author was the only
-case that scanned the whole Shelf, and the weakest one: title containment across authors is
+case that compared titles across the whole Shelf, and the weakest one: title containment across authors is
 mostly noise. The remote could only answer it by fetching everything. Rather than let the two
 locations disagree, neither checks. The response says why, as `near_match_check: "checked"`
 or `"no_author"` next to `near_matches`, because an empty list would read as "nothing
