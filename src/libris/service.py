@@ -918,7 +918,13 @@ def export_notes(vault_path: Path, include_bodies: bool = True) -> ShelfExport:
     """
     export = ShelfExport(rows=[])
     for path in list_books(vault_path):
-        note = BookNote.read(path)
+        try:
+            note = BookNote.read(path)
+        except OSError:
+            # Listed, then gone or locked before it could be opened.
+            # `read_frontmatter` catches only a decoding error, so without this
+            # one vanished file aborted the whole export (#144 review).
+            note = None
         if note is None:
             export.unreadable.append(path.name)
             continue

@@ -810,11 +810,19 @@ def read_shelf_notes(vault_path: Path) -> list[BookNote]:
         them. A file that cannot be read is left out rather than raising, the
         same answer `find_duplicates` has always given for one.
     """
-    return [
-        note
-        for note in (BookNote.read(path) for path in list_books(vault_path))
-        if note is not None
-    ]
+    notes: list[BookNote] = []
+    for path in list_books(vault_path):
+        try:
+            note = BookNote.read(path)
+        except OSError:
+            # Listed, then gone or locked before it could be opened. The
+            # docstring promised this was left out rather than raising, but
+            # `read_frontmatter` catches only a decoding error, so it raised
+            # and took every Shelf-wide command down with it (#144 review).
+            continue
+        if note is not None:
+            notes.append(note)
+    return notes
 
 
 def find_duplicate_candidates(

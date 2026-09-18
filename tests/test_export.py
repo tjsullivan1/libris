@@ -215,40 +215,75 @@ def test_export_csv_has_one_line_per_book(tmp_path):
     assert all(line.strip() for line in lines)
 
 
-def test_export_csv_to_stdout_carries_no_carriage_returns(tmp_path, monkeypatch):
-    # Given a Shelf
-    _shelf(tmp_path)
+def _csv_handed_to_stdout(monkeypatch, *extra_args) -> tuple[object, bool]:
+    """Export CSV to the terminal and return what reached `typer.echo`, and nl.
 
-    # Asserted on the string handed to the stream, not on what CliRunner
-    # captured. CliRunner writes into an in-memory buffer that translates
-    # nothing, so the doubling this guards against is invisible there - which
-    # is exactly why it shipped: the harness said stdout was fine while a real
-    # shell redirect produced 3,074 "\r\r\n" sequences (#144 review).
-    printed: list[tuple[str, bool]] = []
+    Asserted on the call, not on what CliRunner captured. CliRunner writes into
+    an in-memory buffer that translates nothing, so a translated or doubled
+    ending is invisible there - which is how one shipped (#144 review).
+    """
+    printed: list[tuple[object, bool]] = []
 
-    def _echo(text="", **kwargs):
-        printed.append((text, kwargs.get("nl", True)))
+    def _echo(message=None, **kwargs):
+        printed.append((message, kwargs.get("nl", True)))
 
-    monkeypatch.setattr("libris.cli.typer.echo", _echo)
-
-    # When it is exported as CSV to the terminal
-    result = runner.invoke(app, ["export", "--format", "csv"])
-
-    # Then nothing carrying a carriage return reaches the stream: the one
-    # translation the stream applies then produces the right ending, instead of
-    # doubling one that is already there.
+    # Scoped with context() rather than undone with undo(), which would revert
+    # every patch in the test - conftest's isolation of LIBRIS_CONFIG_DIR
+    # included, pointing anything after it at the real config.
+    with monkeypatch.context() as patch:
+        patch.setattr("libris.cli.typer.echo", _echo)
+        result = runner.invoke(app, ["export", "--format", "csv", *extra_args])
     assert result.exit_code == 0, result.output
-    assert printed, "nothing was printed"
-    text, newline_added = printed[-1]
-    assert "\r" not in text
-    assert text.count("\n") >= 1
+    csv_calls = [call for call in printed if isinstance(call[0], bytes)]
+    assert len(csv_calls) == 1, f"expected one CSV write, got {printed!r}"
+    return csv_calls[0]
 
-    # And no newline is added on top of the one `csv` already wrote. Asserted
-    # on the call rather than on the captured output, because CliRunner's
-    # capture is what hid the doubling this test was written for: it cannot
-    # show a trailing byte any more than it could show a translated one.
-    assert text.endswith("\n")
+
+def test_export_csv_to_stdout_is_the_same_bytes_as_the_file(tmp_path, monkeypatch):
+    # Given a Shelf, exported as CSV to a file
+    _shelf(tmp_path)
+    out = tmp_path / "library.csv"
+    assert (
+        runner.invoke(app, ["export", "--format", "csv", "--out", str(out)]).exit_code
+        == 0
+    )
+
+    # When the same export goes to the terminal
+    printed, newline_added = _csv_handed_to_stdout(monkeypatch)
+
+    # Then the terminal is handed exactly those bytes. As bytes, `click.echo`
+    # writes them to the binary stream untranslated, so no platform can double
+    # `csv`'s "\r\n" - the defect a text stream produced - and nothing is added
+    # after the record `csv` already ended.
+    assert printed == out.read_bytes()
+    assert printed.endswith(b"\r\n")
     assert newline_added is False
+
+
+def test_export_csv_keeps_a_line_break_inside_a_cell(tmp_path, monkeypatch):
+    # Given a title holding a line break, which `csv` must quote and keep
+    vault = _shelf(tmp_path)
+    _write_note(
+        vault,
+        "Broken Title.md",
+        libris_id="lb-9",
+        title='"Line one\\r\\nLine two"',
+        authors=["Someone"],
+    )
+    out = tmp_path / "library.csv"
+    assert (
+        runner.invoke(app, ["export", "--format", "csv", "--out", str(out)]).exit_code
+        == 0
+    )
+
+    # When the export goes to the terminal
+    printed, _ = _csv_handed_to_stdout(monkeypatch)
+
+    # Then the break inside the cell arrives as it was, and matches the file.
+    # Rewriting "\r\n" to "\n" to fix the record endings - the earlier approach
+    # - also rewrote this, and on Linux nothing translates it back (#144 review)
+    assert b'"Line one\r\nLine two"' in printed
+    assert printed == out.read_bytes()
 
 
 def test_export_csv_to_a_file_keeps_its_own_line_endings(tmp_path):
@@ -317,6 +352,30 @@ def test_export_names_a_file_it_could_not_read(tmp_path):
 
     # And the report goes to stderr alone, so the JSON on stdout still parses
     assert "Broken.md" not in result.stdout
+
+
+def test_export_reports_a_file_that_vanishes_before_it_is_read(tmp_path, monkeypatch):
+    # Given a Shelf where one listed file is gone by the time it is opened
+    vault = _shelf(tmp_path)
+    gone = _write_note(vault, "Gone.md", libris_id="lb-4", title="Gone")
+    real_read_text = Path.read_text
+
+    def _vanished(self, *args, **kwargs):
+        if self == gone:
+            raise FileNotFoundError(self)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _vanished)
+
+    # When it is exported
+    result = runner.invoke(app, ["export", "--no-bodies"])
+
+    # Then the export still completes, carries every other note, and names the
+    # one it lost - rather than one vanished file aborting the whole backup
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)
+    assert [row["path"] for row in rows] == ["Dune.md"]
+    assert "Gone.md" in result.stderr
 
 
 def test_export_marks_a_body_it_could_not_read_back(tmp_path, monkeypatch):

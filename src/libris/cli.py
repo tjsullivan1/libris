@@ -1838,20 +1838,6 @@ def export(
         writer.writerows(csv_view(export.rows))
         rendered = buffer.getvalue()
 
-    if not out and chosen == "csv":
-        # Normalised for the terminal only. `csv` writes its own "\r\n", and
-        # this process's stdout is a translating text stream, so those
-        # terminators arrive as "\r\r\n" - measured through a shell redirect at
-        # 6,149 lines and 3,074 doubled endings for 3,073 books. Handing it
-        # "\n" lets the stream's one translation produce the right ending
-        # rather than doubling one that is already there.
-        #
-        # Measured through a real redirect rather than Typer's CliRunner, which
-        # captures into an in-memory buffer and translates nothing: against
-        # that harness stdout looked correct, which is how this shipped while
-        # the file path was being fixed (#144 review).
-        rendered = rendered.replace("\r\n", "\n")
-
     if out:
         out_path = Path(out).expanduser()
         # newline="" rather than `write_text`, which leaves newline=None and
@@ -1876,12 +1862,21 @@ def export(
         _report_export_gaps(export)
         return
 
-    # CSV is already newline-terminated by `csv`, so `typer.echo` would add a
-    # second one and the redirected file would end "\r\n\r\n" - an extra blank
-    # row to some consumers, and a file whose bytes differ from what --out
-    # writes for the same request. JSON keeps its trailing newline, which is
-    # what a text stream should end with (#144 review).
-    typer.echo(rendered, nl=(chosen != "csv"))
+    if chosen == "csv":
+        # Handed over as bytes, which `click.echo` writes to the binary stream
+        # untranslated. As text, stdout translates every "\n" it is given, and
+        # `csv` has already written "\r\n" - so its terminators came out doubled
+        # (#144 review). Rewriting "\r\n" to "\n" first fixed the terminators
+        # but also rewrote any line break inside a quoted cell, and on Linux,
+        # where nothing translates it back, changed the value. As bytes there
+        # is nothing to fix: the terminal gets exactly what --out writes, on
+        # every platform. No newline is added - `csv` ended its last record.
+        typer.echo(rendered.encode("utf-8"), nl=False)
+    else:
+        # JSON escapes its line breaks inside strings, so a text stream's
+        # translation touches only the layout, and ends with the newline a text
+        # stream should.
+        typer.echo(rendered)
     _report_export_gaps(export)
 
 
