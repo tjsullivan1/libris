@@ -45,7 +45,10 @@ file is a Book Note in any other way. The remote copies the rule rather than tig
 titled notes count and match, and untitled ones do neither. Sync pushes by Libris ID (ADR 0015),
 so a titled note with no Libris ID would be searchable locally and missing remotely. On the real
 Shelf, all 3,084 titled notes carry one. Sync must report a titled note that has no ID rather
-than silently skip it.
+than silently skip it. The same goes for two notes that share an ID. Sync would push both under
+one identity and keep only the last (see `IdCollision`), so the remote would hold one note while
+the Shelf holds two. Sync refuses to push while `find_id_collisions` reports anything. The real
+Shelf has none today.
 
 **The document is rebuilt from scratch at the end of every sync.** That follows from ADR 0002
 rather than being a new choice. The remote never writes Book Notes itself: a remote add or update
@@ -103,8 +106,9 @@ local search uses, so the two locations cannot split words differently.
 length and normalized title, and notes that tie on all four keep whatever order they arrived in:
 directory order locally, query order remotely. Ties are common. On the real Shelf, 14 normalized
 titles are shared by 57 notes, 19 of them titled "Poems", so with a limit of 20 the two locations
-could return different books. The Libris ID is unique and every titled note carries one, so it is
-the final key in both the ranked order and the title order. Adding it is part of #157.
+could return different books. The Libris ID is the final key in both the ranked order and the
+title order. That works because the two sync checks above ensure that every note the remote holds
+has an ID and that no two notes share one. Adding the key is part of #157.
 
 Two consequences. A query made entirely of filler is taken at face value (ADR 0027), so "the"
 fetches every note that carries it, which is 1,478 on the real Shelf. That is the cost of the
