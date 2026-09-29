@@ -11,7 +11,7 @@ from datetime import date
 import pytest
 
 from libris import service
-from libris.api import BookCandidate
+from libris.api import UNKNOWN_AUTHOR, UNKNOWN_TITLE, BookCandidate
 from libris.markdown import (
     BookNote,
     FrontmatterUnreadable,
@@ -1386,6 +1386,35 @@ def test_an_author_with_no_letters_in_it_counts_as_no_author(tmp_path):
 
     # Then that is no author, not an author nobody on the Shelf shares
     assert near.check is NearMatchCheck.NO_AUTHOR
+
+
+def test_the_unknown_author_placeholder_counts_as_no_author(tmp_path):
+    # Given two authorless books that Libris shelved under its placeholder
+    create_book_note(
+        _candidate(title="The Brass Verdict: A Novel", authors=[UNKNOWN_AUTHOR]),
+        tmp_path,
+    )
+
+    # When another book Google Books lists with no author is checked
+    near = find_similar(tmp_path, title="The Brass Verdict", authors=[UNKNOWN_AUTHOR])
+
+    # Then the placeholder is not an author they share. Matching on it compares
+    # titles across every authorless note, the noise ADR 0032 removed, and
+    # reports it as "checked".
+    assert near.check is NearMatchCheck.NO_AUTHOR
+    assert near.notes == []
+
+
+def test_the_unknown_title_placeholder_counts_as_no_title(tmp_path):
+    # Given a book by this author shelved under Libris's title placeholder
+    create_book_note(_candidate(title=UNKNOWN_TITLE), tmp_path)
+
+    # When another untitled book by the same author is checked
+    near = find_similar(tmp_path, title=UNKNOWN_TITLE, authors=["Frank Herbert"])
+
+    # Then the placeholder is not a title they share
+    assert near.check is NearMatchCheck.NO_TITLE
+    assert near.notes == []
 
 
 def test_a_book_with_no_title_is_not_checked_for_near_matches(tmp_path):

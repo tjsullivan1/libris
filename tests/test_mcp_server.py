@@ -20,7 +20,7 @@ import anyio  # noqa: E402
 from mcp import Client  # noqa: E402
 
 from libris import config, shelf  # noqa: E402
-from libris.api import BookCandidate  # noqa: E402
+from libris.api import UNKNOWN_AUTHOR, BookCandidate, GoogleBooksClient  # noqa: E402
 from libris.markdown import BookNote, create_book_note  # noqa: E402
 from libris.mcp_server import create_server  # noqa: E402
 
@@ -315,26 +315,34 @@ def test_a_bare_string_format_is_reported_not_dropped(shelved):
 
 
 class _OneVolume:
-    """A Google Books client that knows exactly one volume."""
+    """A Google Books client that knows exactly one volume, as the API sends it.
 
-    def __init__(self, candidate: BookCandidate) -> None:
-        self._candidate = candidate
+    The item goes through the real conversion, so the candidate carries whatever
+    placeholders Libris substitutes for missing fields. A fake that handed over
+    authors=[] tested a volume Google Books can never produce.
+    """
+
+    def __init__(self, item: dict) -> None:
+        self._item = item
 
     def get_volume(self, volume_id: str) -> BookCandidate:
-        return self._candidate
+        return GoogleBooksClient._to_candidate(self._item)
 
 
 def test_an_add_with_no_author_writes_and_says_it_could_not_check(shelved, monkeypatch):
-    # Given a volume Google Books lists with no author, and a note a title-only
-    # comparison would have stopped on
+    # Given a volume Google Books lists with no author, and two notes a
+    # comparison on the author placeholder would have stopped on: another
+    # authorless book, and the one a title-only comparison would find
     create_book_note(
         BookCandidate(title="Dune Messiah: Deluxe Edition", authors=["Frank Herbert"]),
         shelved,
     )
-    volume = BookCandidate(title="Dune Messiah", authors=[], google_books_id="v1")
-    monkeypatch.setattr(
-        "libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(volume)
+    create_book_note(
+        BookCandidate(title="Dune Messiah: A Study Guide", authors=[UNKNOWN_AUTHOR]),
+        shelved,
     )
+    item = {"id": "v1", "volumeInfo": {"title": "Dune Messiah"}}
+    monkeypatch.setattr("libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(item))
 
     # When the model adds it
     answer = payload(call("add_book", {"google_books_id": "v1"}))

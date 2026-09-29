@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from .api import BookCandidate, GoogleBooksClient
+from .api import UNKNOWN_AUTHOR, UNKNOWN_TITLE, BookCandidate, GoogleBooksClient
 from .markdown import (
     EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
@@ -348,13 +348,16 @@ def find_similar(
         Whether the check ran, and the Book Notes whose title plausibly
         describes the same Book, nearest first by title length.
     """
-    if not title or not normalize_for_match(title):
+    # Libris's own placeholders count as nothing: every authorless note shares
+    # "Unknown Author", so matching on it compares titles across all of them.
+    wanted_title = normalize_for_match(title) if title else ""
+    if not wanted_title or wanted_title == normalize_for_match(UNKNOWN_TITLE):
         return NearMatches(NearMatchCheck.NO_TITLE)
 
     # An author that normalizes to nothing ("-", a stray space) is no author,
     # not one that no note on the Shelf happens to share.
     wanted_author = normalize_for_match(authors[0]) if authors else ""
-    if not wanted_author:
+    if not wanted_author or wanted_author == normalize_for_match(UNKNOWN_AUTHOR):
         return NearMatches(NearMatchCheck.NO_AUTHOR)
 
     found: list[BookNote] = []

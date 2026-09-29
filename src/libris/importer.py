@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .api import BookCandidate
+from .api import UNKNOWN_AUTHOR, BookCandidate
 from .markdown import (
     BookNote,
     FrontmatterUnreadable,
@@ -60,7 +60,7 @@ def parse_audible_json(path: Path) -> List[ImportBook]:
         authors = (
             [a.strip() for a in author_str.split(",") if a.strip()]
             if author_str
-            else ["Unknown Author"]
+            else [UNKNOWN_AUTHOR]
         )
 
         finished = entry.get("finished", "").strip().lower() == "yes"
