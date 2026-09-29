@@ -44,7 +44,15 @@
   <section id="details" hidden>
     <h2>Add to your Library</h2>
     <p class="book" id="chosen"></p>
-    <p class="hint" id="unchecked" hidden></p>
+    <div id="unchecked" hidden>
+      <p class="hint" id="unchecked-reason"></p>
+      <div id="unchecked-fix" hidden>
+        <label>Authors <input id="unchecked-authors" type="text" placeholder="comma separated"></label>
+        <div class="actions">
+          <button id="unchecked-recheck">Check again</button>
+        </div>
+      </div>
+    </div>
     <div id="field-controls"></div>
     <div class="actions">
       <button id="add" class="primary">Add</button>

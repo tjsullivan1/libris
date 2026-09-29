@@ -192,10 +192,27 @@ function showUnchecked(check) {
   const unchecked = Boolean(check) && check !== "checked";
   if (unchecked) {
     const reason = UNCHECKED_BECAUSE[check] || "Libris couldn't tell";
-    el("unchecked").textContent =
-      `${reason}, so Libris couldn't check whether you already have it under another title.`;
+    el("unchecked-reason").textContent =
+      `${reason}, so Libris couldn't check whether you already have it under another title.` +
+      (check === "no_author" ? " Add the author to check." : "");
+    el("unchecked-authors").value = "";
   }
   show("unchecked", unchecked);
+  // An author is the one missing piece a person can supply here; a missing title
+  // means the candidate itself is wrong, which the picker is for.
+  show("unchecked-fix", check === "no_author");
+}
+
+/** Check the chosen candidate again under the author the person typed. */
+async function recheckWithAuthors() {
+  const authors = splitAuthors(el("unchecked-authors").value);
+  if (!authors.length) {
+    el("unchecked-authors").focus();
+    return;
+  }
+  // The typed author is what gets written too: checking under one author and
+  // filing under Google Books's placeholder would make the next check miss it.
+  await choose({ ...state.chosen, authors });
 }
 
 async function choose(candidate) {
@@ -252,11 +269,15 @@ function offerRetry() {
   show("retry");
 }
 
-function editedScrape() {
-  const authors = el("retry-authors")
-    .value.split(",")
+function splitAuthors(text) {
+  return text
+    .split(",")
     .map((name) => name.trim())
     .filter(Boolean);
+}
+
+function editedScrape() {
+  const authors = splitAuthors(el("retry-authors").value);
   return { ...state.scrape, title: el("retry-title").value.trim() || null, authors };
 }
 
@@ -302,6 +323,7 @@ async function init() {
   el("add").addEventListener("click", add);
   el("retry-search").addEventListener("click", searchAgain);
   el("retry-bare").addEventListener("click", addBare);
+  el("unchecked-recheck").addEventListener("click", recheckWithAuthors);
 
   say("Checking…");
 
