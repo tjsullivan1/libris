@@ -85,6 +85,13 @@ def parse_retry_after(value: object, now: datetime | None = None) -> float | Non
     return max(0.0, (retry_at - reference).total_seconds())
 
 
+# What a candidate carries when its source gave no title or no author. They name
+# a note's file, so a Book still gets one, but they describe nothing: two notes
+# sharing a placeholder share no title or author.
+UNKNOWN_TITLE = "Unknown Title"
+UNKNOWN_AUTHOR = "Unknown Author"
+
+
 @dataclass
 class BookCandidate:
     """Metadata about a book proposed by an external source.
@@ -286,8 +293,8 @@ class GoogleBooksClient:
                 isbn = ident.get("identifier")
 
         return BookCandidate(
-            title=volume_info.get("title", "Unknown Title"),
-            authors=volume_info.get("authors", ["Unknown Author"]),
+            title=volume_info.get("title", UNKNOWN_TITLE),
+            authors=volume_info.get("authors", [UNKNOWN_AUTHOR]),
             isbn=isbn,
             page_count=volume_info.get("pageCount"),
             published_date=volume_info.get("publishedDate"),

@@ -402,9 +402,13 @@ and you may get a handful of loosely related titles rather than nothing, because
 guesses confidently and guesses wrong is the failure mode Libris refuses. Read the titles.
 
 **Adding stops when you might already have the book.** If your Library holds something with a
-similar title, nothing is written — you are shown the near matches and asked. Say it is a
-different book and it goes ahead. This is stricter than the browser extension on purpose: there,
-a person is already looking at the near matches when they press the button.
+similar title by the same author, nothing is written — you are shown the near matches and asked.
+Say it is a different book and it goes ahead. This is stricter than the browser extension on
+purpose: there, a person is already looking at the near matches when they press the button.
+
+A book Google Books lists with no author cannot be checked, because comparing its title against
+every author on your Shelf is mostly noise. It is written, and the answer says the check did not
+run, so the assistant can tell you rather than implying nothing resembled it.
 
 **Marking a book Read dates it today**, unless you say otherwise, and the answer tells you it
 did. If you finished it last Tuesday, say so and it will be corrected — but only while you are

@@ -195,6 +195,14 @@ class WriteAnswer(BaseModel):
         default=[],
         description="Books that stopped the write. Ask which, then set confirm.",
     )
+    near_match_check: str | None = Field(
+        default=None,
+        description=(
+            "Whether near matches were looked for: checked, no_author or "
+            "no_title. When it is not checked, tell the person the Library "
+            "could not look for a copy it may already hold."
+        ),
+    )
     derived: dict[str, str] = Field(
         default={},
         description="Fields the Library set that you did not ask for.",
@@ -348,6 +356,9 @@ def create_server(name: str = "libris") -> "MCPServer":
             outcome=result.outcome.value,
             book=_written(shelf, result),
             near_matches=[Book.of(n) for n in result.near_matches],
+            near_match_check=(
+                result.near_match_check.value if result.near_match_check else None
+            ),
         )
 
     @mcp.tool()

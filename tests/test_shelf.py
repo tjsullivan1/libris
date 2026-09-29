@@ -207,7 +207,7 @@ def test_a_miss_reads_the_shelf_once_not_twice(tmp_path, counted_reads):
 
     # Then the Near Match is offered, and neither question re-read a thing.
     # Before the index these were two full passes over the Shelf.
-    assert [n.title for n in near] == ["The Brass Verdict: A Novel"]
+    assert [n.title for n in near.notes] == ["The Brass Verdict: A Novel"]
     assert counted_reads == []
 
 

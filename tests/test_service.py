@@ -11,7 +11,7 @@ from datetime import date
 import pytest
 
 from libris import service
-from libris.api import BookCandidate
+from libris.api import UNKNOWN_AUTHOR, UNKNOWN_TITLE, BookCandidate
 from libris.markdown import (
     BookNote,
     FrontmatterUnreadable,
@@ -23,6 +23,7 @@ from libris.service import (
     BookNotFound,
     DecisionStatus,
     IsbnAgreement,
+    NearMatchCheck,
     Outcome,
     add_book,
     apply_decisions,
@@ -31,6 +32,7 @@ from libris.service import (
     find_encoding_damage,
     find_existing,
     find_id_collisions,
+    find_similar,
     is_isbn10,
     search_library,
     update_book,
@@ -1350,6 +1352,136 @@ def test_confirming_writes_even_over_a_near_match(tmp_path):
     # carried.
     assert result.outcome is Outcome.CREATED
     assert len(list(tmp_path.glob("*.md"))) == 2
+
+
+# --- Near Matches need an author (ADR 0032) ---
+
+
+def test_a_book_with_no_author_is_not_checked_for_near_matches(tmp_path):
+    # Given a note a title-only comparison would offer
+    create_book_note(
+        _candidate(title="The Brass Verdict: A Novel", authors=["Michael Connelly"]),
+        tmp_path,
+    )
+
+    # When a Book with no author is checked against it
+    near = find_similar(tmp_path, title="The Brass Verdict", authors=[])
+
+    # Then nothing is offered, and the answer says the check did not run rather
+    # than that it found nothing (ADR 0029). A title compared across every
+    # author is mostly noise, and the remote cannot answer it at all.
+    assert near.check is NearMatchCheck.NO_AUTHOR
+    assert near.notes == []
+
+
+def test_an_author_with_no_letters_in_it_counts_as_no_author(tmp_path):
+    # Given the same note
+    create_book_note(
+        _candidate(title="The Brass Verdict: A Novel", authors=["Michael Connelly"]),
+        tmp_path,
+    )
+
+    # When the author a page gave normalizes to nothing
+    near = find_similar(tmp_path, title="The Brass Verdict", authors=[" - "])
+
+    # Then that is no author, not an author nobody on the Shelf shares
+    assert near.check is NearMatchCheck.NO_AUTHOR
+
+
+def test_the_unknown_author_placeholder_counts_as_no_author(tmp_path):
+    # Given two authorless books that Libris shelved under its placeholder
+    create_book_note(
+        _candidate(title="The Brass Verdict: A Novel", authors=[UNKNOWN_AUTHOR]),
+        tmp_path,
+    )
+
+    # When another book Google Books lists with no author is checked
+    near = find_similar(tmp_path, title="The Brass Verdict", authors=[UNKNOWN_AUTHOR])
+
+    # Then the placeholder is not an author they share. Matching on it compares
+    # titles across every authorless note, the noise ADR 0032 removed, and
+    # reports it as "checked".
+    assert near.check is NearMatchCheck.NO_AUTHOR
+    assert near.notes == []
+
+
+def test_the_unknown_title_placeholder_counts_as_no_title(tmp_path):
+    # Given a book by this author shelved under Libris's title placeholder
+    create_book_note(_candidate(title=UNKNOWN_TITLE), tmp_path)
+
+    # When another untitled book by the same author is checked
+    near = find_similar(tmp_path, title=UNKNOWN_TITLE, authors=["Frank Herbert"])
+
+    # Then the placeholder is not a title they share
+    assert near.check is NearMatchCheck.NO_TITLE
+    assert near.notes == []
+
+
+def test_a_book_with_no_title_is_not_checked_for_near_matches(tmp_path):
+    # Given a Shelf holding a book by this author
+    create_book_note(_candidate(title="Dune"), tmp_path)
+
+    # When a Book with an author but no title is checked
+    near = find_similar(tmp_path, title=None, authors=["Frank Herbert"])
+
+    # Then there was nothing to compare, and the answer says so
+    assert near.check is NearMatchCheck.NO_TITLE
+    assert near.notes == []
+
+
+def test_a_check_that_finds_nothing_says_it_checked(tmp_path):
+    # Given a Shelf holding nothing like this Book
+    create_book_note(_candidate(title="Dune"), tmp_path)
+
+    # When a Book with a title and an author is checked
+    near = find_similar(tmp_path, title="Neuromancer", authors=["William Gibson"])
+
+    # Then the empty answer is a finding, not an absence
+    assert near.check is NearMatchCheck.CHECKED
+    assert near.notes == []
+
+
+def test_an_add_with_no_author_writes_and_says_it_could_not_check(tmp_path):
+    # Given a note a title-only comparison would have stopped on
+    create_book_note(
+        _candidate(title="The Brass Verdict: A Novel", authors=["Michael Connelly"]),
+        tmp_path,
+    )
+
+    # When a Surface that stops on Near Matches adds a Book with no author
+    result = add_book(
+        tmp_path,
+        _candidate(title="The Brass Verdict", authors=[]),
+        stop_on_near_match=True,
+    )
+
+    # Then it writes - ADR 0026 stops only on a Near Match there is to show -
+    # and reports that the check could not run, so the model can tell the person
+    assert result.outcome is Outcome.CREATED
+    assert result.near_match_check is NearMatchCheck.NO_AUTHOR
+
+
+def test_an_add_that_was_stopped_says_it_checked(tmp_path):
+    # Given a Near Match by the same author
+    create_book_note(_candidate(title="The Brass Verdict: A Novel"), tmp_path)
+
+    # When a Surface that stops on Near Matches adds the short title
+    result = add_book(
+        tmp_path, _candidate(title="The Brass Verdict"), stop_on_near_match=True
+    )
+
+    # Then the stop reports the check that caused it
+    assert result.outcome is Outcome.NEEDS_CONFIRMATION
+    assert result.near_match_check is NearMatchCheck.CHECKED
+
+
+def test_an_add_that_did_not_ask_reports_no_check(tmp_path):
+    # When a Surface that does not stop on Near Matches adds a Book
+    result = add_book(tmp_path, _candidate(title="Dune"))
+
+    # Then no check is claimed either way: none was asked for
+    assert result.outcome is Outcome.CREATED
+    assert result.near_match_check is None
 
 
 def test_an_empty_string_does_not_clear_a_field(tmp_path, update):
