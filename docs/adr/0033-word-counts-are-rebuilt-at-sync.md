@@ -39,8 +39,8 @@ defines, and one for notes with no Status. A note carrying an old status value s
 "reading" is counted when nothing is filtered, as it is locally. An unfiltered search adds up
 every bucket.
 
-**The remote holds exactly the notes the local search reads.** Locally, that is every file in
-the Shelf's directory that parses with a title, and the local search does not check whether a
+**The remote holds exactly the notes the local search reads.** Locally, that is every `.md`
+file in the Shelf's directory that parses with a title, and the local search does not check whether a
 file is a Book Note in any other way. The remote copies the rule rather than tightening it:
 titled notes count and match, and untitled ones do neither. Sync pushes by Libris ID (ADR 0015),
 so a titled note with no Libris ID would be searchable locally and missing remotely. On the real
