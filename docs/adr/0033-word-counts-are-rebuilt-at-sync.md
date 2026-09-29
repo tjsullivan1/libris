@@ -37,9 +37,15 @@ split the searchable notes exactly, or an unfiltered search will not match the S
 one bucket for each status value found on the Shelf, whether or not it is one the Library
 defines, and one for notes with no Status. A note carrying an old status value such as
 "reading" is counted when nothing is filtered, as it is locally. An unfiltered search adds up
-every bucket. Only notes with a title count, because the local search skips the rest. The
-Vault's own files share the Shelf's directory and are not Book Notes, so they neither match nor
-carry weight.
+every bucket.
+
+**The remote holds exactly the notes the local search reads.** Locally, that is every file in
+the Shelf's directory that parses with a title, and the local search does not check whether a
+file is a Book Note in any other way. The remote copies the rule rather than tightening it:
+titled notes count and match, and untitled ones do neither. Sync pushes by Libris ID (ADR 0015),
+so a titled note with no Libris ID would be searchable locally and missing remotely. On the real
+Shelf, all 3,084 titled notes carry one. Sync must report a titled note that has no ID rather
+than silently skip it.
 
 **The document is rebuilt from scratch at the end of every sync.** That follows from ADR 0002
 rather than being a new choice. The remote never writes Book Notes itself: a remote add or update
@@ -68,18 +74,37 @@ words, and ADR 0015 pushes only the notes whose content changed. A change to `_s
 split by the old code, while the counts reflect the new code. That is the same consequence ADR
 0032 draws for stored keys, and it has the same remedy: a full re-push. The counts document
 records a version for how words are split. When the version differs, sync re-pushes every
-document, so the re-push does not depend on someone remembering to run it.
+document, so the re-push does not depend on someone remembering to run it. The new version is
+written only after every document has been re-pushed, so a re-push that fails partway is retried
+in full at the next sync.
 
-**The store answers, the service ranks.** Following ADR 0032, the store gains two questions: the
-notes within a Status that carry any of a given set of words, and the word counts for a Status.
+A re-push is the one case where the sync gap costs more than ordering. Until a document is
+re-pushed, it still holds words split the old way, so a query split the new way can miss it
+entirely. Searches are not paused for it. A re-push happens only when code changes, it lasts one
+sync, and a remote that refused all searches for that time would be worse than one that briefly
+misses some notes.
+
+**The store answers, the service ranks.** Following ADR 0032, the store gains three questions:
+the notes within a Status that carry any of a given set of words; the word counts and note total
+for a Status; and, for a search with no query ("what am I reading?"), the notes within a Status
+in title order, up to a limit. The third question needs no counts. Its total is the bucket's note
+total, and its order is set by a normalized title that each document stores at sync, so a limited
+listing does not fetch the whole Library to return one page.
 Each document stores the words its title and authors split into, so the first question is an
 `ARRAY_CONTAINS` query. The service decides which words to ask for, using the same rule it
 applies locally. When the query holds at least one distinctive word, it asks only for those. That
 is exact, because a note matching nothing but filler is never a result (ADR 0027). When every word
 is filler, it asks for all of them, so "the" still finds "The Road". Both questions cover only
-notes with a title. Stop words, weighting, density and ordering stay in the service, written once. The words each document stores are computed at sync
-by the same `_search_tokens` that the local search uses, so the two locations cannot split words
-differently.
+notes with a title. Stop words, weighting, density and ordering stay in the service, written
+once. The words each document stores are computed at sync by the same `_search_tokens` that the
+local search uses, so the two locations cannot split words differently.
+
+**Every ordering ends on the Libris ID.** Today `search_library` sorts by score, density, title
+length and normalized title, and notes that tie on all four keep whatever order they arrived in:
+directory order locally, query order remotely. Ties are common. On the real Shelf, 14 normalized
+titles are shared by 57 notes, 19 of them titled "Poems", so with a limit of 20 the two locations
+could return different books. The Libris ID is unique and every titled note carries one, so it is
+the final key in both the ranked order and the title order. Adding it is part of #157.
 
 Two consequences. A query made entirely of filler is taken at face value (ADR 0027), so "the"
 fetches every note that carries it, which is 1,478 on the real Shelf. That is the cost of the

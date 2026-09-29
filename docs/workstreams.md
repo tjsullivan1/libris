@@ -96,7 +96,9 @@ Carried forward into this workstream from those decisions:
 - Every sync ends by rebuilding the remote's word counts, per Status, from scratch (ADR 0033,
   #150). Without it the remote's `search_library` weighs words against a Shelf that no longer
   exists, and nothing reports it. A failed rebuild fails the sync. When the version recorded for
-  how words are split has changed, sync re-pushes every document, not only the changed ones.
+  how words are split has changed, sync re-pushes every document, not only the changed ones,
+  and writes the new version only once all of them are pushed. A titled note with no Libris ID
+  is reported, not skipped: the local search reads it, so the remote must hold it too.
 
 ## 4. Infrastructure
 
