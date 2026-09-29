@@ -28,30 +28,56 @@ and measurement shows how little it would change: across 15 queries and each Sta
 five differed in 6 of 26 cases, and each time near-equal results swapped places rather than a
 different book coming out on top. It would still be a ranking that depends on where the Library
 is served from, which ADR 0020 rules out. Keeping the counts per Status costs 60-100 KiB more
-than one whole-Shelf count. The document also holds a bucket for notes with no Status, so that
-adding up the buckets always gives the unfiltered count and a search with no filter needs no
-separate total.
+than one whole-Shelf count.
+
+**Each bucket holds what `_weights` reads, over exactly the notes the local search reads.** A
+weight is `log(1 + n/df)`, and `n` is the number of notes the filter left, not a sum of word
+counts, so each bucket records its note total alongside its word counts. The buckets must
+split the searchable notes exactly, or an unfiltered search will not match the Shelf. So there is
+one bucket for each status value found on the Shelf, whether or not it is one the Library
+defines, and one for notes with no Status. A note carrying an old status value such as
+"reading" is counted when nothing is filtered, as it is locally. An unfiltered search adds up
+every bucket. Only notes with a title count, because the local search skips the rest. The
+Vault's own files share the Shelf's directory and are not Book Notes, so they neither match nor
+carry weight.
 
 **The document is rebuilt from scratch at the end of every sync.** That follows from ADR 0002
 rather than being a new choice. The remote never writes Book Notes itself: a remote add or update
-records an Intent, and the replica changes only when `libris sync` runs. Counts rebuilt at each
-sync are therefore exactly as fresh as the notes they describe, and never fresher or staler.
-Sync is not built yet (workstream 3), so this is a requirement on it: a sync that pushes notes
-without rebuilding the counts leaves the remote ranking against a Shelf that no longer exists.
-Keeping them up to date one note at a time (by incrementing counts, or by replacing the document
-on each change) would only matter to a remote that writes notes between syncs, and Libris does
-not have one. It would also bring what a rebuild avoids: counts that drift after a partial
-failure, and Cosmos's limit of ten operations per patch against a note that changes about nine
-words. A rebuild runs even when no note changed. Changing how words are split
-(`normalize_for_match`, or which fields are counted) then corrects the counts at the next sync,
-rather than leaving them computed by old code until some note happens to be edited.
+records an Intent, and the replica changes only when `libris sync` runs. After a sync succeeds,
+the counts describe exactly the notes it pushed. Sync is not built yet (workstream 3), so this is
+a requirement on it: a sync that pushes notes without rebuilding the counts leaves the remote
+ranking against a Shelf that no longer exists. Keeping the counts current one note at a time, by
+incrementing them or by replacing the document on each change, would only matter to a remote that
+writes notes between syncs, and Libris has no such remote. It would also bring back what a
+rebuild avoids: counts that drift after a partial failure, and Cosmos's limit of ten operations
+per patch against a note that changes about nine words.
+
+**While a sync is running, notes and counts can disagree, and that is accepted.** Book documents
+are partitioned by Libris ID (ADR 0006), so pushing notes and replacing the counts cannot happen
+in one atomic step. A search that runs mid-sync can match a newly pushed note whose words the old
+counts do not yet hold. Those words weigh nothing (`weights.get(token, 0.0)`), so the note still
+matches but ranks too low until the rebuild lands. Weights decide order, never whether a note
+matches, so the gap costs ordering for the length of one sync, and no generation scheme is worth
+building to close it. A failed rebuild fails the sync and is reported. The rebuild runs at every
+sync, even one that pushed no notes, so the next successful sync repairs it without anyone having
+to notice.
+
+**Changing how words are split means re-pushing every note.** Each document stores its own
+words, and ADR 0015 pushes only the notes whose content changed. A change to `_search_tokens`,
+`normalize_for_match` or the counted fields would leave the stored words on unchanged notes
+split by the old code, while the counts reflect the new code. That is the same consequence ADR
+0032 draws for stored keys, and it has the same remedy: a full re-push. The counts document
+records a version for how words are split. When the version differs, sync re-pushes every
+document, so the re-push does not depend on someone remembering to run it.
 
 **The store answers, the service ranks.** Following ADR 0032, the store gains two questions: the
 notes within a Status that carry any of a given set of words, and the word counts for a Status.
 Each document stores the words its title and authors split into, so the first question is an
-`ARRAY_CONTAINS` query. Only the query's distinctive words are asked for, which is exact: a note
-matching nothing but filler is never a result (ADR 0027). Stop words, weighting, density and
-ordering stay in the service, written once. The words each document stores are computed at sync
+`ARRAY_CONTAINS` query. The service decides which words to ask for, using the same rule it
+applies locally. When the query holds at least one distinctive word, it asks only for those. That
+is exact, because a note matching nothing but filler is never a result (ADR 0027). When every word
+is filler, it asks for all of them, so "the" still finds "The Road". Both questions cover only
+notes with a title. Stop words, weighting, density and ordering stay in the service, written once. The words each document stores are computed at sync
 by the same `_search_tokens` that the local search uses, so the two locations cannot split words
 differently.
 
@@ -60,4 +86,4 @@ fetches every note that carries it, which is 1,478 on the real Shelf. That is th
 behaviour ADR 0027 chose, paid rarely, and it is not reduced here. And the guarantee that the
 same query ranks the same way in both locations belongs in a test. It should run one ranking
 over the local store and over a stand-in for the remote store built from the same notes, rather
-than trust that two stores fed to one function agree.
+than trust that two stores fed to one function agree. That test is #157.
