@@ -93,6 +93,9 @@ Carried forward into this workstream from those decisions:
 - Nothing validates `status` today (#65) - `markdown.py` defaults it to "To Read" and never
   checks the value - so an Intent could write a value outside the four the Library allows. Rejecting
   an Intent for an illegal value needs that validation to exist.
+- Every sync ends by rebuilding the remote's word counts, per Status, from scratch (ADR 0033,
+  #150). Without it the remote's `search_library` weighs words against a Shelf that no longer
+  exists, and nothing reports it.
 
 ## 4. Infrastructure
 
