@@ -24,6 +24,7 @@ from .markdown import (
     BookNote,
     FrontmatterUnreadable,
     NoteChanged,
+    NoteWriteFailed,
     RenameResult,
     create_book_note,
     ensure_frontmatter_fields,
@@ -2022,6 +2023,10 @@ def distinct(
             "Nothing recorded."
         )
         raise typer.Exit(code=1) from None
+    except NoteWriteFailed as exc:
+        # Not "nothing recorded": the note may be half-written (#166 review).
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
 
     if not record.written:
         typer.echo(f"Already recorded: {first} and {second} are two books.")
@@ -2311,12 +2316,18 @@ def _write_merge(
         )
         return False
     except OSError as exc:
-        # Read-only or locked, refused on opening before a byte is written. A
-        # bare "Error:" said nothing of what was left (#165).
+        # Read-only or locked, or failed partway and was put back: either way
+        # the primary is as it was. A bare "Error:" said nothing of what was
+        # left (#165).
         typer.echo(
             f"    {primary.name} could not be written ({exc.strerror or exc}). "
             "Nothing merged; nothing deleted."
         )
+        return False
+    except NoteWriteFailed as exc:
+        # Failed partway and could not be put back. The secondary is kept, so
+        # what it said survives (#166 review).
+        typer.echo(f"    {exc} {secondary.name} was kept; the merge did not complete.")
         return False
     try:
         delete_secondary_file(secondary, secondary_sha256)

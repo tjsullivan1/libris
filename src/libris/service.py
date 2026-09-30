@@ -23,6 +23,7 @@ from .markdown import (
     BookNote,
     FrontmatterUnreadable,
     NoteChanged,
+    NoteWriteFailed,
     create_book_note,
     edit_note,
     list_books,
@@ -2064,6 +2065,8 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
             locked, read-only. Nothing is written.
         FrontmatterUnreadable: If the first note's frontmatter cannot be
             parsed. Nothing is written.
+        NoteWriteFailed: If writing the first note failed partway and it could
+            not be put back. It may be damaged; the second is not written.
     """
     check_two_books(first, second)
 
@@ -2082,6 +2085,10 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
         # unwritable as a missing one, and raising here would report a failure
         # after the first note had already settled the pair (#164 review).
         record.one_sided = f"{second.path.name} was not written: {exc}"
+    except NoteWriteFailed as exc:
+        # The pair is settled by the first note all the same, but the second
+        # was not left as it was (#166 review).
+        record.one_sided = str(exc)
     return record
 
 
@@ -2256,6 +2263,10 @@ def _record_decided_two_books(
         return DecisionOutcome(
             DecisionStatus.DRIFTED, f"{label}: {exc} Nothing recorded."
         )
+    except NoteWriteFailed as exc:
+        # Not "nothing recorded": the first note may be half-written (#166
+        # review).
+        return DecisionOutcome(DecisionStatus.DRIFTED, f"{label}: {exc}")
 
     detail = f"{label}: recorded as two books"
     if not record.written:
@@ -2490,13 +2501,27 @@ def apply_decisions(
             )
             continue
         except OSError as exc:
-            # Read-only or locked. Refused on opening, before a byte is written,
-            # so the secondary is kept and the pair stands as it was (#165).
+            # Read-only or locked, or failed partway and was put back: either
+            # way the primary is as it was, so the secondary is kept and the
+            # pair stands (#165).
             outcomes.append(
                 DecisionOutcome(
                     DecisionStatus.DRIFTED,
                     f"{label}: {primary.name} could not be written "
                     f"({exc.strerror or exc}); nothing merged",
+                )
+            )
+            continue
+        except NoteWriteFailed as exc:
+            # Failed partway and could not be put back. The secondary is kept,
+            # so what it said survives; the primary's own text may not have. Said
+            # plainly, and the batch goes on - nothing later touches this pair
+            # (#166 review).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {exc} {secondary.name} was kept; the merge did "
+                    "not complete",
                 )
             )
             continue

@@ -342,6 +342,27 @@ class NoteChanged(Exception):
     """
 
 
+class NoteWriteFailed(Exception):
+    """A rewrite failed partway, and the note's old bytes could not be put back.
+
+    Not an `OSError`, deliberately. Every handler that catches one reports the
+    note as untouched - "nothing merged", "nothing recorded" - and that is only
+    true of a write that failed before a byte changed, or whose note was put
+    back. This is the one case where neither holds (#166 review).
+
+    Attributes:
+        path: The note that may be damaged.
+    """
+
+    def __init__(self, path: Path, cause: OSError) -> None:
+        self.path = path
+        super().__init__(
+            f"{path.name} failed partway through being written "
+            f"({cause.strerror or cause}) and could not be put back as it was, "
+            "so it may be damaged."
+        )
+
+
 def split_frontmatter(content: str) -> Optional[tuple[str, str]]:
     """Split a note into its frontmatter block and everything after it.
 
@@ -545,6 +566,9 @@ def rewrite_note(path: Path, content: str, expected_sha256: str | None = None) -
             the file at that path before the write finished.
         NoteChanged: If `expected_sha256` is given and the note's bytes do not
             match it. Nothing is written.
+        OSError: If the note cannot be opened or written. It is left as it was.
+        NoteWriteFailed: If the write failed partway and the note could not be
+            put back. It may be damaged.
     """
     with path.open("r+b") as handle:
         raw = handle.read()
@@ -557,6 +581,24 @@ def rewrite_note(path: Path, content: str, expected_sha256: str | None = None) -
         ):
             raise NoteChanged(f"{path.name} has changed since it was read.")
         _write_through(handle, path, content, raw)
+
+
+def _replace_bytes(fd: int, data: bytes) -> None:
+    """Make an open file hold exactly `data`.
+
+    Args:
+        fd: The file's descriptor, open for writing.
+        data: Its new contents.
+
+    Raises:
+        OSError: If a write or the truncation fails, leaving the file anywhere
+            between its old contents and `data`.
+    """
+    os.lseek(fd, 0, os.SEEK_SET)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
+    os.ftruncate(fd, len(data))
 
 
 def _write_through(handle: BinaryIO, path: Path, content: str, raw: bytes) -> None:
@@ -577,19 +619,35 @@ def _write_through(handle: BinaryIO, path: Path, content: str, raw: bytes) -> No
     Raises:
         FileNotFoundError: If `path` no longer names the open file, or the file
             was unlinked while it was written.
+        OSError: If the write fails. The note's old bytes have been put back, so
+            it is as it was.
+        NoteWriteFailed: If the write fails partway and the old bytes cannot be
+            put back either. The note may be damaged.
     """
     encoded = _encode_with_newline(content, _dominant_newline(raw))
 
     # POSIX lets another process rename or replace a file this one holds open.
     # Checked before writing, so a note that has moved is reported with nothing
     # written, rather than as a write under a name that no longer reaches it.
-    if not os.path.samestat(os.stat(path), os.fstat(handle.fileno())):
+    fd = handle.fileno()
+    if not os.path.samestat(os.stat(path), os.fstat(fd)):
         raise FileNotFoundError(errno.ENOENT, "moved before it was written", str(path))
 
-    handle.seek(0)
-    handle.write(encoded)
-    handle.truncate()
-    handle.flush()
+    # Written through the descriptor rather than the buffered handle, which has
+    # only been read from: a failed buffered write leaves bytes in the buffer
+    # that closing the handle flushes, over whatever was put back after it.
+    try:
+        _replace_bytes(fd, encoded)
+    except OSError as exc:
+        # Failed partway - a full disk, a sync client's lock landing mid-write -
+        # with the note truncated or half-written. Callers report an OSError as
+        # a note left as it was, so it is made so, or the failure is raised as
+        # something they cannot mistake for that (#166 review).
+        try:
+            _replace_bytes(fd, raw)
+        except OSError:
+            raise NoteWriteFailed(path, exc) from exc
+        raise
 
     # Unlinked during the write itself: the bytes went to a file no name reaches,
     # a write that happened to nothing. A rename in that same instant is not
@@ -639,6 +697,9 @@ def edit_note(
             that path before it is written. It is never recreated.
         NoteChanged: If `expected_sha256` is given and the note's bytes, when
             read for writing, do not match it. Nothing is written.
+        OSError: If the note cannot be opened or written. It is left as it was.
+        NoteWriteFailed: If the write failed partway and the note could not be
+            put back. It may be damaged.
     """
     with file_path.open("r+b") as handle:
         raw = handle.read()

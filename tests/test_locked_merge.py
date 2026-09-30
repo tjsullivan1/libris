@@ -9,15 +9,23 @@ The lock is simulated by refusing `Path.open` or `Path.unlink` for one path, whi
 is what a real lock refuses and works the same on every platform.
 """
 
+import errno
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from libris import cli as cli_module
-from libris import service
+from libris import markdown, service
 from libris.api import BookCandidate
 from libris.cli import app
-from libris.markdown import BookNote, create_book_note, read_frontmatter
+from libris.markdown import (
+    BookNote,
+    NoteWriteFailed,
+    create_book_note,
+    read_frontmatter,
+    rewrite_note,
+)
 from libris.merge import get_primary_book
 from libris.service import DecisionStatus, apply_decisions
 
@@ -369,3 +377,160 @@ def test_merge_leaves_a_pair_whose_secondary_is_locked_before_the_check(
     assert "0 duplicate(s) merged" in result.output
     monkeypatch.undo()
     assert [path.read_bytes() for path in group] == before
+
+
+# --- a write that fails partway (#166 review) ---
+
+
+def _fail_partway(monkeypatch, *, restore_fails: bool) -> None:
+    """Make the next rewrite write half the note and fail, as a full disk does.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        restore_fails: Fail putting the old bytes back as well.
+    """
+    real = markdown._replace_bytes
+    failures = [True, restore_fails]
+
+    def _replace(fd, data):
+        if failures and failures.pop(0):
+            real(fd, data[: len(data) // 2])
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(fd, data)
+
+    monkeypatch.setattr(markdown, "_replace_bytes", _replace)
+
+
+def test_a_rewrite_that_fails_partway_puts_the_note_back(tmp_path, monkeypatch):
+    # Given a note, and a write that will fail halfway through
+    (note, _) = _pair(tmp_path, "Dune", "Deluxe Edition")
+    before = note.path.read_bytes()
+    _fail_partway(monkeypatch, restore_fails=False)
+
+    # When it is rewritten
+    # Then the failure is raised as an OSError - which every caller reports as
+    # a note left as it was - and that is true
+    with pytest.raises(OSError, match="No space"):
+        rewrite_note(note.path, "---\ntitle: Dune\n---\n\nReplaced.\n")
+    assert note.path.read_bytes() == before
+
+
+def test_a_rewrite_that_cannot_be_put_back_is_not_an_os_error(tmp_path, monkeypatch):
+    # Given a note, and a write that fails halfway and cannot be undone
+    (note, _) = _pair(tmp_path, "Dune", "Deluxe Edition")
+    _fail_partway(monkeypatch, restore_fails=True)
+
+    # When it is rewritten
+    # Then it raises something no "nothing written" handler catches
+    with pytest.raises(NoteWriteFailed, match="may be damaged") as raised:
+        rewrite_note(note.path, "---\ntitle: Dune\n---\n\nReplaced.\n")
+    assert not isinstance(raised.value, OSError)
+
+
+def test_a_primary_write_put_back_after_failing_leaves_the_pair_as_it_was(
+    tmp_path, monkeypatch
+):
+    # Given two decisions, the first pair's primary write failing partway and
+    # being put back
+    (first, second), _, decisions = _two_pairs(tmp_path)
+    before = _snapshot(first, second)
+    _fail_partway(monkeypatch, restore_fails=False)
+
+    # When the decisions are applied
+    outcomes = apply_decisions(tmp_path, decisions)
+
+    # Then the first drifts with both notes byte for byte as they were, and the
+    # second merges
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.DRIFTED,
+        DecisionStatus.MERGED,
+    ]
+    assert "could not be written" in outcomes[0].detail
+    assert _snapshot(first, second) == before
+
+
+def test_a_primary_left_damaged_is_reported_and_the_secondary_kept(
+    tmp_path, monkeypatch
+):
+    # Given two decisions, the first pair's primary write failing partway and
+    # not able to be put back
+    (first, second), _, decisions = _two_pairs(tmp_path)
+    primary = get_primary_book(first.path, second.path)
+    secondary = second.path if primary == first.path else first.path
+    secondary_before = secondary.read_bytes()
+    _fail_partway(monkeypatch, restore_fails=True)
+
+    # When the decisions are applied
+    outcomes = apply_decisions(tmp_path, decisions)
+
+    # Then the first says the primary may be damaged rather than that nothing
+    # was merged, the secondary is kept untouched, and the second merges
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.DRIFTED,
+        DecisionStatus.MERGED,
+    ]
+    assert "may be damaged" in outcomes[0].detail
+    assert "nothing merged" not in outcomes[0].detail
+    assert secondary.read_bytes() == secondary_before
+
+
+def test_a_two_books_record_left_damaged_is_not_reported_as_nothing_recorded(
+    tmp_path, monkeypatch
+):
+    # Given a decision that a pair is two books, the first note's write failing
+    # partway and not able to be put back
+    first, second = _pair(tmp_path, "Dune", "Deluxe Edition")
+    decision = {**_decision(first, second), "decision": "different"}
+    _fail_partway(monkeypatch, restore_fails=True)
+
+    # When it is applied
+    outcomes = apply_decisions(tmp_path, [decision])
+
+    # Then it says the note may be damaged
+    assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
+    assert "may be damaged" in outcomes[0].detail
+    assert "Nothing recorded" not in outcomes[0].detail
+
+
+def test_merge_reports_a_primary_left_damaged(tmp_path, monkeypatch):
+    # Given one group of duplicates, the primary's write failing partway and not
+    # able to be put back
+    vault = _shelf(tmp_path, monkeypatch)
+    group = _auto_group(vault, "Dune")
+    primary = get_primary_book(*group)
+    secondary = next(path for path in group if path != primary)
+    secondary_before = secondary.read_bytes()
+    _fail_partway(monkeypatch, restore_fails=True)
+
+    # When it is auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then it says the primary may be damaged, the secondary is kept, and
+    # nothing is counted as merged
+    assert result.exit_code == 0, result.output
+    # - said by the write's own handler, not the command's "Error:" catch-all,
+    # whose text carries "may be damaged" too
+    assert "may be damaged" in result.output
+    assert f"{secondary.name} was kept" in result.output
+    assert "Error:" not in result.output
+    assert "Nothing merged" not in result.output
+    assert "0 duplicate(s) merged" in result.output
+    assert secondary.read_bytes() == secondary_before
+
+
+def test_the_distinct_command_reports_a_note_left_damaged(tmp_path, monkeypatch):
+    # Given a pair on the Shelf, the first note's write failing partway and not
+    # able to be put back
+    vault = _shelf(tmp_path, monkeypatch)
+    first, second = _pair(vault, "Dune", "Deluxe Edition")
+    _fail_partway(monkeypatch, restore_fails=True)
+
+    # When the pair is recorded as two books
+    result = runner.invoke(app, ["distinct", first.path.name, second.path.name])
+
+    # Then it fails saying the note may be damaged - not "Nothing recorded", and
+    # not a traceback
+    assert result.exit_code == 1, result.output
+    assert "may be damaged" in result.output
+    assert "Nothing recorded" not in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
