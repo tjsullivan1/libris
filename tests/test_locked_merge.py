@@ -632,3 +632,48 @@ def test_merge_leaves_the_rest_of_a_group_whose_primary_was_left_damaged(
     assert "0 duplicate(s) merged" in result.output
     assert len(list(vault.glob("*.md"))) == 3
     assert third_before in {path.read_bytes() for path in vault.glob("*.md")}
+
+
+def _second_write_changed(monkeypatch) -> None:
+    """Make every second write find its note edited since it was read."""
+    real = service.edit_note
+    calls = 0
+
+    def _edit(path, decide, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls % 2 == 0:
+            raise markdown.NoteChanged(f"{path.name} has changed since it was read.")
+        return real(path, decide, *args, **kwargs)
+
+    monkeypatch.setattr(service, "edit_note", _edit)
+
+
+@pytest.mark.parametrize("failure", ["damaged", "changed"])
+def test_a_one_sided_record_reads_as_one_sentence(tmp_path, monkeypatch, failure):
+    # Given two pairs, and each pair's second note failing to be written - left
+    # damaged, or edited since it was read. Both reasons end in a full stop.
+    vault = _shelf(tmp_path, monkeypatch)
+    first, second = _pair(vault, "Dune", "Deluxe Edition")
+    third, fourth = _pair(vault, "Children of Dune", "Deluxe Edition")
+    if failure == "damaged":
+        _fail_partway(monkeypatch, restore_fails=True, whole=True, skip=1)
+    else:
+        _second_write_changed(monkeypatch)
+
+    # When one is recorded from the command and the other from a decision
+    result = runner.invoke(app, ["distinct", first.path.name, second.path.name])
+    if failure == "damaged":
+        # Re-armed, so the decision's second write is the one that fails.
+        monkeypatch.undo()
+        _fail_partway(monkeypatch, restore_fails=True, whole=True, skip=1)
+    outcomes = apply_decisions(
+        vault, [{**_decision(third, fourth), "decision": "different"}]
+    )
+
+    # Then neither message doubles its punctuation around the reason
+    assert "only that note says so" in result.output
+    assert "the first note's record still holds" in outcomes[0].detail
+    for text in (result.output, outcomes[0].detail):
+        assert ".." not in text
+        assert ".;" not in text

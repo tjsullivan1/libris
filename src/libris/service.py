@@ -1984,9 +1984,9 @@ class TwoBooksRecord:
     Attributes:
         written: The notes that gained an entry. Empty when both already held
             one, which is not a failure: the pair was settled before.
-        one_sided: Why the second note was not written, when it was not. The
-            pair is still settled - either side's record is read as enough -
-            but only one note says so.
+        one_sided: Why the second note was not written, when it was not, as a
+            clause without closing punctuation. The pair is still settled -
+            either side's record is read as enough - but only one note says so.
         damaged: The second note, when writing it failed partway and it could
             not be put back. Nothing more should be done to it this run.
     """
@@ -2087,11 +2087,14 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
         # OSError, not only FileNotFoundError: a locked or read-only note is as
         # unwritable as a missing one, and raising here would report a failure
         # after the first note had already settled the pair (#164 review).
-        record.one_sided = f"{second.path.name} was not written: {exc}"
+        # Without its closing period: both readers punctuate after it, and the
+        # messages of NoteChanged and FrontmatterUnreadable end in one (#166
+        # third review).
+        record.one_sided = f"{second.path.name} was not written: {exc}".rstrip(".")
     except NoteWriteFailed as exc:
         # The pair is settled by the first note all the same, but the second
         # was not left as it was (#166 review).
-        record.one_sided = str(exc)
+        record.one_sided = str(exc).rstrip(".")
         record.damaged = second.path
     return record
 
