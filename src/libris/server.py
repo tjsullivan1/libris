@@ -24,6 +24,7 @@ from . import config, installed_version, service, shelf
 from .api import BookCandidate, GoogleBooksClient
 from .markdown import BookNote
 from .note_format import FIELD_VOCABULARIES, MULTI_VALUED_FIELDS
+from .store import ShelfStore
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -316,9 +317,9 @@ def create_app() -> FastAPI:
         authors: list[str] = Query(default=[]),
     ) -> BookLookup:
         """Report whether the Library already holds a Book."""
-        vault_path = config.get_vault_path()
+        store = ShelfStore(config.get_vault_path())
         note = service.find_existing(
-            vault_path,
+            store,
             isbn=isbn,
             google_books_id=google_books_id,
             title=title,
@@ -333,7 +334,7 @@ def create_app() -> FastAPI:
         # subtitle the note carries - and deciding that here is exactly what
         # would report "already held" about a Book that is not. The person in
         # the popup settles it.
-        near = service.find_similar(vault_path, title=title, authors=authors)
+        near = service.find_similar(store, title=title, authors=authors)
         return BookLookup(
             found=False,
             near_matches=[BookRef.of(n) for n in near.notes],

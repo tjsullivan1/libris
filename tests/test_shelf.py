@@ -14,6 +14,7 @@ import pytest
 from libris import service, shelf
 from libris.api import BookCandidate
 from libris.markdown import BookNote, create_book_note
+from libris.store import ShelfStore
 
 
 @pytest.fixture(autouse=True)
@@ -197,12 +198,14 @@ def test_a_miss_reads_the_shelf_once_not_twice(tmp_path, counted_reads):
     # which is what GET /api/v1/books does on every miss
     assert (
         service.find_existing(
-            tmp_path, title="The Brass Verdict", authors=["Michael Connelly"]
+            ShelfStore(tmp_path),
+            title="The Brass Verdict",
+            authors=["Michael Connelly"],
         )
         is None
     )
     near = service.find_similar(
-        tmp_path, title="The Brass Verdict", authors=["Michael Connelly"]
+        ShelfStore(tmp_path), title="The Brass Verdict", authors=["Michael Connelly"]
     )
 
     # Then the Near Match is offered, and neither question re-read a thing.
@@ -219,8 +222,10 @@ def test_a_large_shelf_is_read_once_and_then_left_alone(tmp_path, counted_reads)
 
     # When it is queried the way a popup queries it - twice per flow
     for _ in range(2):
-        service.find_existing(tmp_path, isbn="9780441013593")
-        service.find_similar(tmp_path, title="Book 001", authors=["Frank Herbert"])
+        service.find_existing(ShelfStore(tmp_path), isbn="9780441013593")
+        service.find_similar(
+            ShelfStore(tmp_path), title="Book 001", authors=["Frank Herbert"]
+        )
 
     # Then the Shelf was parsed once, not four times over
     assert len(counted_reads) == 300
@@ -319,8 +324,8 @@ def test_resolving_an_identity_does_not_re_read_the_shelf(tmp_path, counted_read
     counted_reads.clear()
 
     # When an identity is resolved, twice
-    assert service.find_by_libris_id(tmp_path, wanted).libris_id == wanted
-    assert service.find_by_libris_id(tmp_path, wanted).libris_id == wanted
+    assert service.find_by_libris_id(ShelfStore(tmp_path), wanted).libris_id == wanted
+    assert service.find_by_libris_id(ShelfStore(tmp_path), wanted).libris_id == wanted
 
     # Then nothing was parsed again. Measured against the real Shelf this was
     # 5.5 seconds per call against 27 milliseconds through the index, and
@@ -339,7 +344,10 @@ def test_resolving_an_unknown_identity_does_not_re_read_the_shelf(
 
     # When an identity nothing answers for is resolved - the case that has to
     # look at every note before it can say no
-    assert service.find_by_libris_id(tmp_path, "01J0000000000000000000000A") is None
+    assert (
+        service.find_by_libris_id(ShelfStore(tmp_path), "01J0000000000000000000000A")
+        is None
+    )
 
     # Then it still costs nothing. This was the worst case at 10.4 seconds.
     assert counted_reads == []

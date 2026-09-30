@@ -28,6 +28,7 @@ from .note_format import (
     InvalidFieldValue,
     read_formats,
 )
+from .store import ShelfStore
 
 # The vocabularies as the model sees them. Generated from note_format rather
 # than restated, so the Library still defines its own values (ADR 0022): a tool
@@ -248,7 +249,7 @@ def create_server(name: str = "libris") -> "MCPServer":
         """
         try:
             found = service.search_library(
-                _shelf(), query=query, status=status, limit=limit
+                ShelfStore(_shelf()), query=query, status=status, limit=limit
             )
         except InvalidFieldValue as exc:
             raise ToolError(str(exc)) from None

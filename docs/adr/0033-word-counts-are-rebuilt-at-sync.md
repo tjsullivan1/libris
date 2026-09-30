@@ -72,7 +72,7 @@ sync, even one that pushed no notes, so the next successful sync repairs it with
 to notice.
 
 **Changing how words are split means re-pushing every note.** Each document stores its own
-words, and ADR 0015 pushes only the notes whose content changed. A change to `_search_tokens`,
+words, and ADR 0015 pushes only the notes whose content changed. A change to `store.search_tokens`,
 `normalize_for_match` or the counted fields would leave the stored words on unchanged notes
 split by the old code, while the counts reflect the new code. That is the same consequence ADR
 0032 draws for stored keys, and it has the same remedy: a full re-push. The counts document
@@ -99,7 +99,7 @@ applies locally. When the query holds at least one distinctive word, it asks onl
 is exact, because a note matching nothing but filler is never a result (ADR 0027). When every word
 is filler, it asks for all of them, so "the" still finds "The Road". Both questions cover only
 notes with a title. Stop words, weighting, density and ordering stay in the service, written
-once. The words each document stores are computed at sync by the same `_search_tokens` that the
+once. The words each document stores are computed at sync by the same `store.search_tokens` that the
 local search uses, so the two locations cannot split words differently.
 
 **Every ordering ends on the Libris ID.** Today `search_library` sorts by score, density, title
