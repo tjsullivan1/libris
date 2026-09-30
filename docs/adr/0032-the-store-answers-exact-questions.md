@@ -49,4 +49,4 @@ means re-syncing them.
 
 `search_library` still reads the whole Library, because ADR 0027 weighs words by how rare they
 are across the notes. Designing that for the remote is a separate problem and has its own
-issue (#150).
+issue (#150), settled by ADR 0033.
