@@ -48,7 +48,7 @@ from .note_format import (
     read_isbn,
     validate_field_value,
 )
-from .shelf import index_for
+from .store import LibraryStore, ShelfStore, WordCounts, note_words, search_tokens
 
 
 class Outcome(Enum):
@@ -218,7 +218,27 @@ def lookup_candidates(
     return ranked
 
 
-def find_by_libris_id(vault_path: Path, libris_id: str) -> BookNote | None:
+def _first(notes: list[BookNote]) -> BookNote | None:
+    """The note a lookup answers with when several match: the lowest Libris ID.
+
+    Every ordering ends on the Libris ID (ADR 0033). Without it the answer is
+    whichever note the store happened to list first - directory order locally,
+    query order remotely - and two locations holding the same notes could name
+    different ones. A note with no Libris ID sorts last. Notes sharing one ID
+    keep the store's order; the remote never holds two, because sync refuses to
+    push while `find_id_collisions` reports any.
+    """
+    if not notes:
+        return None
+    return min(notes, key=_by_libris_id)
+
+
+def _by_libris_id(note: BookNote) -> tuple[bool, str]:
+    """Sort key putting the lowest Libris ID first and a note with none last."""
+    return (note.libris_id is None, note.libris_id or "")
+
+
+def find_by_libris_id(store: LibraryStore, libris_id: str) -> BookNote | None:
     """Resolve a Libris ID to the Book Note that answers for it.
 
     A note merged away leaves its identity on the survivor (ADR 0014), so an
@@ -226,95 +246,75 @@ def find_by_libris_id(vault_path: Path, libris_id: str) -> BookNote | None:
     being rejected for a note Libris itself destroyed.
 
     Args:
-        vault_path: The Shelf to search.
+        store: Where the Library is held.
         libris_id: The identity to resolve.
 
     Returns:
         The Book Note holding that identity, the note that superseded it, or
         None. A live identity always wins over a superseded one.
-
-    Note:
-        Guaranteeing that a live identity wins means the scan cannot stop at the
-        first superseded match, so an identity that is superseded or unknown is
-        compared against every Book Note. Those comparisons come from the index
-        rather than from the disk: reading and parsing the Shelf per call cost
-        5.5 seconds for a live id and 10.4 for an unknown one against the real
-        3,063-note Shelf, where the same lookup through the index costs 27
-        milliseconds. update_book resolves an identity on every write, so that
-        was the difference between a tool that answers and one that stalls.
     """
     wanted = libris_id.strip() if libris_id else ""
     if not wanted:
-        # Checked before the scan: a whitespace-only id would otherwise be
+        # Checked before asking: a whitespace-only id would otherwise be
         # compared against every note on the Shelf to find nothing.
         return None
 
-    superseding: BookNote | None = None
-
-    for note in index_for(vault_path).notes():
-        if note.libris_id == wanted:
-            return note
-        if superseding is None and wanted in note.superseded_ids:
-            superseding = note
-
-    return superseding
+    return _first(store.with_libris_id(wanted)) or _first(store.superseding(wanted))
 
 
 def find_existing(
-    vault_path: Path,
+    store: LibraryStore,
     isbn: str | None = None,
     google_books_id: str | None = None,
     title: str | None = None,
     authors: list[str] | None = None,
 ) -> BookNote | None:
-    """Find a Book Note already on the Shelf describing this book.
+    """Find a Book Note already in the Library describing this book.
 
-    Checked against the live Shelf, so the answer is true at the moment it is
-    given - the stronger of the two duplicate guarantees (ADR 0010). The notes
-    come from an index, which is revalidated against the filesystem on every
-    call rather than held for a lifetime, so that remains true.
+    Asked of the live Shelf, the answer is true at the moment it is given - the
+    stronger of the two duplicate guarantees (ADR 0010).
+
+    The identifiers are asked in turn: ISBN, then Google Books id, then title
+    and first author. Measured on the real Shelf in September 2026, that order
+    changes no answer the old single pass gave (#159).
 
     Args:
-        vault_path: The Shelf to search.
+        store: Where the Library is held.
         isbn: An ISBN to match exactly.
-        google_books_id: A Google Books volume id to match exactly.
+        google_books_id: A Google Books volume id to match exactly. Libris's
+            placeholders are not ids and match nothing: 47 notes carry
+            `_not_a_book` and 41 `_not_found_in_google_books_api`, and a lookup
+            by one used to answer with whichever of them came first.
         title: A title to match after normalization.
         authors: Authors whose first entry is matched after normalization.
 
     Returns:
         The Book Note, or None. A miss is a miss (ADR 0003).
     """
-    wanted_title = normalize_for_match(title) if title else None
-    wanted_author = normalize_for_match(authors[0]) if authors else None
-
     # Both sides go through the same reader. Comparing the raw frontmatter value
     # against the caller's string meant 31 notes holding an unquoted ISBN could
     # not be found at all - `786937521 == "786937521"` is False - so `add_book`
     # would have written a second note for a book already on the Shelf (#105).
     wanted_isbn = read_isbn(isbn)
+    if wanted_isbn:
+        found = _first(store.with_isbn(wanted_isbn))
+        if found is not None:
+            return found
 
-    for note in index_for(vault_path).notes():
-        if wanted_isbn and note.isbn == wanted_isbn:
-            return note
-        if (
-            google_books_id
-            and note.frontmatter.get("google_books_id") == google_books_id
-        ):
-            return note
-        if (
-            wanted_title
-            and wanted_author
-            and note.title
-            and normalize_for_match(note.title) == wanted_title
-            and note.first_author
-            and normalize_for_match(note.first_author) == wanted_author
-        ):
-            return note
+    if google_books_id and google_books_id not in EXCLUDED_GOOGLE_BOOKS_IDS:
+        found = _first(store.with_google_books_id(google_books_id))
+        if found is not None:
+            return found
+
+    wanted_title = normalize_for_match(title) if title else None
+    wanted_author = normalize_for_match(authors[0]) if authors else None
+    if wanted_title and wanted_author:
+        return _first(store.with_title_and_author(wanted_title, wanted_author))
     return None
 
 
 def find_similar(
-    vault_path: Path,
+    store: LibraryStore,
     title: str | None = None,
     authors: list[str] | None = None,
     limit: int = 5,
@@ -338,7 +338,7 @@ def find_similar(
     replica can answer; a title compared across every author is neither.
 
     Args:
-        vault_path: The Shelf to search.
+        store: Where the Library is held.
         title: The title as scraped.
         authors: The authors as scraped. Only notes sharing the first of them
             are considered.
@@ -346,7 +346,8 @@ def find_similar(
 
     Returns:
         Whether the check ran, and the Book Notes whose title plausibly
-        describes the same Book, nearest first by title length.
+        describes the same Book, nearest first by title length, then by Libris
+        ID so both locations cut a tie at the limit the same way.
     """
     # Libris's own placeholders count as nothing: every authorless note shares
     # "Unknown Author", so matching on it compares titles across all of them.
@@ -360,16 +361,12 @@ def find_similar(
     if not wanted_author or wanted_author == normalize_for_match(UNKNOWN_AUTHOR):
         return NearMatches(NearMatchCheck.NO_AUTHOR)
 
-    found: list[BookNote] = []
-    for note in index_for(vault_path).notes():
-        if not note.title or not note.first_author:
-            continue
-        if normalize_for_match(note.first_author) != wanted_author:
-            continue
-        if titles_match(title, note.title):
-            found.append(note)
-
-    found.sort(key=lambda n: len(n.title or ""))
+    found = [
+        note
+        for note in store.by_first_author(wanted_author)
+        if note.title and titles_match(title, note.title)
+    ]
+    found.sort(key=lambda n: (len(n.title or ""), _by_libris_id(n)))
     return NearMatches(NearMatchCheck.CHECKED, found[:limit])
 
 
@@ -447,21 +444,15 @@ class SearchResult:
     books: list[BookNote] = field(default_factory=list)
 
 
-def _search_tokens(text: str) -> set[str]:
-    """Split text into the normalized words a search compares."""
-    normalized = normalize_for_match(text)
-    return set(normalized.split()) if normalized else set()
-
-
-def _weights(note_tokens: list[set[str]]) -> dict[str, float]:
-    """Weigh each word on the Shelf by how few notes carry it.
+def _weights(counts: WordCounts) -> dict[str, float]:
+    """Weigh each word in the Library by how few notes carry it.
 
     A word naming three notes says far more about which book was meant than one
     naming fifty, and scoring every matched word alike is what put "The Hot One"
     above "The Final Empire: Mistborn Book 1" for "that mistborn one".
 
     Args:
-        note_tokens: The word set of every Book Note being searched.
+        counts: How many of the notes being searched carry each word.
 
     Returns:
         A weight per word: `log(1 + n/df)`. The log is what keeps one very rare
@@ -469,12 +460,10 @@ def _weights(note_tokens: list[set[str]]) -> dict[str, float]:
         keeps a word every note carries weighing something rather than zero, so
         a Shelf of near-identical titles does not score nothing at all.
     """
-    total = len(note_tokens)
-    frequency: dict[str, int] = {}
-    for tokens in note_tokens:
-        for token in tokens:
-            frequency[token] = frequency.get(token, 0) + 1
-    return {token: math.log(1 + total / count) for token, count in frequency.items()}
+    return {
+        token: math.log(1 + counts.total / count)
+        for token, count in counts.counts.items()
+    }
 
 
 def _rank(
@@ -512,7 +501,7 @@ def _rank(
 
 
 def search_library(
-    vault_path: Path,
+    store: LibraryStore,
     query: str | None = None,
     status: str | None = None,
     limit: int = DEFAULT_SEARCH_LIMIT,
@@ -525,7 +514,7 @@ def search_library(
     ranked, and every plausible answer goes back for them to settle (ADR 0003).
 
     Args:
-        vault_path: The Shelf to search.
+        store: Where the Library is held.
         query: What the person said, matched against titles and authors. When
             absent the filters answer alone - "what am I reading?" carries no
             query at all.
@@ -545,47 +534,32 @@ def search_library(
         validate_field_value("status", status)
 
     limit = max(0, min(limit, MAX_SEARCH_LIMIT))
-    query_tokens = _search_tokens(query) if query else set()
+    query_tokens = search_tokens(query) if query else set()
+
+    if not query_tokens:
+        # Nothing was asked, so nothing is ranked. Alphabetical is the order a
+        # person expects and, unlike relevance, is identical between two
+        # identical calls.
+        listing = store.listing(status, limit)
+        return SearchResult(total=listing.total, limit=limit, books=listing.notes)
 
     # A query of nothing but filler is taken at face value - the alternative is
     # answering "the" with silence, when the Shelf may well hold "The Road".
     distinctive = query_tokens - _STOP_WORDS or query_tokens
 
-    candidates: list[tuple[BookNote, set[str]]] = []
-    for note in index_for(vault_path).notes():
-        if not note.title:
-            # Obsidian writes into this directory too, so a file that is not a
-            # Book Note is ordinary rather than exceptional.
-            continue
-        if status is not None and note.frontmatter.get("status") != status:
-            continue
-        # Only worth doing when something will be ranked. Listing "To Read"
-        # walks 1,452 notes on the real Shelf, and tokenizing every title and
-        # author to then sort alphabetically is work with no reader.
-        tokens = (
-            _search_tokens(note.title) | _search_tokens(" ".join(note.authors))
-            if query_tokens
-            else set()
-        )
-        candidates.append((note, tokens))
-
     # Weighed across what the filter left, not the whole Shelf, so narrowing to
     # one status weighs words by how well they separate the books still in play.
-    weights = _weights([tokens for _, tokens in candidates]) if query_tokens else {}
+    weights = _weights(store.word_counts(status))
 
+    # Only the notes carrying a distinctive word are asked for. That is exact: a
+    # note matching nothing but filler is never a result (ADR 0027, ADR 0033).
     scored: list[tuple[tuple, BookNote]] = []
-    for note, note_tokens in candidates:
-        sort_title = normalize_for_match(note.title or "")
-        if not query_tokens:
-            # Nothing was asked, so nothing is ranked. Alphabetical is the order
-            # a person expects and, unlike relevance, is identical between two
-            # identical calls.
-            scored.append(((0.0, 0.0, 0, sort_title), note))
-            continue
-        rank = _rank(query_tokens, note_tokens, weights, distinctive)
+    for note in store.carrying_words(distinctive, status):
+        rank = _rank(query_tokens, note_words(note), weights, distinctive)
         if rank is None:
             continue
         matched, density = rank
+        sort_title = normalize_for_match(note.title or "")
         scored.append(((-matched, -density, len(note.title or ""), sort_title), note))
 
     scored.sort(key=lambda pair: pair[0])
@@ -629,8 +603,11 @@ def add_book(
         ValueError: If an override names a field the canonical schema has no
             place for.
     """
+    # Writes land on the Shelf, so the duplicate check is asked of the live Shelf:
+    # the stronger guarantee, true at the moment of the write (ADR 0010).
+    store = ShelfStore(vault_path)
     existing = find_existing(
-        vault_path,
+        store,
         isbn=candidate.isbn,
         google_books_id=candidate.google_books_id or None,
         title=candidate.title,
@@ -649,9 +626,7 @@ def add_book(
 
     check: NearMatchCheck | None = None
     if stop_on_near_match:
-        near = find_similar(
-            vault_path, title=candidate.title, authors=candidate.authors
-        )
+        near = find_similar(store, title=candidate.title, authors=candidate.authors)
         check = near.check
         if near.notes:
             return AddResult(
@@ -742,7 +717,7 @@ def update_book(
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
     """
-    note = find_by_libris_id(vault_path, libris_id)
+    note = find_by_libris_id(ShelfStore(vault_path), libris_id)
     if note is None:
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
     return _set_reader_fields(note.path, fields, holding=libris_id.strip())
@@ -2023,19 +1998,22 @@ def build_id_index(vault_path: Path) -> dict[str, BookNote]:
     Returns:
         A mapping from Libris ID to Book Note.
     """
-    index: dict[str, BookNote] = {}
-    live: dict[str, BookNote] = {}
+    superseding: dict[str, list[BookNote]] = {}
+    live: dict[str, list[BookNote]] = {}
 
     for book_path in list_books(vault_path):
         note = BookNote.read(book_path)
         if note is None:
             continue
         for superseded in note.superseded_ids:
-            index.setdefault(superseded, note)
+            superseding.setdefault(superseded, []).append(note)
         if note.libris_id:
-            live[note.libris_id] = note
+            live.setdefault(note.libris_id, []).append(note)
 
-    index.update(live)
+    # Resolved by the rule `find_by_libris_id` uses, so a bulk run and a single
+    # lookup cannot name different notes for one identity.
+    index = {libris_id: _first(notes) for libris_id, notes in superseding.items()}
+    index.update({libris_id: _first(notes) for libris_id, notes in live.items()})
     return index
 
 

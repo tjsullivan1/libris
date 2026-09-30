@@ -10,7 +10,7 @@ from datetime import date
 
 import pytest
 
-from libris import service
+from libris import service, store
 from libris.api import UNKNOWN_AUTHOR, UNKNOWN_TITLE, BookCandidate
 from libris.markdown import (
     BookNote,
@@ -38,6 +38,7 @@ from libris.service import (
     update_book,
     update_note,
 )
+from libris.store import ShelfStore
 
 
 def _candidate(**overrides) -> BookCandidate:
@@ -125,53 +126,55 @@ def test_nothing_identifying_builds_no_query():
 # --- finding an existing note ---
 
 
-def test_an_existing_note_is_found_by_isbn(tmp_path):
+def test_an_existing_note_is_found_by_isbn(tmp_path, open_store):
     # Given a Book Note on the Shelf
     create_book_note(_candidate(isbn="9780441013593"), tmp_path)
 
     # When the same ISBN is looked up
-    found = find_existing(tmp_path, isbn="9780441013593")
+    found = find_existing(open_store(tmp_path), isbn="9780441013593")
 
     # Then the note is found, carrying its identity
     assert found is not None
     assert found.libris_id
 
 
-def test_an_existing_note_is_found_by_google_books_id(tmp_path):
+def test_an_existing_note_is_found_by_google_books_id(tmp_path, open_store):
     # Given a Book Note that came from Google Books
     create_book_note(_candidate(google_books_id="dune1"), tmp_path)
 
     # When that volume is looked up
-    found = find_existing(tmp_path, google_books_id="dune1")
+    found = find_existing(open_store(tmp_path), google_books_id="dune1")
 
     # Then it is found
     assert found is not None
 
 
-def test_an_existing_note_is_found_by_title_and_author(tmp_path):
+def test_an_existing_note_is_found_by_title_and_author(tmp_path, open_store):
     # Given a Book Note with no identifiers at all
     create_book_note(_candidate(), tmp_path)
 
     # When the same book is looked up by name
-    found = find_existing(tmp_path, title="dune", authors=["frank herbert"])
+    found = find_existing(open_store(tmp_path), title="dune", authors=["frank herbert"])
 
     # Then normalization matches it despite the case
     assert found is not None
 
 
-def test_a_book_not_on_the_shelf_is_not_found(tmp_path):
+def test_a_book_not_on_the_shelf_is_not_found(tmp_path, open_store):
     # Given an empty Shelf
     # When anything is looked up
     # Then nothing is found; a miss is a miss (ADR 0003)
-    assert find_existing(tmp_path, isbn="9780441013593") is None
+    assert find_existing(open_store(tmp_path), isbn="9780441013593") is None
 
 
-def test_a_different_book_is_not_matched(tmp_path):
+def test_a_different_book_is_not_matched(tmp_path, open_store):
     # Given one Book Note
     create_book_note(_candidate(isbn="9780441013593"), tmp_path)
 
     # When a different book is looked up
-    found = find_existing(tmp_path, title="Neuromancer", authors=["William Gibson"])
+    found = find_existing(
+        open_store(tmp_path), title="Neuromancer", authors=["William Gibson"]
+    )
 
     # Then it is not confused for the one on the Shelf
     assert found is None
@@ -238,20 +241,20 @@ def test_adding_refuses_an_unknown_field(tmp_path):
 # --- resolution through superseded ids (#64, ADR 0014) ---
 
 
-def test_a_live_libris_id_resolves(tmp_path):
+def test_a_live_libris_id_resolves(tmp_path, open_store):
     # Given a Book Note on the Shelf
     path = create_book_note(_candidate(), tmp_path)
     note = BookNote.read(path)
 
     # When it is looked up by its identity
-    found = find_by_libris_id(tmp_path, note.libris_id)
+    found = find_by_libris_id(open_store(tmp_path), note.libris_id)
 
     # Then it is found
     assert found is not None
     assert found.path == path
 
 
-def test_a_superseded_id_resolves_to_the_survivor(tmp_path):
+def test_a_superseded_id_resolves_to_the_survivor(tmp_path, open_store):
     # Given a note that absorbed another during a merge
     path = create_book_note(_candidate(), tmp_path)
     text = path.read_text(encoding="utf-8")
@@ -260,7 +263,7 @@ def test_a_superseded_id_resolves_to_the_survivor(tmp_path):
     )
 
     # When an Intent names the identity that was merged away
-    found = find_by_libris_id(tmp_path, "GONE")
+    found = find_by_libris_id(open_store(tmp_path), "GONE")
 
     # Then it resolves to the surviving note rather than missing, so the Intent
     # applies instead of being rejected for a note Libris itself destroyed
@@ -268,16 +271,16 @@ def test_a_superseded_id_resolves_to_the_survivor(tmp_path):
     assert found.path == path
 
 
-def test_an_unknown_libris_id_does_not_resolve(tmp_path):
+def test_an_unknown_libris_id_does_not_resolve(tmp_path, open_store):
     # Given a Shelf that never held the Book
     create_book_note(_candidate(), tmp_path)
 
     # When an unknown identity is looked up
     # Then a miss is a miss (ADR 0003)
-    assert find_by_libris_id(tmp_path, "01NOPE") is None
+    assert find_by_libris_id(open_store(tmp_path), "01NOPE") is None
 
 
-def test_a_live_id_wins_over_a_superseded_one(tmp_path):
+def test_a_live_id_wins_over_a_superseded_one(tmp_path, open_store):
     # Given one note whose live id is what another note lists as superseded -
     # possible only through a bad merge, but it must resolve predictably
     live = create_book_note(_candidate(title="Live"), tmp_path)
@@ -291,20 +294,20 @@ def test_a_live_id_wins_over_a_superseded_one(tmp_path):
     )
 
     # When that id is resolved
-    found = find_by_libris_id(tmp_path, live_id)
+    found = find_by_libris_id(open_store(tmp_path), live_id)
 
     # Then the note that actually holds the identity wins
     assert found.path == live
 
 
-def test_a_blank_libris_id_does_not_resolve(tmp_path):
+def test_a_blank_libris_id_does_not_resolve(tmp_path, open_store):
     # Given a Shelf with notes on it
     create_book_note(_candidate(), tmp_path)
 
     # When an empty or whitespace-only identity is resolved
     # Then it misses immediately rather than reading every note to find nothing
-    assert find_by_libris_id(tmp_path, "") is None
-    assert find_by_libris_id(tmp_path, "   ") is None
+    assert find_by_libris_id(open_store(tmp_path), "") is None
+    assert find_by_libris_id(open_store(tmp_path), "   ") is None
 
 
 # --- applying an exported review (#72, ADR 0018) ---
@@ -577,26 +580,26 @@ def _titles(result):
     return [note.title for note in result.books]
 
 
-def test_a_title_query_finds_the_note(tmp_path):
+def test_a_title_query_finds_the_note(tmp_path, open_store):
     # Given a Shelf holding one book
     _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
     # When the Library is searched for its title
-    result = search_library(tmp_path, query="dune")
+    result = search_library(open_store(tmp_path), query="dune")
 
     # Then it is found
     assert _titles(result) == ["Dune"]
     assert result.total == 1
 
 
-def test_an_author_alone_finds_their_books(tmp_path):
+def test_an_author_alone_finds_their_books(tmp_path, open_store):
     # Given two books by one author and one by another
     _shelve(tmp_path, "The Way of Kings", ["Brandon Sanderson"])
     _shelve(tmp_path, "Oathbringer", ["Brandon Sanderson"])
     _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
     # When someone asks for "that Sanderson one" - a query with no title in it
-    result = search_library(tmp_path, query="sanderson")
+    result = search_library(open_store(tmp_path), query="sanderson")
 
     # Then both of theirs come back. This is the case find_similar cannot serve:
     # it returns nothing without a title, and treats an author as an exact
@@ -604,61 +607,63 @@ def test_an_author_alone_finds_their_books(tmp_path):
     assert sorted(_titles(result)) == ["Oathbringer", "The Way of Kings"]
 
 
-def test_the_tighter_title_outranks_the_one_that_merely_contains_it(tmp_path):
+def test_the_tighter_title_outranks_the_one_that_merely_contains_it(
+    tmp_path, open_store
+):
     # Given two different books that share a word
     _shelve(tmp_path, "Long Road to Mercy", ["David Baldacci"])
     _shelve(tmp_path, "Mercy", ["Jodi Picoult"])
 
     # When the shared word is searched for
-    result = search_library(tmp_path, query="mercy")
+    result = search_library(open_store(tmp_path), query="mercy")
 
     # Then both are offered, because deciding between them is not this layer's
     # job (ADR 0003) - but the note the query describes wholly comes first.
     assert _titles(result) == ["Mercy", "Long Road to Mercy"]
 
 
-def test_more_matched_words_outrank_fewer(tmp_path):
+def test_more_matched_words_outrank_fewer(tmp_path, open_store):
     # Given a Shelf where one title answers more of the query than the other
     _shelve(tmp_path, "The Way of Kings", ["Brandon Sanderson"])
     _shelve(tmp_path, "Kings of the Wyld", ["Nicholas Eames"])
 
     # When several words are searched for
-    result = search_library(tmp_path, query="way of kings")
+    result = search_library(open_store(tmp_path), query="way of kings")
 
     # Then the note matching more of them ranks first
     assert _titles(result)[0] == "The Way of Kings"
 
 
-def test_the_query_is_normalized_before_matching(tmp_path):
+def test_the_query_is_normalized_before_matching(tmp_path, open_store):
     # Given a note whose title carries punctuation and capitals
     _shelve(tmp_path, "Mistborn: The Final Empire", ["Brandon Sanderson"])
 
     # When the query carries neither
-    result = search_library(tmp_path, query="MISTBORN final empire")
+    result = search_library(open_store(tmp_path), query="MISTBORN final empire")
 
     # Then it still matches, the same way every other comparison here normalizes
     assert _titles(result) == ["Mistborn: The Final Empire"]
 
 
-def test_a_miss_is_a_miss(tmp_path):
+def test_a_miss_is_a_miss(tmp_path, open_store):
     # Given a Shelf that holds nothing like the query
     _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
     # When something absent is searched for
-    result = search_library(tmp_path, query="neuromancer")
+    result = search_library(open_store(tmp_path), query="neuromancer")
 
     # Then nothing is invented (ADR 0003)
     assert result.books == []
     assert result.total == 0
 
 
-def test_a_status_narrows_the_search(tmp_path):
+def test_a_status_narrows_the_search(tmp_path, open_store):
     # Given the same author held at two different points in the reading cycle
     _shelve(tmp_path, "Oathbringer", ["Brandon Sanderson"], status="Read")
     _shelve(tmp_path, "The Way of Kings", ["Brandon Sanderson"], status="To Read")
 
     # When the search is narrowed to what has been read
-    result = search_library(tmp_path, query="sanderson", status="Read")
+    result = search_library(open_store(tmp_path), query="sanderson", status="Read")
 
     # Then only that one comes back. Status is not fuzzy - it is a closed
     # vocabulary the Library defines (ADR 0022) - so it filters rather than ranks.
@@ -666,46 +671,46 @@ def test_a_status_narrows_the_search(tmp_path):
     assert result.total == 1
 
 
-def test_a_status_the_library_does_not_define_is_refused(tmp_path):
+def test_a_status_the_library_does_not_define_is_refused(tmp_path, open_store):
     # Given a status outside the four the Library allows
     # When it is used to narrow a search
     # Then it is refused rather than silently matching nothing
     with pytest.raises(InvalidFieldValue):
-        search_library(tmp_path, status="Finished")
+        search_library(open_store(tmp_path), status="Finished")
 
 
-def test_omitting_the_query_lists_by_filter(tmp_path):
+def test_omitting_the_query_lists_by_filter(tmp_path, open_store):
     # Given a Shelf where one book is being read
     _shelve(tmp_path, "Oathbringer", ["Brandon Sanderson"], status="Reading")
     _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
 
     # When there is no query at all - "what am I reading?"
-    result = search_library(tmp_path, status="Reading")
+    result = search_library(open_store(tmp_path), status="Reading")
 
     # Then the filter alone answers it
     assert _titles(result) == ["Oathbringer"]
 
 
-def test_omitting_everything_lists_the_whole_shelf(tmp_path):
+def test_omitting_everything_lists_the_whole_shelf(tmp_path, open_store):
     # Given a Shelf of three books
     for title in ("Dune", "Oathbringer", "Neuromancer"):
         _shelve(tmp_path, title, ["Someone"])
 
     # When nothing is asked for
-    result = search_library(tmp_path)
+    result = search_library(open_store(tmp_path))
 
     # Then the whole Shelf is counted, in a deterministic order
     assert result.total == 3
     assert _titles(result) == ["Dune", "Neuromancer", "Oathbringer"]
 
 
-def test_the_total_counts_matches_the_limit_did_not_return(tmp_path):
+def test_the_total_counts_matches_the_limit_did_not_return(tmp_path, open_store):
     # Given more books than will be returned
     for index in range(5):
         _shelve(tmp_path, f"Dune {index}", ["Frank Herbert"])
 
     # When the search is limited
-    result = search_library(tmp_path, query="dune", limit=2)
+    result = search_library(open_store(tmp_path), query="dune", limit=2)
 
     # Then the caller is told how many there really were, so a Surface can say
     # "1,452 on the list, here are some" rather than implying it saw them all
@@ -713,32 +718,32 @@ def test_the_total_counts_matches_the_limit_did_not_return(tmp_path):
     assert result.total == 5
 
 
-def test_the_limit_is_capped(tmp_path):
+def test_the_limit_is_capped(tmp_path, open_store):
     # Given a Shelf and a caller asking for more than the ceiling
     for index in range(3):
         _shelve(tmp_path, f"Dune {index}", ["Frank Herbert"])
 
     # When an absurd limit is requested
-    result = search_library(tmp_path, query="dune", limit=10_000)
+    result = search_library(open_store(tmp_path), query="dune", limit=10_000)
 
     # Then it is clamped rather than honoured. Reading a whole Library into a
     # context window is the thing the cap exists to prevent.
     assert result.limit == MAX_SEARCH_LIMIT
 
 
-def test_a_limit_of_zero_returns_nothing_but_still_counts(tmp_path):
+def test_a_limit_of_zero_returns_nothing_but_still_counts(tmp_path, open_store):
     # Given a Shelf holding matches
     _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
     # When nothing is asked to be returned
-    result = search_library(tmp_path, query="dune", limit=0)
+    result = search_library(open_store(tmp_path), query="dune", limit=0)
 
     # Then the count still answers "how many", which is a real question
     assert result.books == []
     assert result.total == 1
 
 
-def test_a_note_without_a_title_is_skipped_rather_than_crashing(tmp_path):
+def test_a_note_without_a_title_is_skipped_rather_than_crashing(tmp_path, open_store):
     # Given a Shelf holding a file with frontmatter but no title
     (tmp_path / "broken.md").write_text(
         "---\nlibris_id: 01J0000000000000000000000A\ntitle:\nauthors: []\n---\n",
@@ -747,20 +752,20 @@ def test_a_note_without_a_title_is_skipped_rather_than_crashing(tmp_path):
     _shelve(tmp_path, "Dune", ["Frank Herbert"])
 
     # When the Library is listed
-    result = search_library(tmp_path)
+    result = search_library(open_store(tmp_path))
 
     # Then the untitled note is passed over. Obsidian writes into this directory
     # too, so a note Libris did not create is ordinary rather than exceptional.
     assert _titles(result) == ["Dune"]
 
 
-def test_a_common_word_alone_does_not_make_a_match(tmp_path):
+def test_a_common_word_alone_does_not_make_a_match(tmp_path, open_store):
     # Given a Shelf where one note shares only a common word with the query
     _shelve(tmp_path, "The Way of Kings", ["Brandon Sanderson"])
     _shelve(tmp_path, "The Silmarillion", ["J.R.R. Tolkien"])
 
     # When a title carrying that word is searched for
-    result = search_library(tmp_path, query="the way of kings")
+    result = search_library(open_store(tmp_path), query="the way of kings")
 
     # Then the note matching on "the" alone is not offered. Otherwise a title
     # with an article in it would report most of a 3,000-note Shelf as a match,
@@ -768,19 +773,19 @@ def test_a_common_word_alone_does_not_make_a_match(tmp_path):
     assert _titles(result) == ["The Way of Kings"]
 
 
-def test_a_query_of_only_common_words_is_taken_at_face_value(tmp_path):
+def test_a_query_of_only_common_words_is_taken_at_face_value(tmp_path, open_store):
     # Given a note whose title really is a common word
     _shelve(tmp_path, "The Road", ["Cormac McCarthy"])
 
     # When that is all the person said
-    result = search_library(tmp_path, query="the")
+    result = search_library(open_store(tmp_path), query="the")
 
     # Then it still matches, rather than the guard swallowing the only query
     # the person gave
     assert _titles(result) == ["The Road"]
 
 
-def test_a_distinctive_word_outweighs_a_common_one(tmp_path):
+def test_a_distinctive_word_outweighs_a_common_one(tmp_path, open_store):
     # Given a Shelf where one word is everywhere, on notes short enough that
     # brevity alone would float them to the top
     for subject in ("Big", "New", "Old", "Best", "Grey"):
@@ -789,7 +794,7 @@ def test_a_distinctive_word_outweighs_a_common_one(tmp_path):
     _shelve(tmp_path, "Mistborn: The Final Empire", ["Brandon Sanderson"])
 
     # When a query names both a common word and a rare one
-    result = search_library(tmp_path, query="mistborn book")
+    result = search_library(open_store(tmp_path), query="mistborn book")
 
     # Then the rare word decides. Counting matched words alone ties these at one
     # apiece, and the tie then goes to the shortest note - which is the wrong
@@ -797,14 +802,14 @@ def test_a_distinctive_word_outweighs_a_common_one(tmp_path):
     assert _titles(result)[0] == "Mistborn: The Final Empire"
 
 
-def test_conversational_filler_does_not_pull_in_unrelated_books(tmp_path):
+def test_conversational_filler_does_not_pull_in_unrelated_books(tmp_path, open_store):
     # Given the Shelf someone would actually be talking about
     _shelve(tmp_path, "The Final Empire: Mistborn Book 1", ["Brandon Sanderson"])
     _shelve(tmp_path, "The Hot One", ["Lauren Blakely"])
     _shelve(tmp_path, "Eat That Frog", ["Brian Tracy"])
 
     # When someone says it the way a person says it
-    result = search_library(tmp_path, query="that mistborn one")
+    result = search_library(open_store(tmp_path), query="that mistborn one")
 
     # Then only the book they described comes back. Measured against the real
     # Shelf, "that" and "one" appear in 39 and 50 notes while "mistborn" appears
@@ -1201,13 +1206,15 @@ def test_an_update_by_path_refuses_a_note_that_is_not_utf8(tmp_path):
     assert path.read_bytes() == before
 
 
-def test_a_note_that_is_not_utf8_does_not_stop_the_library_answering(tmp_path):
+def test_a_note_that_is_not_utf8_does_not_stop_the_library_answering(
+    tmp_path, open_store
+):
     # Given a Shelf holding a book, and one note in another encoding
     _shelve(tmp_path, "Dune", ["Frank Herbert"])
     (tmp_path / "Latin1.md").write_bytes("---\ntitle: Søren\n---\n".encode("latin-1"))
 
     # When the Library is searched
-    result = search_library(tmp_path, query="dune")
+    result = search_library(open_store(tmp_path), query="dune")
 
     # Then the book is found. The decode error escaped the index, so this one
     # file made every search, lookup and update by identity fail (#127 review).
@@ -1260,7 +1267,7 @@ def test_an_update_by_path_does_not_consult_the_shelf(tmp_path, monkeypatch):
     def _refuse(_vault_path):
         raise AssertionError("an update by path built the Shelf index")
 
-    monkeypatch.setattr(service, "index_for", _refuse)
+    monkeypatch.setattr(store, "index_for", _refuse)
 
     # When it is updated by path
     update_note(note.path, {"status": "Reading"})
@@ -1357,7 +1364,7 @@ def test_confirming_writes_even_over_a_near_match(tmp_path):
 # --- Near Matches need an author (ADR 0032) ---
 
 
-def test_a_book_with_no_author_is_not_checked_for_near_matches(tmp_path):
+def test_a_book_with_no_author_is_not_checked_for_near_matches(tmp_path, open_store):
     # Given a note a title-only comparison would offer
     create_book_note(
         _candidate(title="The Brass Verdict: A Novel", authors=["Michael Connelly"]),
@@ -1365,7 +1372,7 @@ def test_a_book_with_no_author_is_not_checked_for_near_matches(tmp_path):
     )
 
     # When a Book with no author is checked against it
-    near = find_similar(tmp_path, title="The Brass Verdict", authors=[])
+    near = find_similar(open_store(tmp_path), title="The Brass Verdict", authors=[])
 
     # Then nothing is offered, and the answer says the check did not run rather
     # than that it found nothing (ADR 0029). A title compared across every
@@ -1374,7 +1381,7 @@ def test_a_book_with_no_author_is_not_checked_for_near_matches(tmp_path):
     assert near.notes == []
 
 
-def test_an_author_with_no_letters_in_it_counts_as_no_author(tmp_path):
+def test_an_author_with_no_letters_in_it_counts_as_no_author(tmp_path, open_store):
     # Given the same note
     create_book_note(
         _candidate(title="The Brass Verdict: A Novel", authors=["Michael Connelly"]),
@@ -1382,13 +1389,15 @@ def test_an_author_with_no_letters_in_it_counts_as_no_author(tmp_path):
     )
 
     # When the author a page gave normalizes to nothing
-    near = find_similar(tmp_path, title="The Brass Verdict", authors=[" - "])
+    near = find_similar(
+        open_store(tmp_path), title="The Brass Verdict", authors=[" - "]
+    )
 
     # Then that is no author, not an author nobody on the Shelf shares
     assert near.check is NearMatchCheck.NO_AUTHOR
 
 
-def test_the_unknown_author_placeholder_counts_as_no_author(tmp_path):
+def test_the_unknown_author_placeholder_counts_as_no_author(tmp_path, open_store):
     # Given two authorless books that Libris shelved under its placeholder
     create_book_note(
         _candidate(title="The Brass Verdict: A Novel", authors=[UNKNOWN_AUTHOR]),
@@ -1396,7 +1405,9 @@ def test_the_unknown_author_placeholder_counts_as_no_author(tmp_path):
     )
 
     # When another book Google Books lists with no author is checked
-    near = find_similar(tmp_path, title="The Brass Verdict", authors=[UNKNOWN_AUTHOR])
+    near = find_similar(
+        open_store(tmp_path), title="The Brass Verdict", authors=[UNKNOWN_AUTHOR]
+    )
 
     # Then the placeholder is not an author they share. Matching on it compares
     # titles across every authorless note, the noise ADR 0032 removed, and
@@ -1405,36 +1416,40 @@ def test_the_unknown_author_placeholder_counts_as_no_author(tmp_path):
     assert near.notes == []
 
 
-def test_the_unknown_title_placeholder_counts_as_no_title(tmp_path):
+def test_the_unknown_title_placeholder_counts_as_no_title(tmp_path, open_store):
     # Given a book by this author shelved under Libris's title placeholder
     create_book_note(_candidate(title=UNKNOWN_TITLE), tmp_path)
 
     # When another untitled book by the same author is checked
-    near = find_similar(tmp_path, title=UNKNOWN_TITLE, authors=["Frank Herbert"])
+    near = find_similar(
+        open_store(tmp_path), title=UNKNOWN_TITLE, authors=["Frank Herbert"]
+    )
 
     # Then the placeholder is not a title they share
     assert near.check is NearMatchCheck.NO_TITLE
     assert near.notes == []
 
 
-def test_a_book_with_no_title_is_not_checked_for_near_matches(tmp_path):
+def test_a_book_with_no_title_is_not_checked_for_near_matches(tmp_path, open_store):
     # Given a Shelf holding a book by this author
     create_book_note(_candidate(title="Dune"), tmp_path)
 
     # When a Book with an author but no title is checked
-    near = find_similar(tmp_path, title=None, authors=["Frank Herbert"])
+    near = find_similar(open_store(tmp_path), title=None, authors=["Frank Herbert"])
 
     # Then there was nothing to compare, and the answer says so
     assert near.check is NearMatchCheck.NO_TITLE
     assert near.notes == []
 
 
-def test_a_check_that_finds_nothing_says_it_checked(tmp_path):
+def test_a_check_that_finds_nothing_says_it_checked(tmp_path, open_store):
     # Given a Shelf holding nothing like this Book
     create_book_note(_candidate(title="Dune"), tmp_path)
 
     # When a Book with a title and an author is checked
-    near = find_similar(tmp_path, title="Neuromancer", authors=["William Gibson"])
+    near = find_similar(
+        open_store(tmp_path), title="Neuromancer", authors=["William Gibson"]
+    )
 
     # Then the empty answer is a finding, not an absence
     assert near.check is NearMatchCheck.CHECKED
@@ -1532,13 +1547,15 @@ def test_listing_by_filter_does_not_tokenize_every_note(tmp_path, monkeypatch):
         _shelve(tmp_path, title, ["Someone"], status="To Read")
 
     calls = []
-    real = service._search_tokens
+    # Counted where the Shelf asks for a note's words, not where they are split:
+    # the split is cached, so a listing that asked would not reach it.
+    real = store.note_words
     monkeypatch.setattr(
-        service, "_search_tokens", lambda text: (calls.append(text), real(text))[1]
+        store, "note_words", lambda note: (calls.append(note), real(note))[1]
     )
 
     # When the Library is listed by status alone
-    result = service.search_library(tmp_path, status="To Read")
+    result = service.search_library(ShelfStore(tmp_path), status="To Read")
 
     # Then nothing was tokenized. Listing "To Read" walks 1,452 notes on the
     # real Shelf, and splitting every title and author to then sort them
@@ -1626,7 +1643,9 @@ def _note_with_isbn(vault, name, isbn_line):
     ],
     ids=["bare-int", "quoted", "hyphenated", "padded"],
 )
-def test_a_book_is_found_by_isbn_however_the_note_spells_it(tmp_path, isbn_line):
+def test_a_book_is_found_by_isbn_however_the_note_spells_it(
+    tmp_path, isbn_line, open_store
+):
     # Given a Shelf holding one note, whose ISBN is written in one of the shapes
     # the real Shelf actually uses
     vault = tmp_path / "shelf"
@@ -1635,7 +1654,7 @@ def test_a_book_is_found_by_isbn_however_the_note_spells_it(tmp_path, isbn_line)
 
     # When the Library is asked for that ISBN as a string, which is what every
     # Surface passes
-    found = find_existing(vault, isbn="786937521")
+    found = find_existing(open_store(vault), isbn="786937521")
 
     # Then the note is found. It was not: `786937521 == "786937521"` is False,
     # so 31 notes on the real Shelf were invisible to this lookup and add_book
@@ -1644,7 +1663,9 @@ def test_a_book_is_found_by_isbn_however_the_note_spells_it(tmp_path, isbn_line)
     assert found.title == "A Book"
 
 
-def test_an_isbn_lookup_still_misses_a_book_the_shelf_does_not_hold(tmp_path):
+def test_an_isbn_lookup_still_misses_a_book_the_shelf_does_not_hold(
+    tmp_path, open_store
+):
     # Given a Shelf holding a different book
     vault = tmp_path / "shelf"
     vault.mkdir()
@@ -1652,7 +1673,7 @@ def test_an_isbn_lookup_still_misses_a_book_the_shelf_does_not_hold(tmp_path):
 
     # When a different ISBN is looked up
     # Then it is a miss, rather than the normalisation making everything match
-    assert find_existing(vault, isbn="786937521") is None
+    assert find_existing(open_store(vault), isbn="786937521") is None
 
 
 # --- reporting characters lost to a bad decode (#78) ------------------------
@@ -3556,3 +3577,92 @@ def test_a_primary_edited_before_its_merge_is_written_keeps_both_notes(
         "Typed in Obsidian." in path.read_text(encoding="utf-8")
         for path in tmp_path.glob("*.md")
     )
+
+
+# --- lookups that several notes answer (#159) ---
+
+
+def _raw_note(vault, name, *lines):
+    """Write a Book Note whose frontmatter is exactly these lines."""
+    (vault / name).write_text(
+        "---\n" + "\n".join(lines) + "\n---\n\nBody.\n", encoding="utf-8"
+    )
+
+
+def test_a_placeholder_google_books_id_matches_nothing(tmp_path, open_store):
+    # Given two notes carrying Libris's placeholder for "not a book", as 47
+    # notes on the real Shelf do
+    _raw_note(tmp_path, "a.md", "title: Audible Guide", "google_books_id: _not_a_book")
+    _raw_note(tmp_path, "b.md", "title: Sample", "google_books_id: _not_a_book")
+
+    # When the placeholder is looked up as though it were a volume id
+    found = find_existing(open_store(tmp_path), google_books_id="_not_a_book")
+
+    # Then nothing answers. It records that a note is not a book, and used to
+    # answer with whichever of the 47 was read first.
+    assert found is None
+
+
+def test_an_isbn_shared_by_two_notes_finds_the_lowest_libris_id(tmp_path, open_store):
+    # Given two notes sharing an ISBN, as two duplicate pairs on the real Shelf
+    # do, where the one listed first holds the higher Libris ID
+    _note_with_id(tmp_path, "a.md", "01ZZZZZZZZZZZZZZZZZZZZZZZZ", isbn="9781603581486")
+    _note_with_id(tmp_path, "b.md", "01AAAAAAAAAAAAAAAAAAAAAAAA", isbn="9781603581486")
+
+    # When the ISBN is looked up
+    found = find_existing(open_store(tmp_path), isbn="9781603581486")
+
+    # Then the lower Libris ID answers, whatever order the store listed them in,
+    # so the Shelf and the remote name the same note (ADR 0033)
+    assert found.libris_id == "01AAAAAAAAAAAAAAAAAAAAAAAA"
+
+
+def test_an_id_two_notes_superseded_resolves_to_the_lowest_libris_id(
+    tmp_path, open_store
+):
+    # Given two notes that each list one identity as absorbed, where the one
+    # listed first holds the higher Libris ID
+    for name, libris_id in (("a.md", "01ZZZZ"), ("b.md", "01AAAA")):
+        _raw_note(
+            tmp_path,
+            name,
+            f"libris_id: {libris_id}",
+            f"title: Book {name}",
+            "superseded_ids:",
+            "  - 01GONE",
+        )
+
+    # When the absorbed identity is resolved, singly and in bulk
+    found = find_by_libris_id(open_store(tmp_path), "01GONE")
+
+    # Then both resolve to the lower Libris ID
+    assert found.libris_id == "01AAAA"
+    assert service.build_id_index(tmp_path)["01GONE"].libris_id == "01AAAA"
+
+
+def test_near_matches_the_same_length_are_ordered_by_libris_id(tmp_path, open_store):
+    # Given two Near Matches whose titles are the same length, where the one
+    # listed first holds the higher Libris ID
+    _raw_note(
+        tmp_path,
+        "a.md",
+        "libris_id: 01ZZZZ",
+        "title: Dune Book A",
+        "authors:",
+        "  - Frank Herbert",
+    )
+    _raw_note(
+        tmp_path,
+        "b.md",
+        "libris_id: 01AAAA",
+        "title: Dune Book B",
+        "authors:",
+        "  - Frank Herbert",
+    )
+
+    # When the Near Matches for "Dune" are asked for
+    near = find_similar(open_store(tmp_path), title="Dune", authors=["Frank Herbert"])
+
+    # Then the lower Libris ID comes first, so a limit cuts the tie the same way
+    # in both locations
+    assert [n.libris_id for n in near.notes] == ["01AAAA", "01ZZZZ"]
