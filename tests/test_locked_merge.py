@@ -382,19 +382,30 @@ def test_merge_leaves_a_pair_whose_secondary_is_locked_before_the_check(
 # --- a write that fails partway (#166 review) ---
 
 
-def _fail_partway(monkeypatch, *, restore_fails: bool) -> None:
-    """Make the next rewrite write half the note and fail, as a full disk does.
+def _fail_partway(
+    monkeypatch, *, restore_fails: bool, whole: bool = False, skip: int = 0
+) -> None:
+    """Make a rewrite fail after writing, as a full disk or a lock landing does.
 
     Args:
         monkeypatch: The test's monkeypatch fixture.
         restore_fails: Fail putting the old bytes back as well.
+        whole: Write all of the new text before failing, rather than half. The
+            note is then damaged but still parses, which is the case that lets
+            a later step act on it again.
+        skip: Let this many rewrites succeed before the one that fails.
     """
     real = markdown._replace_bytes
-    failures = [True, restore_fails]
+    # A rewrite that succeeds makes one call; the failing one makes a second,
+    # to put the old bytes back.
+    failing = {skip + 1, skip + 2} if restore_fails else {skip + 1}
+    calls = 0
 
     def _replace(fd, data):
-        if failures and failures.pop(0):
-            real(fd, data[: len(data) // 2])
+        nonlocal calls
+        calls += 1
+        if calls in failing:
+            real(fd, data if whole else data[: len(data) // 2])
             raise OSError(errno.ENOSPC, "No space left on device")
         return real(fd, data)
 
@@ -534,3 +545,90 @@ def test_the_distinct_command_reports_a_note_left_damaged(tmp_path, monkeypatch)
     assert "may be damaged" in result.output
     assert "Nothing recorded" not in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_a_primary_left_damaged_is_not_acted_on_by_a_later_decision(
+    tmp_path, monkeypatch
+):
+    # Given the same decision twice - repeated decisions are valid input - and
+    # the first one's primary write failing and not able to be put back, leaving
+    # a note that still parses
+    first, second = _pair(tmp_path, "Dune", "Deluxe Edition")
+    decision = _decision(first, second)
+    _fail_partway(monkeypatch, restore_fails=True, whole=True)
+
+    # When the decisions are applied
+    outcomes = apply_decisions(tmp_path, [decision, decision])
+
+    # Then the repeat drifts rather than merging into the damaged note: it was
+    # left in the index, so the repeat read it and rewrote it
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.DRIFTED,
+        DecisionStatus.DRIFTED,
+    ]
+    assert "may be damaged" in outcomes[0].detail
+    assert len(list(tmp_path.glob("*.md"))) == 2
+
+
+def test_a_first_note_left_damaged_by_a_two_books_record_is_not_acted_on_again(
+    tmp_path, monkeypatch
+):
+    # Given the same two-books decision twice, the first note's write failing
+    # and not able to be put back
+    first, second = _pair(tmp_path, "Dune", "Deluxe Edition")
+    decision = {**_decision(first, second), "decision": "different"}
+    _fail_partway(monkeypatch, restore_fails=True, whole=True)
+
+    # When the decisions are applied
+    outcomes = apply_decisions(tmp_path, [decision, decision])
+
+    # Then the repeat drifts rather than writing the pair again
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.DRIFTED,
+        DecisionStatus.DRIFTED,
+    ]
+
+
+def test_a_second_note_left_damaged_by_a_two_books_record_is_not_acted_on_again(
+    tmp_path, monkeypatch
+):
+    # Given the same two-books decision twice, the first note written and the
+    # second's write failing and not able to be put back
+    first, second = _pair(tmp_path, "Dune", "Deluxe Edition")
+    decision = {**_decision(first, second), "decision": "different"}
+    _fail_partway(monkeypatch, restore_fails=True, whole=True, skip=1)
+
+    # When the decisions are applied
+    outcomes = apply_decisions(tmp_path, [decision, decision])
+
+    # Then the first is recorded - the first note settles the pair - and says
+    # the second may be damaged, and the repeat drifts rather than touching it
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.RECORDED,
+        DecisionStatus.DRIFTED,
+    ]
+    assert "may be damaged" in outcomes[0].detail
+
+
+def test_merge_leaves_the_rest_of_a_group_whose_primary_was_left_damaged(
+    tmp_path, monkeypatch
+):
+    # Given three copies of one Book, the first merge's write failing and not
+    # able to be put back, leaving a primary that still parses
+    vault = _shelf(tmp_path, monkeypatch)
+    group = _auto_group(vault, "Dune")
+    third = vault / "Dune C.md"
+    third.write_bytes(group[0].read_bytes())
+    third_before = third.read_bytes()
+    _fail_partway(monkeypatch, restore_fails=True, whole=True)
+
+    # When they are auto-merged
+    result = runner.invoke(app, ["merge", "--auto"])
+
+    # Then nothing more is merged into the damaged primary: returned as a plain
+    # refusal, the group went on to the next copy and merged it in
+    assert result.exit_code == 0, result.output
+    assert "rest of this group was left alone" in result.output
+    assert "0 duplicate(s) merged" in result.output
+    assert len(list(vault.glob("*.md"))) == 3
+    assert third_before in {path.read_bytes() for path in vault.glob("*.md")}

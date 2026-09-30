@@ -2228,6 +2228,15 @@ def merge(
                     f"read ({exc.strerror or exc}). Nothing merged; nothing deleted."
                 )
                 continue
+            except NoteWriteFailed:
+                # `_write_merge` said what happened. The primary may be damaged,
+                # so nothing more of this group is merged into it (#166 second
+                # review).
+                typer.echo(
+                    f"  {primary.name} may be damaged, so the rest of this group "
+                    "was left alone."
+                )
+                break
             except Exception as e:
                 typer.echo(f"    Error: {e}")
                 continue
@@ -2268,6 +2277,11 @@ def _write_merge(
         not where it was by the time it was to be deleted - which it reports as
         not deleted, since it may have been moved. False when the primary was
         gone, so nothing was written and nothing deleted.
+
+    Raises:
+        NoteWriteFailed: If writing the primary failed partway and it could not
+            be put back. Reported here; the caller must merge nothing more into
+            it.
     """
     if secondary_sha256 is not None:
         try:
@@ -2326,9 +2340,11 @@ def _write_merge(
         return False
     except NoteWriteFailed as exc:
         # Failed partway and could not be put back. The secondary is kept, so
-        # what it said survives (#166 review).
+        # what it said survives (#166 review). Raised on, not returned as False:
+        # False lets the group go on merging into this primary (#166 second
+        # review).
         typer.echo(f"    {exc} {secondary.name} was kept; the merge did not complete.")
-        return False
+        raise
     try:
         delete_secondary_file(secondary, secondary_sha256)
     except NoteChanged:

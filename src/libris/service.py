@@ -1987,10 +1987,13 @@ class TwoBooksRecord:
         one_sided: Why the second note was not written, when it was not. The
             pair is still settled - either side's record is read as enough -
             but only one note says so.
+        damaged: The second note, when writing it failed partway and it could
+            not be put back. Nothing more should be done to it this run.
     """
 
     written: list[Path] = field(default_factory=list)
     one_sided: str | None = None
+    damaged: Path | None = None
 
 
 class NotTwoNotes(ValueError):
@@ -2089,6 +2092,7 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
         # The pair is settled by the first note all the same, but the second
         # was not left as it was (#166 review).
         record.one_sided = str(exc)
+        record.damaged = second.path
     return record
 
 
@@ -2202,8 +2206,27 @@ def build_id_index(vault_path: Path) -> dict[str, BookNote]:
     return index
 
 
+def _forget(index: dict[str, BookNote], path: Path) -> None:
+    """Drop every identity the index resolves to one note.
+
+    For a note the run must not act on again: a later decision naming it
+    drifts rather than reading or rewriting it.
+
+    Args:
+        index: The run's index, from `build_id_index`.
+        path: The note to forget.
+    """
+    for key, note in list(index.items()):
+        if note.path == path:
+            del index[key]
+
+
 def _record_decided_two_books(
-    label: str, first: BookNote, second: BookNote, dry_run: bool
+    label: str,
+    first: BookNote,
+    second: BookNote,
+    dry_run: bool,
+    index: dict[str, BookNote],
 ) -> DecisionOutcome:
     """Carry out a decision that a pair is two books.
 
@@ -2212,6 +2235,7 @@ def _record_decided_two_books(
         first: One note of the pair, resolved from the decision.
         second: The other.
         dry_run: Report what would be written, and write nothing.
+        index: The run's index. A note left damaged is dropped from it.
 
     Returns:
         The decision's outcome.
@@ -2265,9 +2289,13 @@ def _record_decided_two_books(
         )
     except NoteWriteFailed as exc:
         # Not "nothing recorded": the first note may be half-written (#166
+        # review). Forgotten, so no later decision rewrites it (#166 second
         # review).
+        _forget(index, exc.path)
         return DecisionOutcome(DecisionStatus.DRIFTED, f"{label}: {exc}")
 
+    if record.damaged is not None:
+        _forget(index, record.damaged)
     detail = f"{label}: recorded as two books"
     if not record.written:
         detail = f"{label}: already recorded as two books"
@@ -2340,7 +2368,9 @@ def apply_decisions(
             continue
 
         if verdict == "different":
-            outcomes.append(_record_decided_two_books(label, first, second, dry_run))
+            outcomes.append(
+                _record_decided_two_books(label, first, second, dry_run, index)
+            )
             continue
 
         try:
@@ -2515,8 +2545,11 @@ def apply_decisions(
         except NoteWriteFailed as exc:
             # Failed partway and could not be put back. The secondary is kept,
             # so what it said survives; the primary's own text may not have. Said
-            # plainly, and the batch goes on - nothing later touches this pair
-            # (#166 review).
+            # plainly, and the batch goes on (#166 review). The primary is
+            # forgotten, so a later or repeated decision naming it drifts rather
+            # than rewriting a damaged note; the secondary, untouched, stays
+            # (#166 second review).
+            _forget(index, primary)
             outcomes.append(
                 DecisionOutcome(
                     DecisionStatus.DRIFTED,
@@ -2568,9 +2601,8 @@ def apply_decisions(
             # forgets both paths, so a later decision naming them drifts rather
             # than reading a file it cannot (#131 second review, #165).
             survivor = None
-            for key, note in list(index.items()):
-                if note.path in (primary, secondary):
-                    del index[key]
+            _forget(index, primary)
+            _forget(index, secondary)
             if isinstance(exc, FileNotFoundError):
                 notes.append(f"{primary.name} was then moved or removed")
             else:
