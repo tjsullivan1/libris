@@ -85,6 +85,7 @@ from .service import (
     apply_encoding_repair,
     csv_view,
     export_notes,
+    failed_note_name,
     find_encoding_damage,
     inspect_shelf,
     propose_encoding_repair,
@@ -2118,6 +2119,14 @@ def merge(
                 "Group skipped; nothing merged."
             )
             continue
+        except OSError as exc:
+            # There, but locked or denied. Outside the per-pair handler, so it
+            # ended the command before any later group was merged (#165).
+            typer.echo(
+                f"  {failed_note_name(exc, 'A note of this group')} could not be read "
+                f"({exc.strerror or exc}). Group skipped; nothing merged."
+            )
+            continue
 
         typer.echo(f"\n  Primary (keeper): {primary.name}")
 
@@ -2205,6 +2214,15 @@ def merge(
                     "deleted."
                 )
                 continue
+            except OSError as exc:
+                # Locked or denied before the merge was read - `_write_merge`
+                # handles its own - so nothing was written. Said, rather than
+                # left to the bare "Error:" below (#165).
+                typer.echo(
+                    f"    {failed_note_name(exc, 'A note of the pair')} could not be "
+                    f"read ({exc.strerror or exc}). Nothing merged; nothing deleted."
+                )
+                continue
             except Exception as e:
                 typer.echo(f"    Error: {e}")
                 continue
@@ -2267,6 +2285,12 @@ def _write_merge(
                 "was being decided. Nothing merged; nothing deleted."
             )
             return False
+        except OSError as exc:
+            typer.echo(
+                f"    {secondary.name} could not be read ({exc.strerror or exc}). "
+                "Nothing merged; nothing deleted."
+            )
+            return False
     try:
         write_merged_book(primary, merged_fm, merged_body, expected_sha256)
     except FileNotFoundError:
@@ -2283,6 +2307,14 @@ def _write_merge(
         # edit - and delete the secondary in exchange for it (#132).
         typer.echo(
             f"    {primary.name} changed while the merge was being decided. "
+            "Nothing merged; nothing deleted."
+        )
+        return False
+    except OSError as exc:
+        # Read-only or locked, refused on opening before a byte is written. A
+        # bare "Error:" said nothing of what was left (#165).
+        typer.echo(
+            f"    {primary.name} could not be written ({exc.strerror or exc}). "
             "Nothing merged; nothing deleted."
         )
         return False
@@ -2306,6 +2338,14 @@ def _write_merge(
             f"    Merged into {primary.name}, but {secondary.name} was not where it "
             "was, so it was not deleted. If it was moved rather than removed, a "
             "copy remains - `libris doctor` will show it."
+        )
+    except OSError as exc:
+        # Locked or read-only. The merged note is written, so the merge happened
+        # and counts; reported as a bare "Error:", it counted nothing (#165).
+        typer.echo(
+            f"    Merged into {primary.name}, but {secondary.name} could not be "
+            f"deleted ({exc.strerror or exc}), so it was kept - `libris doctor` "
+            "will show the pair."
         )
     return True
 

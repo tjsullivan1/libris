@@ -2140,6 +2140,19 @@ class DecisionOutcome:
     detail: str
 
 
+def failed_note_name(exc: OSError, fallback: str) -> str:
+    """The name of the note an `OSError` was raised for, or `fallback`.
+
+    Args:
+        exc: The error, which names the file it failed on when the OS said.
+        fallback: What to call the note when it did not.
+
+    Returns:
+        The note's file name, or `fallback`.
+    """
+    return Path(exc.filename).name if exc.filename else fallback
+
+
 def build_id_index(vault_path: Path) -> dict[str, BookNote]:
     """Map every Libris ID the Shelf answers for to the note that answers.
 
@@ -2161,7 +2174,13 @@ def build_id_index(vault_path: Path) -> dict[str, BookNote]:
     live: dict[str, list[BookNote]] = {}
 
     for book_path in list_books(vault_path):
-        note = BookNote.read(book_path)
+        try:
+            note = BookNote.read(book_path)
+        except OSError:
+            # Locked or gone. Left out, as `read_shelf_notes` leaves it out: one
+            # note that cannot be opened stopped every decision in the file
+            # before any was applied (#165). A decision naming it drifts.
+            continue
         if note is None:
             continue
         for superseded in note.superseded_ids:
@@ -2304,7 +2323,7 @@ def apply_decisions(
             outcomes.append(
                 DecisionOutcome(
                     DecisionStatus.DRIFTED,
-                    f"{label}: no longer two notes on the Shelf",
+                    f"{label}: no longer two readable notes on the Shelf",
                 )
             )
             continue
@@ -2374,6 +2393,17 @@ def apply_decisions(
                 )
             )
             continue
+        except OSError as exc:
+            # There, but locked or denied. It ended the batch, taking every later
+            # decision with it (#165).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {failed_note_name(exc, 'a note of the pair')} could not "
+                    f"be read ({exc.strerror or exc}); nothing merged",
+                )
+            )
+            continue
         if conflicts and not allow_conflicts:
             fields = ", ".join(sorted({c.field for c in conflicts}))
             outcomes.append(
@@ -2418,6 +2448,15 @@ def apply_decisions(
                 )
             )
             continue
+        except OSError as exc:
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {secondary.name} could not be read "
+                    f"({exc.strerror or exc}); nothing merged",
+                )
+            )
+            continue
 
         try:
             write_merged_book(primary, merged_fm, merged_body, primary_fingerprint)
@@ -2450,6 +2489,17 @@ def apply_decisions(
                 )
             )
             continue
+        except OSError as exc:
+            # Read-only or locked. Refused on opening, before a byte is written,
+            # so the secondary is kept and the pair stands as it was (#165).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {primary.name} could not be written "
+                    f"({exc.strerror or exc}); nothing merged",
+                )
+            )
+            continue
         notes: list[str] = []
         secondary_kept = False
         try:
@@ -2472,21 +2522,36 @@ def apply_decisions(
                 f"{secondary.name} was not where it was, so it was not deleted; "
                 "if it was moved, a copy remains"
             )
+        except OSError as exc:
+            secondary_kept = True
+            # Locked or read-only. The merged note is written, so the merge
+            # happened; the batch used to end here, reporting it nowhere (#165).
+            # The kept secondary still claims the identity the merged note now
+            # supersedes, which `libris doctor` shows as a collision.
+            notes.append(
+                f"{secondary.name} could not be deleted ({exc.strerror or exc}), "
+                "so it was kept; `libris doctor` will show the pair"
+            )
 
         # The Shelf just changed, so the index has to change with it: the
         # survivor now answers for the identities the deleted note held.
         try:
             survivor = BookNote.read(primary)
-        except FileNotFoundError:
-            # The merged note moved or was removed once written. The merge still
-            # happened, so it is recorded as merged; and the index forgets both
-            # paths, so a later decision naming them drifts rather than reading a
-            # file that is gone (#131 second review).
+        except OSError as exc:
+            # The merged note moved, was removed or was locked once written. The
+            # merge still happened, so it is recorded as merged; and the index
+            # forgets both paths, so a later decision naming them drifts rather
+            # than reading a file it cannot (#131 second review, #165).
             survivor = None
             for key, note in list(index.items()):
                 if note.path in (primary, secondary):
                     del index[key]
-            notes.append(f"{primary.name} was then moved or removed")
+            if isinstance(exc, FileNotFoundError):
+                notes.append(f"{primary.name} was then moved or removed")
+            else:
+                notes.append(
+                    f"{primary.name} could not be read back ({exc.strerror or exc})"
+                )
         if survivor is not None:
             for key, note in list(index.items()):
                 if note.path == primary or (
