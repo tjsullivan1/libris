@@ -227,6 +227,12 @@ DATE_FIELDS = ("date_added", "date_started", "date_finished")
 # they do not model, so a note that carries it keeps it.
 SUPERSEDED_IDS_FIELD = "superseded_ids"
 
+# The identities of Book Notes a person has said are a different book from this
+# one, so `libris duplicates` stops offering the pair (#142). Outside
+# MODELLED_FIELDS for the same reason as `superseded_ids`: it is absent on all
+# but the few notes someone has settled against another.
+DISTINCT_FROM_FIELD = "distinct_from"
+
 MODELLED_FIELDS = IDENTITY_FIELDS + BIBLIOGRAPHIC_FIELDS + READING_FIELDS + DATE_FIELDS
 
 # Headings the linter mistook for a title, and the values that leaked from them.
@@ -289,8 +295,12 @@ def validate_field_value(field: str, value: object) -> None:
             )
 
 
-def read_superseded_ids(value: object) -> list[str]:
-    """Read a `superseded_ids` value into the list of identities it means.
+def read_libris_ids(value: object) -> list[str]:
+    """Read a list-of-identities value into the Libris IDs it means.
+
+    For `superseded_ids` and `distinct_from` alike: both hold Libris IDs, and a
+    second reader for the second field would be a second place for the
+    bare-string trap below to be forgotten.
 
     Frontmatter arrives from YAML and may hold any shape. This vault writes
     list-shaped fields as bare strings often enough to matter - 1,341 notes do

@@ -340,15 +340,16 @@ def test_a_pair_marked_one_book_is_merged(tmp_path):
     assert len(list(tmp_path.glob("*.md"))) == 1
 
 
-def test_a_pair_marked_two_books_is_left_alone(tmp_path):
+def test_a_pair_marked_two_books_is_not_merged(tmp_path):
     # Given a pair a person judged to be different books
     first, second = _pair(tmp_path)
 
     # When the decision is applied
     outcomes = apply_decisions(tmp_path, [_decision(first, second, "different")])
 
-    # Then nothing is merged
-    assert [o.status for o in outcomes] == [DecisionStatus.SKIPPED]
+    # Then nothing is merged; the answer is recorded instead (#142, and
+    # tests/test_distinct.py)
+    assert [o.status for o in outcomes] == [DecisionStatus.RECORDED]
     assert len(list(tmp_path.glob("*.md"))) == 2
 
 

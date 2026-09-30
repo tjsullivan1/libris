@@ -18,12 +18,13 @@ from .markdown import (
     verify_note_unchanged,
 )
 from .note_format import (
+    DISTINCT_FROM_FIELD,
     MULTI_VALUED_FIELDS,
     READER_FIELDS,
     SUPERSEDED_IDS_FIELD,
     dump_frontmatter_yaml,
     read_isbn,
-    read_superseded_ids,
+    read_libris_ids,
 )
 
 
@@ -199,9 +200,9 @@ def _collect_superseded_ids(
     # string would otherwise be walked character by character, and every letter
     # would look like an identity.
     candidates: List[Any] = []
-    candidates.extend(read_superseded_ids(primary_fm.get(SUPERSEDED_IDS_FIELD)))
+    candidates.extend(read_libris_ids(primary_fm.get(SUPERSEDED_IDS_FIELD)))
     candidates.append(secondary_fm.get("libris_id"))
-    candidates.extend(read_superseded_ids(secondary_fm.get(SUPERSEDED_IDS_FIELD)))
+    candidates.extend(read_libris_ids(secondary_fm.get(SUPERSEDED_IDS_FIELD)))
 
     collected: List[str] = []
     for value in candidates:
@@ -211,6 +212,34 @@ def _collect_superseded_ids(
         if not identity or identity == survivor_id or identity in collected:
             continue
         collected.append(identity)
+    return collected
+
+
+def _collect_distinct_from(
+    primary_fm: Dict[str, Any], secondary_fm: Dict[str, Any], survivor: List[str]
+) -> List[str]:
+    """Gather the books either note was settled as different from (#142).
+
+    Both notes' answers stand after a merge: a person who said the secondary is
+    not some third book said it about the book the survivor now is. Keeping only
+    the primary's would send that pair back to be asked again.
+
+    Args:
+        primary_fm: Frontmatter of the surviving note.
+        secondary_fm: Frontmatter of the note being merged away.
+        survivor: Every identity the survivor will answer for. None of them is
+            kept - a note is not a different book from itself, and an entry
+            naming one is what merging a settled pair anyway leaves behind.
+
+    Returns:
+        The identities, primary's first, without duplicates.
+    """
+    collected: List[str] = []
+    for identity in read_libris_ids(primary_fm.get(DISTINCT_FROM_FIELD)) + (
+        read_libris_ids(secondary_fm.get(DISTINCT_FROM_FIELD))
+    ):
+        if identity not in survivor and identity not in collected:
+            collected.append(identity)
     return collected
 
 
@@ -268,6 +297,16 @@ def merge_two_books(
         merged_fm[SUPERSEDED_IDS_FIELD] = superseded
     else:
         merged_fm.pop(SUPERSEDED_IDS_FIELD, None)
+
+    # Outside the field loop for the same reason: left to it, the keeper's list
+    # won silently and the secondary's answers were lost with its file.
+    distinct = _collect_distinct_from(
+        primary_fm, secondary_fm, [primary_fm.get("libris_id"), *superseded]
+    )
+    if distinct:
+        merged_fm[DISTINCT_FROM_FIELD] = distinct
+    else:
+        merged_fm.pop(DISTINCT_FROM_FIELD, None)
 
     # If there are conflicts and we don't allow them, return early
     if conflicts and not allow_conflicts:
