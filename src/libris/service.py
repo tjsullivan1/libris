@@ -48,7 +48,14 @@ from .note_format import (
     read_isbn,
     validate_field_value,
 )
-from .store import LibraryStore, ShelfStore, WordCounts, note_words, search_tokens
+from .store import (
+    LibraryStore,
+    ShelfStore,
+    WordCounts,
+    by_libris_id,
+    note_words,
+    search_tokens,
+)
 
 
 class Outcome(Enum):
@@ -228,18 +235,7 @@ def _first(notes: list[BookNote]) -> BookNote | None:
     """
     if not notes:
         return None
-    return min(notes, key=_by_libris_id)
-
-
-def _by_libris_id(note: BookNote) -> tuple[bool, str, str]:
-    """Sort key putting the lowest Libris ID first and a note with none last.
-
-    Notes sharing an ID, or both lacking one, are then ordered by filename.
-    Without it they kept the order they were read in, which is `scandir` order
-    through the index and filename order through `list_books`, so a lookup and
-    `build_id_index` could name different notes for one contested identity.
-    """
-    return (note.libris_id is None, note.libris_id or "", note.path.name)
+    return min(notes, key=by_libris_id)
 
 
 def find_by_libris_id(store: LibraryStore, libris_id: str) -> BookNote | None:
@@ -370,7 +366,7 @@ def find_similar(
         for note in store.by_first_author(wanted_author)
         if note.title and titles_match(title, note.title)
     ]
-    found.sort(key=lambda n: (len(n.title or ""), _by_libris_id(n)))
+    found.sort(key=lambda n: (len(n.title or ""), by_libris_id(n)))
     return NearMatches(NearMatchCheck.CHECKED, found[:limit])
 
 
@@ -564,7 +560,18 @@ def search_library(
             continue
         matched, density = rank
         sort_title = normalize_for_match(note.title or "")
-        scored.append(((-matched, -density, len(note.title or ""), sort_title), note))
+        # Ends on the Libris ID (ADR 0033). Notes tying on everything before it
+        # are common - 19 on the real Shelf are titled "Poems" - and would
+        # otherwise keep the order the store listed them in, which differs by
+        # location, so a limit could cut a different book from each.
+        key = (
+            -matched,
+            -density,
+            len(note.title or ""),
+            sort_title,
+            by_libris_id(note),
+        )
+        scored.append((key, note))
 
     scored.sort(key=lambda pair: pair[0])
     return SearchResult(

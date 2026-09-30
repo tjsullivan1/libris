@@ -50,6 +50,19 @@ def _words(title: str, authors: tuple[str, ...]) -> frozenset[str]:
     return frozenset(search_tokens(title) | search_tokens(" ".join(authors)))
 
 
+def by_libris_id(note: BookNote) -> tuple[bool, str, str]:
+    """Sort key putting the lowest Libris ID first and a note with none last.
+
+    Every ordering ends on it (ADR 0033), in the service and in a store's
+    listing alike, so two locations holding the same notes order them the same.
+    Notes sharing an ID, or both lacking one, are then ordered by filename.
+    Without it they kept the order they were read in, which is `scandir` order
+    through the index and filename order through `list_books`, so a lookup and
+    `build_id_index` could name different notes for one contested identity.
+    """
+    return (note.libris_id is None, note.libris_id or "", note.path.name)
+
+
 def status_of(note: BookNote) -> str | None:
     """The Status bucket a note is counted in, or None for a note with none.
 
@@ -122,7 +135,11 @@ class LibraryStore(Protocol):
         ...
 
     def listing(self, status: str | None, limit: int) -> Listing:
-        """The first `limit` titled notes in a Status by normalized title, and their total."""
+        """The first `limit` titled notes in a Status, and their total.
+
+        Ordered by normalized title, then by `by_libris_id`, so notes sharing a
+        title come back in the same order from every store.
+        """
         ...
 
 
@@ -130,8 +147,8 @@ def _in_status(note: BookNote, status: str | None) -> bool:
     return status is None or status_of(note) == status
 
 
-def _title_key(note: BookNote) -> str:
-    return normalize_for_match(note.title or "")
+def _title_order(note: BookNote) -> tuple[str, tuple[bool, str, str]]:
+    return normalize_for_match(note.title or ""), by_libris_id(note)
 
 
 def _count(notes: Iterable[BookNote]) -> WordCounts:
@@ -205,7 +222,7 @@ class ShelfStore:
         # and splitting every title only to sort them alphabetically is work
         # with no reader.
         titled = self._titled(status)
-        titled.sort(key=_title_key)
+        titled.sort(key=_title_order)
         return Listing(total=len(titled), notes=titled[:limit])
 
 
@@ -321,7 +338,10 @@ class ReplicaStore:
         return WordCounts(total=total, counts=counts)
 
     def listing(self, status: str | None, limit: int) -> Listing:
-        titled = sorted(self._titled(status), key=lambda d: d.title_key or "")
+        titled = sorted(
+            self._titled(status),
+            key=lambda d: (d.title_key or "", by_libris_id(d.note)),
+        )
         return Listing(
             total=self.word_counts(status).total,
             notes=[d.note for d in titled[:limit]],
