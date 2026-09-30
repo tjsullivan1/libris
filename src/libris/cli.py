@@ -29,7 +29,7 @@ from .markdown import (
     ensure_frontmatter_fields,
     find_duplicate_candidates,
     find_duplicates,
-    find_pairs_recorded_distinct,
+    find_settled_candidates,
     list_books,
     note_fingerprint,
     read_frontmatter,
@@ -1961,7 +1961,7 @@ def duplicates():
 
     # Said rather than left silent: a report that stops naming a pair reads the
     # same whether someone settled it or it was never found (#142).
-    settled = find_pairs_recorded_distinct(notes)
+    settled = find_settled_candidates(vault_path, notes)
     if settled:
         typer.echo(
             f"\n{len(settled)} pair(s) recorded as two books are not offered again."
@@ -1991,6 +1991,14 @@ def distinct(
     except FileNotFoundError as exc:
         typer.echo(f"{Path(exc.filename or '').name} is gone. Nothing recorded.")
         raise typer.Exit(code=1) from None
+    except OSError as exc:
+        # Locked or unreadable by permissions, which is a message rather than a
+        # traceback (#164 review).
+        typer.echo(
+            f"{Path(exc.filename or '').name} could not be read "
+            f"({exc.strerror or exc}). Nothing recorded."
+        )
+        raise typer.Exit(code=1) from None
     for path, note in zip(paths, notes):
         if note is None:
             typer.echo(f"{path.name} has no readable frontmatter. Nothing recorded.")
@@ -2006,6 +2014,12 @@ def distinct(
         raise typer.Exit(code=1) from None
     except FileNotFoundError:
         typer.echo(f"{paths[0].name} is gone. Nothing recorded.")
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        typer.echo(
+            f"{paths[0].name} could not be written ({exc.strerror or exc}). "
+            "Nothing recorded."
+        )
         raise typer.Exit(code=1) from None
 
     if not record.written:

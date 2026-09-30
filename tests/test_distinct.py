@@ -11,13 +11,15 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+from libris import cli as cli_module
+from libris import service
 from libris.cli import app
 from libris.config import set_config
 from libris.markdown import (
     BookNote,
     NoteChanged,
     find_duplicate_candidates,
-    find_pairs_recorded_distinct,
+    find_settled_candidates,
     read_frontmatter,
 )
 from libris.merge import merge_two_books
@@ -126,20 +128,22 @@ def test_a_bare_string_record_is_read_as_one_identity(tmp_path):
     assert find_duplicate_candidates(tmp_path) == []
 
 
-def test_settled_pairs_are_counted_once(tmp_path):
-    # Given a pair recorded on both notes, and a record naming a book that is
-    # no longer on the Shelf
+def test_only_settled_pairs_the_rule_would_offer_are_counted(tmp_path):
+    # Given the pair recorded on both notes, a record naming a book that is no
+    # longer on the Shelf, and a record between two notes the candidate rule
+    # would never offer - `libris distinct` accepts any two
     _field_guide_pair(
         tmp_path,
-        book={"distinct_from": ["GUIDE", "GONE"]},
+        book={"distinct_from": ["GUIDE", "GONE", "SETTING"]},
         guide={"distinct_from": ["BOOK"]},
     )
-    notes = [BookNote.read(path) for path in sorted(tmp_path.glob("*.md"))]
+    _note(tmp_path, "setting", "Setting the Table", distinct_from=["BOOK"])
 
-    # When the settled pairs are listed
-    pairs = find_pairs_recorded_distinct(notes)
+    # When the settled candidates are listed
+    pairs = find_settled_candidates(tmp_path)
 
-    # Then the pair appears once, and the record about a missing book not at all
+    # Then only the pair the report would otherwise have offered is counted,
+    # and it is counted once
     assert len(pairs) == 1
     assert {note.path.name for note in pairs[0]} == {"book.md", "guide.md"}
 
@@ -251,6 +255,58 @@ def test_a_second_note_that_fails_leaves_a_record_that_still_holds(tmp_path):
     assert find_duplicate_candidates(tmp_path) == []
 
 
+def _refuse_writes_to(monkeypatch, refused: Path) -> None:
+    """Make one note unwritable, as a lock or a read-only file would."""
+    real = service.edit_note
+
+    def _edit(path, decide, *args, **kwargs):
+        if path == refused:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, decide, *args, **kwargs)
+
+    monkeypatch.setattr(service, "edit_note", _edit)
+
+
+def test_a_second_note_that_cannot_be_written_is_one_sided(tmp_path, monkeypatch):
+    # Given a guide that is locked or read-only
+    book, guide = _field_guide_pair(tmp_path)
+    _refuse_writes_to(monkeypatch, guide)
+
+    # When the pair is recorded
+    record = record_two_books(BookNote.read(book), BookNote.read(guide))
+
+    # Then it is reported one-sided rather than raised - the book's record
+    # already settles the pair
+    assert record.written == [book]
+    assert record.one_sided is not None
+    assert find_duplicate_candidates(tmp_path) == []
+
+
+def test_notes_sharing_an_identity_cannot_be_recorded(tmp_path):
+    # Given two files claiming one Libris ID (#75)
+    book, guide = _field_guide_pair(tmp_path, guide={"libris_id": "BOOK"})
+    before = book.read_bytes(), guide.read_bytes()
+
+    # When the pair is recorded
+    # Then it is refused: each would name the shared id, a record pointing
+    # back at itself
+    with pytest.raises(NotTwoNotes, match="BOOK"):
+        record_two_books(BookNote.read(book), BookNote.read(guide))
+    assert (book.read_bytes(), guide.read_bytes()) == before
+
+
+def test_notes_sharing_an_absorbed_identity_cannot_be_recorded(tmp_path):
+    # Given two notes that both claim to have absorbed one merged-away note
+    book, guide = _field_guide_pair(
+        tmp_path,
+        book={"superseded_ids": ["MERGED"]},
+        guide={"superseded_ids": ["MERGED"]},
+    )
+
+    with pytest.raises(NotTwoNotes, match="MERGED"):
+        record_two_books(BookNote.read(book), BookNote.read(guide))
+
+
 # --- a review's "different" answer -------------------------------------------
 
 
@@ -288,6 +344,33 @@ def test_a_different_decision_about_a_vanished_note_drifts(tmp_path):
 
     assert [o.status for o in outcomes] == [DecisionStatus.DRIFTED]
     assert "distinct_from" not in read_frontmatter(book)
+
+
+def test_an_unwritable_note_drifts_its_decision_and_the_batch_goes_on(
+    tmp_path, monkeypatch
+):
+    # Given two decisions, the first about a note that cannot be written
+    book, guide = _field_guide_pair(tmp_path)
+    other = _note(tmp_path, "other", "Setting the Table")
+    sequel = _note(tmp_path, "sequel", "Setting the Table: Revisited")
+    _refuse_writes_to(monkeypatch, book)
+
+    # When both are applied
+    outcomes = apply_decisions(
+        tmp_path,
+        [
+            _decision(book, guide, "different"),
+            _decision(other, sequel, "different"),
+        ],
+    )
+
+    # Then the first is reported, not raised, and the second is still recorded
+    assert [o.status for o in outcomes] == [
+        DecisionStatus.DRIFTED,
+        DecisionStatus.RECORDED,
+    ]
+    assert "could not be written" in outcomes[0].detail
+    assert read_frontmatter(sequel)["distinct_from"] == ["OTHER"]
 
 
 def test_a_decision_with_no_answer_is_left_alone(tmp_path):
@@ -377,6 +460,42 @@ def test_the_distinct_command_refuses_a_note_not_on_the_shelf(tmp_path):
 
     assert result.exit_code == 1
     assert book.read_bytes() == before
+
+
+def test_the_distinct_command_reports_a_note_it_cannot_read(tmp_path, monkeypatch):
+    # Given a note locked or unreadable by permissions
+    _field_guide_pair(tmp_path)
+    set_config("vault_path", str(tmp_path))
+
+    def _unreadable(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(cli_module.BookNote, "read", staticmethod(_unreadable))
+
+    # When the pair is recorded
+    result = runner.invoke(app, ["distinct", "book.md", "guide.md"])
+
+    # Then it says so and exits, rather than ending in a traceback
+    assert result.exit_code == 1
+    assert "could not be read" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_the_distinct_command_reports_a_note_it_cannot_write(tmp_path, monkeypatch):
+    # Given a first note that is locked or read-only
+    book, guide = _field_guide_pair(tmp_path)
+    set_config("vault_path", str(tmp_path))
+    _refuse_writes_to(monkeypatch, book)
+    before = guide.read_bytes()
+
+    # When the pair is recorded
+    result = runner.invoke(app, ["distinct", "book.md", "guide.md"])
+
+    # Then it says so, exits, and writes nothing to the other note either
+    assert result.exit_code == 1
+    assert "could not be written" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert guide.read_bytes() == before
 
 
 def test_the_distinct_command_refuses_a_note_without_an_identity(tmp_path):

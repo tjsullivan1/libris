@@ -2055,11 +2055,13 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
         What was written.
 
     Raises:
-        NotTwoNotes: If the two are one file, or either has no Libris ID to
-            record against.
+        NotTwoNotes: If the two are one file, either has no Libris ID to
+            record against, or they answer for an identity in common.
         NoteChanged: If the first note is no longer the one that was read.
             Nothing is written.
         FileNotFoundError: If the first note is gone. Nothing is written.
+        OSError: If the first note cannot be written for any other reason -
+            locked, read-only. Nothing is written.
         FrontmatterUnreadable: If the first note's frontmatter cannot be
             parsed. Nothing is written.
     """
@@ -2071,6 +2073,16 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
                 f"{note.path.name} has no Libris ID to record against. "
                 "Run `libris cleanup` to mint one."
             )
+    # Two files can claim one identity (#75). Recorded as two books, each would
+    # name that shared id - a record pointing back at itself, which settles
+    # every other pair that answers for the id too (#164 review).
+    shared = first.identities & second.identities
+    if shared:
+        raise NotTwoNotes(
+            f"{first.path.name} and {second.path.name} both answer for "
+            f"{', '.join(sorted(shared))}, so neither can name the other. "
+            "`libris doctor` shows the collision."
+        )
 
     record = TwoBooksRecord()
     if _add_distinct_from(first, second.libris_id):
@@ -2082,7 +2094,10 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
     try:
         if _add_distinct_from(second, first.libris_id):
             record.written.append(second.path)
-    except (NoteChanged, FileNotFoundError, FrontmatterUnreadable) as exc:
+    except (NoteChanged, OSError, FrontmatterUnreadable) as exc:
+        # OSError, not only FileNotFoundError: a locked or read-only note is as
+        # unwritable as a missing one, and raising here would report a failure
+        # after the first note had already settled the pair (#164 review).
         record.one_sided = f"{second.path.name} was not written: {exc}"
     return record
 
@@ -2177,6 +2192,14 @@ def _record_decided_two_books(
         return DecisionOutcome(
             DecisionStatus.DRIFTED,
             f"{label}: {first.path.name} is gone; nothing recorded",
+        )
+    except OSError as exc:
+        # Locked or read-only. One note that cannot be written is this
+        # decision's outcome, not the end of the batch (#164 review).
+        return DecisionOutcome(
+            DecisionStatus.DRIFTED,
+            f"{label}: {first.path.name} could not be written "
+            f"({exc.strerror or exc}); nothing recorded",
         )
     except FrontmatterUnreadable as exc:
         return DecisionOutcome(

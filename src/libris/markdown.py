@@ -893,6 +893,53 @@ def find_duplicate_candidates(
     Returns:
         Pairs of Book Notes, shorter title first, ordered by author then title.
     """
+    return [
+        pair
+        for pair in _candidate_shaped_pairs(vault_path, notes)
+        if not pair[0].is_recorded_distinct_from(pair[1])
+    ]
+
+
+def find_settled_candidates(
+    vault_path: Path, notes: list[BookNote] | None = None
+) -> list[list[BookNote]]:
+    """Find the pairs `find_duplicate_candidates` passes over as two books.
+
+    Leaving a settled pair out is right and also silent: a report that stops
+    naming a pair reads the same whether someone settled it or it was never
+    found. This is what lets it say how many it passed over.
+
+    Only pairs the candidate rule would otherwise offer are counted, not every
+    record on the Shelf. `libris distinct` accepts any two notes, and a title
+    can change after it is recorded, so counting every record claimed to have
+    passed over pairs that were never candidates (#164 review).
+
+    Args:
+        vault_path: The Shelf to search.
+        notes: The Shelf already parsed, when the caller has it.
+
+    Returns:
+        The settled pairs, in the order `find_duplicate_candidates` uses.
+    """
+    return [
+        pair
+        for pair in _candidate_shaped_pairs(vault_path, notes)
+        if pair[0].is_recorded_distinct_from(pair[1])
+    ]
+
+
+def _candidate_shaped_pairs(
+    vault_path: Path, notes: list[BookNote] | None
+) -> list[list[BookNote]]:
+    """Every pair the candidate rule matches, whether or not anyone settled it.
+
+    Args:
+        vault_path: The Shelf to search.
+        notes: The Shelf already parsed, or None to parse it here.
+
+    Returns:
+        Pairs of Book Notes, shorter title first, ordered by author then title.
+    """
     if notes is None:
         notes = read_shelf_notes(vault_path)
 
@@ -925,7 +972,7 @@ def find_duplicate_candidates(
                 if title_a == title_b or not _is_subtitle_variant(title_a, title_b):
                     continue
                 key = frozenset((str(a.path), str(b.path)))
-                if key in seen or key in settled or a.is_recorded_distinct_from(b):
+                if key in seen or key in settled:
                     continue
                 seen.add(key)
                 pairs.append([a, b])
@@ -933,41 +980,6 @@ def find_duplicate_candidates(
     pairs.sort(
         key=lambda pair: ((pair[0].first_author or "").lower(), pair[0].title or "")
     )
-    return pairs
-
-
-def find_pairs_recorded_distinct(notes: list[BookNote]) -> list[list[BookNote]]:
-    """Find the pairs of Book Notes a person has recorded as two books.
-
-    `find_duplicate_candidates` leaves these out, which is right and also
-    silent: a report that stops naming a pair looks the same whether it was
-    settled or never found. This is what lets it say how many it passed over.
-
-    Args:
-        notes: The Shelf, already parsed.
-
-    Returns:
-        Each settled pair once, in the order the Shelf lists the note recording
-        it. A record naming an identity no note on the Shelf answers for is
-        left out - the book it named is gone, and there is no pair to report.
-    """
-    by_identity: dict[str, BookNote] = {}
-    for note in notes:
-        for identity in note.identities:
-            by_identity.setdefault(identity, note)
-
-    seen = set()
-    pairs: list[list[BookNote]] = []
-    for note in notes:
-        for identity in note.distinct_from:
-            other = by_identity.get(identity)
-            if other is None or other.path == note.path:
-                continue
-            key = frozenset((note.path, other.path))
-            if key in seen:
-                continue
-            seen.add(key)
-            pairs.append([note, other])
     return pairs
 
 
