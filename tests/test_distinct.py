@@ -335,6 +335,67 @@ def test_a_different_decision_in_a_dry_run_writes_nothing(tmp_path):
     assert (book.read_bytes(), guide.read_bytes()) == before
 
 
+_RECORDED_ON_BOTH = {
+    "book": {"distinct_from": ["GUIDE"]},
+    "guide": {"distinct_from": ["BOOK"]},
+}
+_SHARING_AN_ABSORBED_ID = {
+    "book": {"superseded_ids": ["MERGED"]},
+    "guide": {"superseded_ids": ["MERGED"]},
+}
+
+
+@pytest.mark.parametrize(
+    ("extra", "preview", "real"),
+    [
+        pytest.param(
+            {},
+            DecisionStatus.WOULD_RECORD,
+            DecisionStatus.RECORDED,
+            id="nothing recorded yet",
+        ),
+        pytest.param(
+            {"book": {"distinct_from": ["GUIDE"]}},
+            DecisionStatus.WOULD_RECORD,
+            DecisionStatus.RECORDED,
+            id="recorded on one side only",
+        ),
+        pytest.param(
+            _RECORDED_ON_BOTH,
+            DecisionStatus.RECORDED,
+            DecisionStatus.RECORDED,
+            id="already recorded on both",
+        ),
+        pytest.param(
+            _SHARING_AN_ABSORBED_ID,
+            DecisionStatus.DRIFTED,
+            DecisionStatus.DRIFTED,
+            id="sharing an absorbed identity",
+        ),
+    ],
+)
+def test_a_dry_run_reports_what_the_real_run_does(tmp_path, extra, preview, real):
+    # Given the same pair on two identical Shelves
+    outcomes = {}
+    for mode in ("preview", "real"):
+        vault = tmp_path / mode
+        vault.mkdir()
+        book, guide = _field_guide_pair(vault, **extra)
+        decision = _decision(book, guide, "different")
+
+        # When one is previewed and the other applied
+        [outcome] = apply_decisions(vault, [decision], dry_run=mode == "preview")
+        outcomes[mode] = outcome
+
+    # Then the preview names the outcome the run produces - a pending write
+    # only where the run writes something, and a refusal where it refuses
+    assert outcomes["preview"].status == preview
+    assert outcomes["real"].status == real
+    assert ("already" in outcomes["preview"].detail) == (
+        "already" in outcomes["real"].detail
+    )
+
+
 def test_a_different_decision_about_a_vanished_note_drifts(tmp_path):
     book, guide = _field_guide_pair(tmp_path)
     decision = _decision(book, guide, "different")

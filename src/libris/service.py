@@ -2065,6 +2065,41 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
         FrontmatterUnreadable: If the first note's frontmatter cannot be
             parsed. Nothing is written.
     """
+    check_two_books(first, second)
+
+    record = TwoBooksRecord()
+    if _add_distinct_from(first, second.libris_id):
+        record.written.append(first.path)
+
+    # The first write stands whatever happens here: either side's record settles
+    # the pair, so a failure now leaves it settled, and says that only one note
+    # carries it rather than reporting nothing recorded.
+    try:
+        if _add_distinct_from(second, first.libris_id):
+            record.written.append(second.path)
+    except (NoteChanged, OSError, FrontmatterUnreadable) as exc:
+        # OSError, not only FileNotFoundError: a locked or read-only note is as
+        # unwritable as a missing one, and raising here would report a failure
+        # after the first note had already settled the pair (#164 review).
+        record.one_sided = f"{second.path.name} was not written: {exc}"
+    return record
+
+
+def check_two_books(first: BookNote, second: BookNote) -> None:
+    """Refuse a pair that cannot be recorded as two books, writing nothing.
+
+    Apart from `record_two_books` so a dry run can ask the same questions. A
+    preview that skipped them reported pairs as recordable that the real run
+    then refused (#164 second review).
+
+    Args:
+        first: One note of the pair, as read.
+        second: The other.
+
+    Raises:
+        NotTwoNotes: If the two are one file, either has no Libris ID to
+            record against, or they answer for an identity in common.
+    """
     if first.path == second.path:
         raise NotTwoNotes(f"{first.path.name} is one note, not two.")
     for note in (first, second):
@@ -2083,23 +2118,6 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
             f"{', '.join(sorted(shared))}, so neither can name the other. "
             "`libris doctor` shows the collision."
         )
-
-    record = TwoBooksRecord()
-    if _add_distinct_from(first, second.libris_id):
-        record.written.append(first.path)
-
-    # The first write stands whatever happens here: either side's record settles
-    # the pair, so a failure now leaves it settled, and says that only one note
-    # carries it rather than reporting nothing recorded.
-    try:
-        if _add_distinct_from(second, first.libris_id):
-            record.written.append(second.path)
-    except (NoteChanged, OSError, FrontmatterUnreadable) as exc:
-        # OSError, not only FileNotFoundError: a locked or read-only note is as
-        # unwritable as a missing one, and raising here would report a failure
-        # after the first note had already settled the pair (#164 review).
-        record.one_sided = f"{second.path.name} was not written: {exc}"
-    return record
 
 
 class DecisionStatus(Enum):
@@ -2173,6 +2191,20 @@ def _record_decided_two_books(
         The decision's outcome.
     """
     if dry_run:
+        # The same refusals and the same "already recorded" the real run gives,
+        # so the preview says what the run will do (#164 second review). What
+        # it cannot see is a note edited, locked or removed between the two.
+        try:
+            check_two_books(first, second)
+        except NotTwoNotes as exc:
+            return DecisionOutcome(DecisionStatus.DRIFTED, f"{label}: {exc}")
+        if (
+            second.libris_id in first.distinct_from
+            and first.libris_id in second.distinct_from
+        ):
+            return DecisionOutcome(
+                DecisionStatus.RECORDED, f"{label}: already recorded as two books"
+            )
         return DecisionOutcome(
             DecisionStatus.WOULD_RECORD,
             f"{label}: would record {first.path.name} and {second.path.name} "
