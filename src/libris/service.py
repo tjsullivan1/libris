@@ -21,6 +21,7 @@ from .api import UNKNOWN_AUTHOR, UNKNOWN_TITLE, BookCandidate, GoogleBooksClient
 from .markdown import (
     EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
+    FrontmatterUnreadable,
     NoteChanged,
     create_book_note,
     edit_note,
@@ -39,6 +40,7 @@ from .merge import (
     write_merged_book,
 )
 from .note_format import (
+    DISTINCT_FROM_FIELD,
     MODELLED_FIELDS,
     READER_FIELDS,
     description_callout_lines,
@@ -1974,11 +1976,157 @@ def inspect_shelf(vault_path: Path) -> ShelfReport:
     )
 
 
+@dataclass
+class TwoBooksRecord:
+    """What recording a pair as two books wrote.
+
+    Attributes:
+        written: The notes that gained an entry. Empty when both already held
+            one, which is not a failure: the pair was settled before.
+        one_sided: Why the second note was not written, when it was not. The
+            pair is still settled - either side's record is read as enough -
+            but only one note says so.
+    """
+
+    written: list[Path] = field(default_factory=list)
+    one_sided: str | None = None
+
+
+class NotTwoNotes(ValueError):
+    """A pair to record as two books is not two notes with identities."""
+
+
+def _add_distinct_from(note: BookNote, other_id: str) -> bool:
+    """Add one identity to a note's `distinct_from`, if the note is still itself.
+
+    The note is checked inside the write, through the handle that writes it, so
+    a file replaced at that path since it was read - a different book, carrying
+    a different identity - is refused rather than told it is distinct from
+    something it was never compared with.
+
+    Args:
+        note: The note as it was read. Its path is written.
+        other_id: The Libris ID of the other book.
+
+    Returns:
+        True when the note was written; False when it already said so.
+
+    Raises:
+        NoteChanged: If the file at that path no longer answers for the note's
+            Libris ID. Nothing is written.
+        FileNotFoundError: If the note is gone. It is never recreated.
+        FrontmatterUnreadable: If its frontmatter cannot be parsed.
+    """
+    wrote = False
+
+    def _decide(data: dict, _body: str) -> tuple[dict, None]:
+        nonlocal wrote
+        now = BookNote(path=note.path, frontmatter=data)
+        if note.libris_id not in now.identities:
+            raise NoteChanged(
+                f"{note.path.name} is no longer the note that was compared."
+            )
+        held = now.distinct_from
+        if other_id in held:
+            return {}, None
+        wrote = True
+        return {DISTINCT_FROM_FIELD: [*held, other_id]}, None
+
+    edit_note(note.path, _decide)
+    return wrote
+
+
+def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
+    """Record on both notes that they are two different books (#142).
+
+    `libris duplicates` recomputes its candidates on every run and has no memory
+    of an answer, so a pair someone settled as two books came back every time.
+    The answer is written where the books are, keyed by Libris ID - the only
+    thing that survives a rename and, through `superseded_ids`, a merge
+    (ADR 0014). A title or a path would not.
+
+    Both notes are written, so reading either one shows the pair is settled.
+
+    Args:
+        first: One note of the pair, as read.
+        second: The other.
+
+    Returns:
+        What was written.
+
+    Raises:
+        NotTwoNotes: If the two are one file, either has no Libris ID to
+            record against, or they answer for an identity in common.
+        NoteChanged: If the first note is no longer the one that was read.
+            Nothing is written.
+        FileNotFoundError: If the first note is gone. Nothing is written.
+        OSError: If the first note cannot be written for any other reason -
+            locked, read-only. Nothing is written.
+        FrontmatterUnreadable: If the first note's frontmatter cannot be
+            parsed. Nothing is written.
+    """
+    check_two_books(first, second)
+
+    record = TwoBooksRecord()
+    if _add_distinct_from(first, second.libris_id):
+        record.written.append(first.path)
+
+    # The first write stands whatever happens here: either side's record settles
+    # the pair, so a failure now leaves it settled, and says that only one note
+    # carries it rather than reporting nothing recorded.
+    try:
+        if _add_distinct_from(second, first.libris_id):
+            record.written.append(second.path)
+    except (NoteChanged, OSError, FrontmatterUnreadable) as exc:
+        # OSError, not only FileNotFoundError: a locked or read-only note is as
+        # unwritable as a missing one, and raising here would report a failure
+        # after the first note had already settled the pair (#164 review).
+        record.one_sided = f"{second.path.name} was not written: {exc}"
+    return record
+
+
+def check_two_books(first: BookNote, second: BookNote) -> None:
+    """Refuse a pair that cannot be recorded as two books, writing nothing.
+
+    Apart from `record_two_books` so a dry run can ask the same questions. A
+    preview that skipped them reported pairs as recordable that the real run
+    then refused (#164 second review).
+
+    Args:
+        first: One note of the pair, as read.
+        second: The other.
+
+    Raises:
+        NotTwoNotes: If the two are one file, either has no Libris ID to
+            record against, or they answer for an identity in common.
+    """
+    if first.path == second.path:
+        raise NotTwoNotes(f"{first.path.name} is one note, not two.")
+    for note in (first, second):
+        if note.libris_id is None:
+            raise NotTwoNotes(
+                f"{note.path.name} has no Libris ID to record against. "
+                "Run `libris cleanup` to mint one."
+            )
+    # Two files can claim one identity (#75). Recorded as two books, each would
+    # name that shared id - a record pointing back at itself, which settles
+    # every other pair that answers for the id too (#164 review).
+    shared = first.identities & second.identities
+    if shared:
+        raise NotTwoNotes(
+            f"{first.path.name} and {second.path.name} both answer for "
+            f"{', '.join(sorted(shared))}, so neither can name the other. "
+            "`libris doctor` shows the collision."
+        )
+
+
 class DecisionStatus(Enum):
     """What became of one decision from an exported review."""
 
     MERGED = "merged"
     WOULD_MERGE = "would_merge"
+    RECORDED = "recorded"
+    WOULD_RECORD = "would_record"
     SKIPPED = "skipped"
     CONFLICTED = "conflicted"
     DRIFTED = "drifted"
@@ -2028,18 +2176,92 @@ def build_id_index(vault_path: Path) -> dict[str, BookNote]:
     return index
 
 
+def _record_decided_two_books(
+    label: str, first: BookNote, second: BookNote, dry_run: bool
+) -> DecisionOutcome:
+    """Carry out a decision that a pair is two books.
+
+    Args:
+        label: How the decision is named in its outcome.
+        first: One note of the pair, resolved from the decision.
+        second: The other.
+        dry_run: Report what would be written, and write nothing.
+
+    Returns:
+        The decision's outcome.
+    """
+    if dry_run:
+        # The same refusals and the same "already recorded" the real run gives,
+        # so the preview says what the run will do (#164 second review). What
+        # it cannot see is a note edited, locked or removed between the two.
+        try:
+            check_two_books(first, second)
+        except NotTwoNotes as exc:
+            return DecisionOutcome(DecisionStatus.DRIFTED, f"{label}: {exc}")
+        if (
+            second.libris_id in first.distinct_from
+            and first.libris_id in second.distinct_from
+        ):
+            return DecisionOutcome(
+                DecisionStatus.RECORDED, f"{label}: already recorded as two books"
+            )
+        return DecisionOutcome(
+            DecisionStatus.WOULD_RECORD,
+            f"{label}: would record {first.path.name} and {second.path.name} "
+            "as two books",
+        )
+    try:
+        record = record_two_books(first, second)
+    except NotTwoNotes as exc:
+        return DecisionOutcome(DecisionStatus.DRIFTED, f"{label}: {exc}")
+    except NoteChanged:
+        return DecisionOutcome(
+            DecisionStatus.DRIFTED,
+            f"{label}: {first.path.name} is no longer the note the decision "
+            "named; nothing recorded",
+        )
+    except FileNotFoundError:
+        return DecisionOutcome(
+            DecisionStatus.DRIFTED,
+            f"{label}: {first.path.name} is gone; nothing recorded",
+        )
+    except OSError as exc:
+        # Locked or read-only. One note that cannot be written is this
+        # decision's outcome, not the end of the batch (#164 review).
+        return DecisionOutcome(
+            DecisionStatus.DRIFTED,
+            f"{label}: {first.path.name} could not be written "
+            f"({exc.strerror or exc}); nothing recorded",
+        )
+    except FrontmatterUnreadable as exc:
+        return DecisionOutcome(
+            DecisionStatus.DRIFTED, f"{label}: {exc} Nothing recorded."
+        )
+
+    detail = f"{label}: recorded as two books"
+    if not record.written:
+        detail = f"{label}: already recorded as two books"
+    if record.one_sided:
+        detail += f" ({record.one_sided}; the first note's record still holds)"
+    return DecisionOutcome(DecisionStatus.RECORDED, detail)
+
+
 def apply_decisions(
     vault_path: Path,
     decisions: list[dict],
     allow_conflicts: bool = False,
     dry_run: bool = False,
 ) -> list[DecisionOutcome]:
-    """Merge the pairs an exported review marked as one Book.
+    """Carry out an exported review: merge one Book, record two.
 
     The file records a judgement made against the Shelf as it was. Rather than
     trusting it, every pair is resolved against the Shelf as it is now, by
     Libris ID - which survives a rename and, since ADR 0014, a merge. A pair
     that no longer resolves has drifted and is reported rather than acted on.
+
+    A pair answered "different" is recorded on both notes, so the candidate is
+    not offered again (#142). It used to be skipped, which wrote nothing and
+    left the same question waiting on the next run.
 
     Args:
         vault_path: The Shelf to act on.
@@ -2062,11 +2284,9 @@ def apply_decisions(
         longer = (decision.get("longer") or {}).get("libris_id")
         label = (decision.get("shorter") or {}).get("title") or "unknown"
 
-        if verdict != "same":
+        if verdict not in ("same", "different"):
             outcomes.append(
-                DecisionOutcome(
-                    DecisionStatus.SKIPPED, f"{label}: recorded as two books"
-                )
+                DecisionOutcome(DecisionStatus.SKIPPED, f"{label}: no answer given")
             )
             continue
 
@@ -2087,6 +2307,10 @@ def apply_decisions(
                     f"{label}: no longer two notes on the Shelf",
                 )
             )
+            continue
+
+        if verdict == "different":
+            outcomes.append(_record_decided_two_books(label, first, second, dry_run))
             continue
 
         try:
@@ -2120,11 +2344,7 @@ def apply_decisions(
                 (second.path, longer.strip()),
             ):
                 note_now = BookNote.read(path)
-                identities = (
-                    {note_now.libris_id} | set(note_now.superseded_ids)
-                    if note_now is not None
-                    else set()
-                )
+                identities = note_now.identities if note_now is not None else set()
                 if wanted not in identities:
                     stale = path
                     break

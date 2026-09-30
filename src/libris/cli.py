@@ -29,6 +29,7 @@ from .markdown import (
     ensure_frontmatter_fields,
     find_duplicate_candidates,
     find_duplicates,
+    find_settled_candidates,
     list_books,
     note_fingerprint,
     read_frontmatter,
@@ -77,6 +78,7 @@ from .service import (
     FieldRepair,
     IdCollision,
     IsbnAgreement,
+    NotTwoNotes,
     ShelfExport,
     accept_correction,
     apply_decisions,
@@ -86,6 +88,7 @@ from .service import (
     find_encoding_damage,
     inspect_shelf,
     propose_encoding_repair,
+    record_two_books,
     update_book,
     update_note,
 )
@@ -1952,6 +1955,82 @@ def duplicates():
             typer.echo(f"  {second.title}")
             typer.echo(f"    {first.path.name}")
             typer.echo(f"    {second.path.name}")
+        typer.echo(
+            '\n  Two different books? Record it and it will not be offered again:\n  libris distinct "<first note>.md" "<second note>.md"'
+        )
+
+    # Said rather than left silent: a report that stops naming a pair reads the
+    # same whether someone settled it or it was never found (#142).
+    settled = find_settled_candidates(vault_path, notes)
+    if settled:
+        typer.echo(
+            f"\n{len(settled)} pair(s) recorded as two books are not offered again."
+        )
+
+
+@app.command()
+def distinct(
+    first: str = typer.Argument(
+        ..., help="Filename of one Book Note, e.g. 'Dune - Frank Herbert.md'"
+    ),
+    second: str = typer.Argument(..., help="Filename of the other Book Note"),
+) -> None:
+    """Record that two Book Notes are different books.
+
+    `libris duplicates` offers pairs whose titles look like one book with a
+    subtitle, and some are two books - a companion volume, a sequel. Recording
+    the answer writes each note's Libris ID into the other's `distinct_from`,
+    so the pair is not offered again, after a rename or a merge (#142).
+    """
+    vault_path = _require_vault_path()
+    books = _books_on_the_shelf(vault_path)
+    paths = [_note_on_the_shelf(vault_path, name, books) for name in (first, second)]
+
+    try:
+        notes = [BookNote.read(path) for path in paths]
+    except FileNotFoundError as exc:
+        typer.echo(f"{Path(exc.filename or '').name} is gone. Nothing recorded.")
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        # Locked or unreadable by permissions, which is a message rather than a
+        # traceback (#164 review).
+        typer.echo(
+            f"{Path(exc.filename or '').name} could not be read "
+            f"({exc.strerror or exc}). Nothing recorded."
+        )
+        raise typer.Exit(code=1) from None
+    for path, note in zip(paths, notes):
+        if note is None:
+            typer.echo(f"{path.name} has no readable frontmatter. Nothing recorded.")
+            raise typer.Exit(code=1)
+
+    try:
+        record = record_two_books(notes[0], notes[1])
+    except NotTwoNotes as exc:
+        typer.echo(f"{exc} Nothing recorded.")
+        raise typer.Exit(code=1) from None
+    except (NoteChanged, FrontmatterUnreadable) as exc:
+        typer.echo(f"{exc} Nothing recorded.")
+        raise typer.Exit(code=1) from None
+    except FileNotFoundError:
+        typer.echo(f"{paths[0].name} is gone. Nothing recorded.")
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        typer.echo(
+            f"{paths[0].name} could not be written ({exc.strerror or exc}). "
+            "Nothing recorded."
+        )
+        raise typer.Exit(code=1) from None
+
+    if not record.written:
+        typer.echo(f"Already recorded: {first} and {second} are two books.")
+        return
+    typer.echo(f"Recorded: {first} and {second} are two books.")
+    if record.one_sided:
+        typer.echo(
+            f"  {record.one_sided}. The pair is still settled - {paths[0].name} "
+            "records it - but only that note says so."
+        )
 
 
 @app.command()
@@ -2234,6 +2313,8 @@ def _write_merge(
 _DECISION_LABELS = {
     "merged": "Merged",
     "would_merge": "Would merge",
+    "recorded": "Two books",
+    "would_record": "Would record as two books",
     "skipped": "Left alone",
     "conflicted": "Needs you",
     "drifted": "Moved on",
@@ -2273,12 +2354,20 @@ def _merge_from_decisions(
             typer.echo(f"  {_DECISION_LABELS[status]}: {outcome.detail}")
 
     typer.echo("")
-    for status in ("merged", "would_merge", "conflicted", "drifted", "skipped"):
+    for status in (
+        "merged",
+        "would_merge",
+        "recorded",
+        "would_record",
+        "conflicted",
+        "drifted",
+        "skipped",
+    ):
         if counts.get(status):
             typer.echo(f"  {_DECISION_LABELS[status]}: {counts[status]}")
 
-    if dry_run and counts.get("would_merge"):
-        typer.echo("\nDry run. Nothing written. Re-run without --dry-run to merge.")
+    if dry_run and (counts.get("would_merge") or counts.get("would_record")):
+        typer.echo("\nDry run. Nothing written. Re-run without --dry-run to apply.")
 
     if counts.get("conflicted"):
         typer.echo(

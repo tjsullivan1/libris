@@ -118,6 +118,10 @@ libris clean --rename
 Scan your vault for duplicate book notes matched by title, ISBN, or Google Books ID.
 ```bash
 libris duplicates
+
+# A pair it offers that is really two books - a companion volume, say.
+# Recorded on both notes, so it is not offered again.
+libris distinct "Unreasonable Hospitality - Will Guidara.md" "Unreasonable Hospitality The Field Guide - Will Guidara.md"
 ```
 
 ### 9. Merge Duplicates
@@ -488,6 +492,11 @@ alone. A re-read is not something the Library models.
 `superseded_ids` appears only on a note that has absorbed another in a merge. It is
 deliberately outside the nineteen: adding it to the canonical shape would write
 `superseded_ids: null` into every note on the Shelf to say nothing.
+
+`distinct_from` appears only on a note someone has recorded as a different book from another,
+with `libris distinct`. It holds the other note's Libris ID, and it's written on both notes, so
+`libris duplicates` stops offering the pair (ADR 0034). It stays outside the nineteen for the
+same reason.
 
 Fields Libris does not model — ones a plugin added, `aliases` and the like — are preserved
 untouched by every write path.

@@ -15,6 +15,7 @@ from titlecase import titlecase
 from .api import BookCandidate
 from .matching import normalize_for_match
 from .note_format import (
+    DISTINCT_FROM_FIELD,
     MODELLED_FIELDS,
     SUPERSEDED_IDS_FIELD,
     dump_frontmatter_yaml,
@@ -24,7 +25,7 @@ from .note_format import (
     parse_frontmatter_yaml,
     read_formats,
     read_isbn,
-    read_superseded_ids,
+    read_libris_ids,
     render_body,
     render_description_callout,
     validate_field_value,
@@ -130,7 +131,43 @@ class BookNote:
             The superseded identities, or an empty list. A note that has never
             absorbed another does not carry the field at all.
         """
-        return read_superseded_ids(self.frontmatter.get(SUPERSEDED_IDS_FIELD))
+        return read_libris_ids(self.frontmatter.get(SUPERSEDED_IDS_FIELD))
+
+    @property
+    def identities(self) -> set[str]:
+        """Every Libris ID this note answers for: its own and those it absorbed."""
+        live = {self.libris_id} if self.libris_id else set()
+        return live | set(self.superseded_ids)
+
+    @property
+    def distinct_from(self) -> list[str]:
+        """Identities a person has said are a different book from this one (#142).
+
+        Returns:
+            The recorded identities, or an empty list. A note nobody has settled
+            against another does not carry the field at all.
+        """
+        return read_libris_ids(self.frontmatter.get(DISTINCT_FROM_FIELD))
+
+    def is_recorded_distinct_from(self, other: "BookNote") -> bool:
+        """Whether either note records the other as a different book.
+
+        Either side is enough. Recording writes both notes, but two writes are
+        not one, and a record that half-landed should still hold rather than
+        send the pair back to be asked again. An entry naming an identity the
+        other note absorbed in a merge counts too: the book it named is now
+        that note (ADR 0014).
+
+        Args:
+            other: The note this one is being compared with.
+
+        Returns:
+            True when a person has settled the pair as two books.
+        """
+        return bool(
+            set(self.distinct_from) & other.identities
+            or set(other.distinct_from) & self.identities
+        )
 
     @property
     def title(self) -> str | None:
@@ -842,7 +879,9 @@ def find_duplicate_candidates(
     and keeps the variants the suite encodes (#136).
 
     Pairs that `find_duplicates` already reports are left out; they are settled,
-    not candidates.
+    not candidates. So are pairs a person has recorded as two books: this is a
+    report recomputed on every run, and without that record a "no" was asked
+    again every time (#142).
 
     Args:
         vault_path: The Shelf to search.
@@ -850,6 +889,53 @@ def find_duplicate_candidates(
             parsed the Shelf itself and then called `find_duplicates`, which
             parsed it again - 6,146 parses of a 3,073-note Shelf for one
             answer (#107).
+
+    Returns:
+        Pairs of Book Notes, shorter title first, ordered by author then title.
+    """
+    return [
+        pair
+        for pair in _candidate_shaped_pairs(vault_path, notes)
+        if not pair[0].is_recorded_distinct_from(pair[1])
+    ]
+
+
+def find_settled_candidates(
+    vault_path: Path, notes: list[BookNote] | None = None
+) -> list[list[BookNote]]:
+    """Find the pairs `find_duplicate_candidates` passes over as two books.
+
+    Leaving a settled pair out is right and also silent: a report that stops
+    naming a pair reads the same whether someone settled it or it was never
+    found. This is what lets it say how many it passed over.
+
+    Only pairs the candidate rule would otherwise offer are counted, not every
+    record on the Shelf. `libris distinct` accepts any two notes, and a title
+    can change after it is recorded, so counting every record claimed to have
+    passed over pairs that were never candidates (#164 review).
+
+    Args:
+        vault_path: The Shelf to search.
+        notes: The Shelf already parsed, when the caller has it.
+
+    Returns:
+        The settled pairs, in the order `find_duplicate_candidates` uses.
+    """
+    return [
+        pair
+        for pair in _candidate_shaped_pairs(vault_path, notes)
+        if pair[0].is_recorded_distinct_from(pair[1])
+    ]
+
+
+def _candidate_shaped_pairs(
+    vault_path: Path, notes: list[BookNote] | None
+) -> list[list[BookNote]]:
+    """Every pair the candidate rule matches, whether or not anyone settled it.
+
+    Args:
+        vault_path: The Shelf to search.
+        notes: The Shelf already parsed, or None to parse it here.
 
     Returns:
         Pairs of Book Notes, shorter title first, ordered by author then title.
