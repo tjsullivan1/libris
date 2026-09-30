@@ -38,7 +38,7 @@ from libris.service import (
     update_book,
     update_note,
 )
-from libris.store import ShelfStore
+from libris.store import ReplicaStore, ShelfStore
 
 
 def _candidate(**overrides) -> BookCandidate:
@@ -3666,3 +3666,19 @@ def test_near_matches_the_same_length_are_ordered_by_libris_id(tmp_path, open_st
     # Then the lower Libris ID comes first, so a limit cuts the tie the same way
     # in both locations
     assert [n.libris_id for n in near.notes] == ["01AAAA", "01ZZZZ"]
+
+
+def test_an_id_two_notes_claim_resolves_by_filename_whatever_the_read_order(tmp_path):
+    # Given two notes claiming one live Libris ID, as the real Shelf has held
+    first = _note_with_id(tmp_path, "a.md", "01SHARED", title="First")
+    _note_with_id(tmp_path, "b.md", "01SHARED", title="Second")
+
+    # And a store that lists them in the opposite order to their filenames, as
+    # `scandir` may on a filesystem that does not sort
+    notes = [BookNote.read(tmp_path / "b.md"), BookNote.read(first)]
+    replica = ReplicaStore.from_notes(notes)
+
+    # When the identity is resolved singly and in bulk
+    # Then both name the same note, the first by filename
+    assert find_by_libris_id(replica, "01SHARED").path.name == "a.md"
+    assert service.build_id_index(tmp_path)["01SHARED"].path.name == "a.md"

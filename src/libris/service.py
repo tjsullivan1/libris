@@ -224,18 +224,22 @@ def _first(notes: list[BookNote]) -> BookNote | None:
     Every ordering ends on the Libris ID (ADR 0033). Without it the answer is
     whichever note the store happened to list first - directory order locally,
     query order remotely - and two locations holding the same notes could name
-    different ones. A note with no Libris ID sorts last. Notes sharing one ID
-    keep the store's order; the remote never holds two, because sync refuses to
-    push while `find_id_collisions` reports any.
+    different ones. A note with no Libris ID sorts last.
     """
     if not notes:
         return None
     return min(notes, key=_by_libris_id)
 
 
-def _by_libris_id(note: BookNote) -> tuple[bool, str]:
-    """Sort key putting the lowest Libris ID first and a note with none last."""
-    return (note.libris_id is None, note.libris_id or "")
+def _by_libris_id(note: BookNote) -> tuple[bool, str, str]:
+    """Sort key putting the lowest Libris ID first and a note with none last.
+
+    Notes sharing an ID, or both lacking one, are then ordered by filename.
+    Without it they kept the order they were read in, which is `scandir` order
+    through the index and filename order through `list_books`, so a lookup and
+    `build_id_index` could name different notes for one contested identity.
+    """
+    return (note.libris_id is None, note.libris_id or "", note.path.name)
 
 
 def find_by_libris_id(store: LibraryStore, libris_id: str) -> BookNote | None:
@@ -1842,9 +1846,9 @@ class IdCollision:
     """Book Notes that claim one identity, and what distinguishes them.
 
     ADR 0001 makes the Libris ID what identifies a note across replicas. Two
-    notes holding one is not untidiness: `find_by_libris_id` returns whichever
-    the scan reaches first, so an Intent naming that id can apply to a different
-    book on a different run, and sync pushes both under one identity and keeps
+    notes holding one is not untidiness: `find_by_libris_id` returns the first of
+    them by filename, so an Intent naming that id applies to that book whichever
+    one the person meant, and sync pushes both under one identity and keeps
     whichever arrived last.
     """
 
