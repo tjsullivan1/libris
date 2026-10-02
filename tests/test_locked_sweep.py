@@ -844,3 +844,66 @@ def test_a_title_only_add_is_refused_while_a_note_cannot_be_read(tmp_path, lock_
     with pytest.raises(service.ShelfUnreadable, match=held.name):
         service.add_book(tmp_path, BookCandidate(title="Dune", authors=[]))
     assert list(tmp_path.glob("*.md")) == [held]
+
+
+def test_a_stale_cached_match_is_not_reported_as_already_held(tmp_path, lock_note):
+    # Given a long-running index that has read a note about Dune, which is then
+    # rewritten as Emma and locked before the index can read it again
+    from libris import service, shelf
+
+    shelf.forget_indexes()
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    shelf.index_for(tmp_path).notes()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    emma = create_book_note(
+        BookCandidate(title="Emma", authors=["Jane Austen"]), elsewhere
+    )
+    path.write_bytes(emma.read_bytes() + b"\nA longer note than Dune's.\n")
+    lock_note(path, reads=True)
+
+    # When Dune is added
+    # Then the stale parse is not taken as proof Dune is held: the note may no
+    # longer say Dune, so the add is refused rather than answered "already
+    # present" with a note that is Emma's
+    with pytest.raises(service.ShelfUnreadable, match=path.name):
+        service.add_book(
+            tmp_path, BookCandidate(title="Dune", authors=["Frank Herbert"])
+        )
+    shelf.forget_indexes()
+
+
+def test_a_note_unreadable_during_the_lookup_counts_though_it_reads_later(
+    tmp_path, monkeypatch
+):
+    # Given Dune on the Shelf, its note refused once - a lock released a moment
+    # later - so the duplicate lookup misses it and a later scan reads it
+    from libris import service, shelf
+
+    shelf.forget_indexes()
+    held = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    real_open = Path.open
+    refused = []
+
+    def _open_once_refused(self, mode="r", *args, **kwargs):
+        if self == held and not refused and not set("wax+") & set(mode):
+            refused.append(self)
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _open_once_refused)
+
+    # When Dune is added
+    # Then the add is refused: the lookup that found nothing was made without
+    # that note, and a later scan reading it does not make that lookup complete
+    with pytest.raises(service.ShelfUnreadable, match=held.name):
+        service.add_book(
+            tmp_path, BookCandidate(title="Dune", authors=["Frank Herbert"])
+        )
+    assert refused == [held]
+    assert list(tmp_path.glob("*.md")) == [held]
+    shelf.forget_indexes()

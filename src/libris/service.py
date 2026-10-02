@@ -629,9 +629,12 @@ def add_book(
         title=candidate.title,
         authors=candidate.authors,
     )
-    if existing is not None:
+    unread = store.unreadable()
+    if existing is not None and existing.path not in unread:
         # The exact check answers first, so a Book the Library provably holds is
         # reported as held rather than raised as a question with no useful answer.
+        # Not when the match is a note that could not be read: that is an
+        # earlier parse of it, and the note may no longer say this (#168 review).
         return AddResult(
             libris_id=existing.libris_id,
             path=existing.path,
@@ -640,7 +643,6 @@ def add_book(
             authors=existing.authors,
         )
 
-    unread = store.unreadable()
     if unread:
         # The duplicate check did not see these, and any of them may be this
         # Book: written now, it would be a second note for it (#168 review).
