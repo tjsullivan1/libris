@@ -28,25 +28,32 @@ from .markdown import BookNote
 # Shelf cost about 30 milliseconds.
 Fingerprint = tuple[int, int]
 
+# What `_describe` answers for an entry that is there but could not be looked
+# at: told apart from one that is gone, which is no note at all (#168 review).
+_UNREADABLE = "unreadable"
 
-def _describe(entry: os.DirEntry) -> Fingerprint | None:
+
+def _describe(entry: os.DirEntry) -> Fingerprint | str | None:
     """Describe a file precisely enough to notice it changing.
 
     Args:
         entry: A directory entry from the Shelf.
 
     Returns:
-        The fingerprint, or None if this is not a readable file. `stat` and
-        `is_file` both reach the filesystem and can fail on an entry that is
-        being written or removed while the Shelf is listed, which is ordinary
-        on a vault that Obsidian and a sync client also write to.
+        The fingerprint; None if this is not a file, or was removed while the
+        Shelf was listed - ordinary on a vault Obsidian and a sync client also
+        write to; or `_UNREADABLE` if it is there and could not be looked at.
+        Folded into None, a note denied this way was left out of every answer
+        with nothing saying so (#168 review).
     """
     try:
         if not entry.is_file():
             return None
         info = entry.stat()
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        return _UNREADABLE
     return (info.st_mtime_ns, info.st_size)
 
 
@@ -110,6 +117,13 @@ class ShelfIndex:
             seen.add(name)
 
             cached = self._notes.get(name)
+            if fingerprint == _UNREADABLE:
+                # Treated as a read that failed: the last parse stands, and the
+                # answer says it is incomplete.
+                if cached is not None:
+                    found.append(cached)
+                self._unread.append(Path(path))
+                continue
             if cached is not None and self._fingerprints.get(name) == fingerprint:
                 found.append(cached)
                 continue
@@ -119,13 +133,19 @@ class ShelfIndex:
             try:
                 note = BookNote.read(Path(path))
             except FileNotFoundError:
-                # Gone: not on the Shelf, so nothing to answer for.
-                if cached is not None:
-                    found.append(cached)
+                # Listed, then gone. Not answered for from the cache: it is not
+                # on the Shelf under this name, and a lookup must not find a
+                # deleted note (#168 review). But a rename looks exactly like
+                # this, and the new name may not be in this listing, so the
+                # answer is incomplete as well - an add waits for a retry
+                # rather than writing a second note for a Book being renamed.
+                self._notes.pop(name, None)
+                self._fingerprints.pop(name, None)
+                self._unread.append(Path(path))
                 continue
             except OSError:
-                # The file moved, vanished or was locked between the listing and
-                # the read - Obsidian saving, a sync client, or Libris itself.
+                # The file was locked or denied between the listing and the read
+                # - Obsidian saving, a sync client, or Libris itself.
                 # The last parse stands rather than the Book being reported
                 # absent: a duplicate check that misses writes a second note and
                 # nothing ever surfaces it, where a momentarily stale title

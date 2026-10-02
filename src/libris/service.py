@@ -663,6 +663,13 @@ def add_book(
                 near_match_check=check,
             )
 
+    # Asked again just before writing: the near-match lookup scanned the Shelf
+    # once more, and a note that could not be read then has not been ruled out
+    # either (#168 review).
+    unread = store.unreadable()
+    if unread:
+        raise ShelfUnreadable(unread, "whether the Library already holds this book")
+
     # A check that could not run does not stop the write: ADR 0026 stops on a
     # Near Match there is to show, and there is none. The result says the check
     # did not run, so the Surface can tell the person rather than imply that

@@ -907,3 +907,129 @@ def test_a_note_unreadable_during_the_lookup_counts_though_it_reads_later(
     assert refused == [held]
     assert list(tmp_path.glob("*.md")) == [held]
     shelf.forget_indexes()
+
+
+def test_a_note_unreadable_during_the_near_match_lookup_stops_the_write(
+    tmp_path, monkeypatch, lock_note
+):
+    # Given a note about Emma, read by the exact check, then rewritten as Dune's
+    # deluxe edition - a near match for Dune - and locked before the near-match
+    # lookup can read it again. That lookup sees only the old parse, Emma.
+    from libris import service, shelf
+
+    shelf.forget_indexes()
+    held = create_book_note(
+        BookCandidate(title="Emma", authors=["Jane Austen"]), tmp_path
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    deluxe = create_book_note(
+        BookCandidate(title="Dune: Deluxe Edition", authors=["Frank Herbert"]),
+        elsewhere,
+    )
+    real_find_similar = service.find_similar
+
+    def _locked_first(store, **kwargs):
+        held.write_bytes(deluxe.read_bytes() + b"\nLonger than Emma's note.\n")
+        lock_note(held, reads=True)
+        return real_find_similar(store, **kwargs)
+
+    monkeypatch.setattr(service, "find_similar", _locked_first)
+
+    # When Dune is added, asking for near matches as a model's add does
+    # Then nothing is written: the near-match lookup that found nothing could
+    # not see the note most like it
+    with pytest.raises(service.ShelfUnreadable, match=held.name):
+        service.add_book(
+            tmp_path,
+            BookCandidate(title="Dune", authors=["Frank Herbert"]),
+            stop_on_near_match=True,
+        )
+    assert list(tmp_path.glob("*.md")) == [held]
+    shelf.forget_indexes()
+
+
+def test_a_note_whose_details_cannot_be_read_is_not_left_out_silently():
+    # Given a directory entry that is there, but whose details are denied
+    from libris import shelf
+
+    class _Denied:
+        def is_file(self):
+            return True
+
+        def stat(self):
+            raise PermissionError(13, "Permission denied")
+
+    class _Gone:
+        def is_file(self):
+            return True
+
+        def stat(self):
+            raise FileNotFoundError(2, "No such file")
+
+    # When each is described
+    # Then the denied one is told apart from one that is gone: folded together,
+    # the denied note was left out of every answer with nothing saying so
+    assert shelf._describe(_Denied()) == shelf._UNREADABLE
+    assert shelf._describe(_Gone()) is None
+
+
+def test_the_index_counts_a_note_whose_details_cannot_be_read(tmp_path, monkeypatch):
+    # Given a Shelf of two notes, one whose details are denied
+    from libris import shelf
+
+    shelf.forget_indexes()
+    create_book_note(BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path)
+    denied = create_book_note(
+        BookCandidate(title="Emma", authors=["Jane Austen"]), tmp_path
+    )
+    real = shelf._describe
+    monkeypatch.setattr(
+        shelf,
+        "_describe",
+        lambda entry: shelf._UNREADABLE if entry.name == denied.name else real(entry),
+    )
+
+    # When the index is asked for its notes
+    index = shelf.index_for(tmp_path)
+    titles = [note.title for note in index.notes()]
+
+    # Then the denied note is listed as unreadable, not silently absent
+    assert titles == ["Dune"]
+    assert index.unreadable == [denied]
+    shelf.forget_indexes()
+
+
+def test_a_note_deleted_mid_scan_is_not_answered_for_from_the_cache(
+    tmp_path, monkeypatch
+):
+    # Given an index that has read Dune's note, which then changes and is
+    # removed between the listing and the read
+    from libris import shelf
+    from libris.markdown import BookNote
+
+    shelf.forget_indexes()
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    index = shelf.index_for(tmp_path)
+    index.notes()
+    path.write_bytes(path.read_bytes() + b"\nEdited.\n")
+    real_read = BookNote.read
+
+    def _removed_first(file_path):
+        if file_path == path:
+            raise FileNotFoundError(2, "No such file", str(file_path))
+        return real_read(file_path)
+
+    monkeypatch.setattr(shelf.BookNote, "read", staticmethod(_removed_first))
+
+    # When the index is asked again
+    notes = index.notes()
+
+    # Then the deleted note is not answered for from the cache - a lookup must
+    # not find it - but the answer says it is incomplete, since a rename looks
+    # the same and the new name may not be in this listing
+    assert notes == []
+    assert index.unreadable == [path]
+    shelf.forget_indexes()
