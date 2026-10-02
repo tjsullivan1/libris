@@ -1,0 +1,63 @@
+# Libris is its own authorization server, and Google says who you are
+
+Supersedes the Entra half of ADR 0004. Narrows ADR 0007 and ADR 0020. Settles the approach for #171.
+
+ADR 0004 had Entra sign in the person and ADR 0007 had the hosted MCP server sit behind it. Checking
+what the two target clients require, before building anything, showed that would not work as written:
+
+- **Claude** reaches an authorization server through Dynamic Client Registration, a Client ID
+  Metadata Document, or a client ID typed in by hand. Entra supports neither of the first two. Claude
+  also sends the MCP server URL as the token's resource, and Entra accepts a resource only as an
+  Application ID URI on a domain the tenant has verified. That rules out the Container App's own
+  `*.azurecontainerapps.io` hostname, so this path needs a custom domain before anything works.
+- **Gemini's** consumer app (custom apps in Spark) expects the full chain: protected resource
+  metadata, authorization server metadata, Dynamic Client Registration and PKCE. Without DCR it falls
+  back to asking for a client ID and secret, and that fallback is where people report breakage.
+
+Both clients work by default with DCR, and Entra does not offer it.
+
+**So Libris is the authorization server.** The MCP SDK ships the endpoints: discovery, `/register`,
+`/authorize`, `/token`, and the `401` that points a client at the metadata. Claude and Gemini talk
+OAuth only to Libris, and Libris issues tokens whose audience is its own URL, so no custom domain is
+needed. Libris implements the provider behind those endpoints and nothing more.
+
+**Google says who is at the keyboard.** At `/authorize`, Libris sends the browser to Google, reads the
+ID token Google returns, and issues a code only if the account's `sub` is the one allowed. ADR 0004's
+single question, "is this Tim", now has a Google answer instead of an Entra one. The identity was a
+Gmail account all along, and Entra federated to Google would have added a tenant and a hop without
+adding anything. The check uses `sub`, not the email address, because Google can reassign an address
+but never a `sub`. `email_verified` must also be true.
+
+The ID token comes straight from Google's token endpoint over TLS, in exchange for Libris's client
+secret, so its signature is not checked separately. OIDC Core 3.1.3.7 allows exactly that for a token
+received this way. Its issuer, audience and expiry are still checked.
+
+**A consent page stands between `/authorize` and Google.** Registration is open by design, and Google
+signs in silently a person who is already signed in. Without an interruption, anyone could register a
+client with their own redirect URI, send a link, and receive a code for this Library. The consent page
+names the client and the host it will be sent back to, as the MCP authorization spec requires. The
+page sets a `SameSite=Strict` cookie that its own form must return, so a page on another site cannot
+submit the form for you.
+
+**What is kept, and where.** Access tokens are signed JWTs that last an hour and are checked by their
+signature alone. Registered clients and refresh tokens must survive the app scaling to zero, or every
+cold start would sign Claude and Gemini out, so they live in Cosmos. ADR 0006 brings Cosmos to the
+project anyway. Refresh tokens are stored as hashes and rotate on every use, as OAuth 2.1 requires for
+public clients. Codes and sign-ins in progress live in memory for minutes, which holds only while the
+Container App runs a single replica. That limit is stated in the Terraform, not left as an assumption.
+
+**Entra stays, for Azure only.** Terraform and `libris sync` reach Azure as the person's Azure account,
+and the Container App reaches Cosmos and Key Vault as its managed identity (ADR 0006). None of those
+are the sign-in a client presents.
+
+## Consequences
+
+- ADR 0020's three credentials become: nothing on stdio, a bearer token on the loopback daemon, and a
+  Libris-issued OAuth token on the Container App. A Surface pointed at the remote, including the Edge
+  extension one day, signs in through the same flow as Claude.
+- Libris now holds security-sensitive code. It is kept small, it delegates everything the SDK already
+  does, and its tests run the whole flow end to end against a fake Google.
+- The allowed `sub` is configuration, not code. A sign-in by any other account is refused, and the
+  refusal page shows the `sub` it saw, which is also how the first deployment finds the right value.
+- Should multi-user access ever happen (ADR 0004), the allowlist and the consent page are where it
+  starts, not the token format.

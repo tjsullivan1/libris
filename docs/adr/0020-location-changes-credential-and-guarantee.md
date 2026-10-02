@@ -31,3 +31,5 @@ remote is configuration rather than a rewrite" holds for the paths and, with opt
 permissions, for the browser's permission model (ADR 0019) - it does not hold for the
 credential. ADR 0007's "the tool definitions do not change between them" holds for the
 signatures and not for what they answer.
+
+Narrowed by ADR 0035: the Container App credential is a Libris-issued OAuth token, signed in through Google, not Entra.
