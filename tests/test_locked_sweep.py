@@ -553,6 +553,45 @@ def test_an_import_reports_a_note_left_damaged_and_goes_on(tmp_path, monkeypatch
     assert read_frontmatter(kept)["status"] == "Read"
 
 
+def test_an_import_creates_nothing_while_a_note_it_could_not_read_may_match(
+    tmp_path, monkeypatch, lock_note
+):
+    # Given a Shelf where Dune's note is locked against reading, and an export
+    # naming Dune, Emma (whose note is readable) and a book new to the Shelf
+    import json
+
+    vault, export, locked, kept = _import_two_finished(tmp_path)
+    export.write_text(
+        json.dumps(
+            [
+                {"title": "Dune", "author": "Frank Herbert", "finished": "Yes"},
+                {"title": "Emma", "author": "Jane Austen", "finished": "Yes"},
+                {"title": "Middlemarch", "author": "George Eliot", "finished": "No"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    lock_note(locked, reads=True)
+
+    # When it is applied
+    result = runner.invoke(app, ["import", str(export), "--apply"])
+
+    # Then the import runs rather than ending on the locked note, Emma is still
+    # updated, and neither unmatched book is created: Dune's would be a second
+    # note for a Book the Shelf already holds, and nothing can tell it from
+    # Middlemarch until the locked note can be read
+    assert result.exit_code == 0, result.output
+    assert f"! {locked.name}" in result.output
+    assert "2 book(s) matched no note and were not added" in result.output
+    assert "? Dune by Frank Herbert" in result.output
+    assert "0 new book(s) added" in result.output
+    assert read_frontmatter(kept)["status"] == "Read"
+    assert sorted(p.name for p in vault.glob("*.md")) == sorted(
+        [locked.name, kept.name]
+    )
+
+
 # --- what a failure is said to be (#168 review) ---
 
 

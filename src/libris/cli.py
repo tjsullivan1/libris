@@ -2688,6 +2688,25 @@ def import_cmd(
         for _book, path in result.damaged_books:
             typer.echo(f"  ! {path.name}")
 
+    if result.unreadable_notes:
+        # The duplicate check could not see these, so nothing new was created:
+        # any book it found no match for may be one of them (#168 review).
+        typer.echo(
+            f"\n{len(result.unreadable_notes)} note(s) on the Shelf could not be "
+            "read, so could not be checked for a match:"
+        )
+        for path in result.unreadable_notes:
+            typer.echo(f"  ! {path.name}")
+        if result.held_books:
+            typer.echo(
+                f"{len(result.held_books)} book(s) matched no note and were not "
+                f"{'added' if apply else 'counted as new'} - each may be one of "
+                "those notes. Fix what stops them being read and run the import "
+                "again:"
+            )
+            for book in result.held_books:
+                typer.echo(f"  ? {book.title} by {', '.join(book.authors)}")
+
     if not apply and (result.new_books or result.updated_books):
         typer.echo("\nRun with --apply to execute these changes.")
 
