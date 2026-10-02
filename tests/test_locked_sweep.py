@@ -792,3 +792,55 @@ def test_adding_a_book_whose_note_could_not_be_read_writes_nothing(tmp_path, loc
             tmp_path, BookCandidate(title="Dune", authors=["Frank Herbert"])
         )
     assert list(tmp_path.glob("*.md")) == [held]
+
+
+def test_an_add_is_refused_when_a_cached_note_changed_and_cannot_be_reread(
+    tmp_path, lock_note
+):
+    # Given a long-running index that has read a note about Emma, which is then
+    # rewritten as Dune and locked before the index can read it again
+    from libris import service, shelf
+
+    shelf.forget_indexes()
+    path = create_book_note(
+        BookCandidate(title="Emma", authors=["Jane Austen"]), tmp_path
+    )
+    shelf.index_for(tmp_path).notes()
+    # Dune's text is made off the Shelf, then written over Emma's note. Longer,
+    # so the index sees the size change and tries to read it again.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    dune = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), elsewhere
+    )
+    path.write_bytes(dune.read_bytes() + b"\nA longer note than Emma's.\n")
+    lock_note(path, reads=True)
+
+    # When Dune is added
+    # Then the add is refused. The index still answers for the note as Emma,
+    # which it no longer is, so finding no Dune rules nothing out
+    with pytest.raises(service.ShelfUnreadable, match=path.name):
+        service.add_book(
+            tmp_path, BookCandidate(title="Dune", authors=["Frank Herbert"])
+        )
+    assert sorted(p.name for p in tmp_path.glob("*.md")) == [path.name]
+    shelf.forget_indexes()
+
+
+def test_a_title_only_add_is_refused_while_a_note_cannot_be_read(tmp_path, lock_note):
+    # Given a locked note, and a Book named by its title alone - no author, ISBN
+    # or volume id, so the exact duplicate check asks the Shelf nothing
+    from libris import service, shelf
+
+    shelf.forget_indexes()
+    held = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    lock_note(held, reads=True)
+
+    # When it is added
+    # Then the add is still refused: no question asked is not a question
+    # answered
+    with pytest.raises(service.ShelfUnreadable, match=held.name):
+        service.add_book(tmp_path, BookCandidate(title="Dune", authors=[]))
+    assert list(tmp_path.glob("*.md")) == [held]

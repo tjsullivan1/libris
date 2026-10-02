@@ -65,17 +65,17 @@ class ShelfIndex:
     # Files whose frontmatter would not parse. Remembered so a broken note is
     # not re-read on every question, and re-read the moment it is edited.
     _unparseable: dict[str, Fingerprint] = field(default_factory=dict)
-    # Notes the last call could not read and had no earlier parse of, so left
-    # out of its answer. A question that found nothing has not ruled them out
-    # (#168 review).
+    # Notes the last call could not read as they now stand - left out, or
+    # answered for by an earlier parse of what they used to say. Either way a
+    # question that found nothing has not ruled them out (#168 review).
     _unread: list[Path] = field(default_factory=list)
 
     @property
     def unreadable(self) -> list[Path]:
-        """The notes the last `notes()` left out because it could not read them.
+        """The notes the last `notes()` could not read as they now stand.
 
         Returns:
-            Their paths, empty when every note on the Shelf was answered for.
+            Their paths, empty when every note was answered for as it is.
         """
         return list(self._unread)
 
@@ -133,10 +133,11 @@ class ShelfIndex:
                 # tries again rather than trusting what it could not read.
                 if cached is not None:
                     found.append(cached)
-                else:
-                    # Nothing to stand in for it, so the answer is incomplete,
-                    # and says so (#168 review).
-                    self._unread.append(Path(path))
+                # Unread either way. A cached parse is of what the note used to
+                # say: edited from Emma to Dune and then locked, it still answers
+                # as Emma, and a check for Dune that trusted it would write a
+                # second Dune (#168 review).
+                self._unread.append(Path(path))
                 continue
 
             if note is None:

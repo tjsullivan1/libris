@@ -176,12 +176,19 @@ class ShelfStore:
         return index_for(self.vault_path).notes()
 
     def unreadable(self) -> list[Path]:
-        """The notes the last question could not read, so did not consider.
+        """The notes on the Shelf that cannot be read as they now stand.
+
+        Scans for itself rather than reporting the last question's scan: a
+        lookup with nothing to look up by asks no question at all, and the last
+        scan may then be another request's, or none (#168 review). A scan costs
+        a stat per note; only notes that changed are read.
 
         Returns:
             Their paths. A question that found nothing has not ruled them out.
         """
-        return index_for(self.vault_path).unreadable
+        index = index_for(self.vault_path)
+        index.notes()
+        return index.unreadable
 
     def _titled(self, status: str | None) -> list[BookNote]:
         return [n for n in self._notes() if n.title and _in_status(n, status)]
