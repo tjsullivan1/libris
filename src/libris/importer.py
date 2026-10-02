@@ -9,6 +9,7 @@ from .api import UNKNOWN_AUTHOR, BookCandidate
 from .markdown import (
     BookNote,
     FrontmatterUnreadable,
+    NoteWriteFailed,
     create_book_note,
     list_books,
     set_frontmatter_fields,
@@ -117,11 +118,16 @@ def parse_import_file(
     return parser(path)
 
 
-def _build_vault_index(vault_path: Path) -> dict[tuple[str, str], BookNote]:
+def _build_vault_index(
+    vault_path: Path, unreadable: list[Path] | None = None
+) -> dict[tuple[str, str], BookNote]:
     """Build an index of Book Notes keyed by normalized (title, first_author).
 
     Args:
         vault_path: The Shelf to index.
+        unreadable: Collects the notes that are on the Shelf but could not be
+            read, when given. The index cannot say what they hold, so it is
+            incomplete while any are listed (#168 review).
 
     Returns:
         A mapping from normalized title and first author to the Book Note. Notes
@@ -129,7 +135,17 @@ def _build_vault_index(vault_path: Path) -> dict[tuple[str, str], BookNote]:
     """
     index: dict[tuple[str, str], BookNote] = {}
     for book_path in list_books(vault_path):
-        note = BookNote.read(book_path)
+        try:
+            note = BookNote.read(book_path)
+        except FileNotFoundError:
+            # Listed, then gone. Not on the Shelf, so nothing to match against.
+            continue
+        except OSError:
+            # There, but locked or denied. Raised, it ended the import before
+            # any book was looked at (#168 review).
+            if unreadable is not None:
+                unreadable.append(book_path)
+            continue
         if note is None or note.title is None or note.first_author is None:
             continue
 
@@ -148,6 +164,18 @@ class ImportResult:
         default_factory=list
     )
     skipped_books: List[ImportBook] = field(default_factory=list)
+    # Due an update that could not be written: unparseable, gone, or not
+    # accessible. Counted as skipped, a locked note read as one already up to
+    # date (#168 review).
+    unapplied_books: List[Tuple[ImportBook, Path]] = field(default_factory=list)
+    # Due an update whose write failed partway and could not be put back.
+    damaged_books: List[Tuple[ImportBook, Path]] = field(default_factory=list)
+    # Notes on the Shelf that could not be read, so could not be matched.
+    unreadable_notes: List[Path] = field(default_factory=list)
+    # Books that matched no note while some notes could not be read. Any of
+    # them may be one of those notes, so none is created: a second note for a
+    # Book is the harm a duplicate check exists to prevent (#168 review).
+    held_books: List[ImportBook] = field(default_factory=list)
 
 
 def _check_duplicate(
@@ -219,13 +247,15 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
     # never recreates a note that has gone.
     try:
         set_frontmatter_fields(path, changes)
-    except (FrontmatterUnreadable, FileNotFoundError):
+    except (FrontmatterUnreadable, OSError):
         # Report the note as untouched rather than guessing at its shape. There
         # is deliberately no regex fallback for broken YAML: format is a list
         # (ADR 0017), and a line-level substitution would write a Python repr and
         # strand the block items below it, turning a note we could not parse into
         # one nobody can. An import run writes many notes and must not stop on
-        # one it cannot read, nor on one moved after the Shelf was scanned.
+        # one it cannot read, nor on one moved after the Shelf was scanned, nor
+        # on one locked or read-only - `OSError`, which a gone note's
+        # `FileNotFoundError` is one kind of (#167).
         return False
     return True
 
@@ -245,13 +275,15 @@ def run_import(
     if limit > 0:
         books = books[:limit]
 
-    vault_index = _build_vault_index(vault_path)
     result = ImportResult()
+    vault_index = _build_vault_index(vault_path, result.unreadable_notes)
 
     for book in books:
         dup = _check_duplicate(book, vault_index)
 
-        if dup is None:
+        if dup is None and result.unreadable_notes:
+            result.held_books.append(book)
+        elif dup is None:
             result.new_books.append(book)
             if apply:
                 overrides = {"format": book.format} if book.format else None
@@ -264,10 +296,19 @@ def run_import(
         else:
             dup_path, _, updates = dup
             if updates:
-                result.updated_books.append((book, dup_path, updates))
                 if apply:
-                    if not _apply_updates(dup_path, book, updates):
-                        result.skipped_books.append(book)
+                    # Caught here rather than in `_apply_updates`, which answers
+                    # only whether the note is untouched: this one may not be,
+                    # and an import must not stop on one note (#168 review).
+                    try:
+                        applied = _apply_updates(dup_path, book, updates)
+                    except NoteWriteFailed:
+                        result.damaged_books.append((book, dup_path))
+                        continue
+                    if not applied:
+                        result.unapplied_books.append((book, dup_path))
+                        continue
+                result.updated_books.append((book, dup_path, updates))
             else:
                 result.skipped_books.append(book)
 

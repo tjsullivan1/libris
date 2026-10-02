@@ -4,7 +4,7 @@ import errno
 import hashlib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Dict, Literal, Optional
@@ -1096,9 +1096,9 @@ def ensure_frontmatter_fields(
             del data[old_name]
             updated = True
 
-    for field, default in DEFAULT_FRONTMATTER.items():
-        if field not in data:
-            data[field] = default
+    for key, default in DEFAULT_FRONTMATTER.items():
+        if key not in data:
+            data[key] = default
             updated = True
 
     # A note that reached us without an identity gets one here, so a book typed
@@ -1389,7 +1389,9 @@ def update_wikilinks_in_vault(
 
     A linking note removed while the sweep runs is skipped. It holds no link
     left to fix, and one note moving must not stop the rest of the vault being
-    updated - nor be written back into existence (#128).
+    updated - nor be written back into existence (#128). A note that is there
+    but cannot be read or written is skipped too, for the same reason;
+    `sweep_wikilinks` says which those were.
 
     Args:
         vault_root: The vault to sweep.
@@ -1400,7 +1402,58 @@ def update_wikilinks_in_vault(
     Returns:
         How many notes had a link updated.
     """
-    updated_count = 0
+    return sweep_wikilinks(vault_root, old_stem, new_stem, exclude).updated
+
+
+@dataclass
+class LinkSweep:
+    """What pointing a vault's links at a renamed note did, and could not do.
+
+    Attributes:
+        updated: How many notes had a link updated.
+        unlinked: Notes read and found to link to the old name, whose write
+            then could not be made. Each still links to it.
+        unchecked: Notes that could not be read, so whether they link to the
+            old name is not known (#168 review). Most will not: every note in
+            the vault is read to find out.
+        damaged: Notes whose write failed partway and could not be put back.
+    """
+
+    updated: int = 0
+    unlinked: list[Path] = field(default_factory=list)
+    unchecked: list[Path] = field(default_factory=list)
+    damaged: list[Path] = field(default_factory=list)
+
+
+class _LinksUnread(Exception):
+    """A note the sweep could not read, so cannot say whether it links."""
+
+
+def sweep_wikilinks(
+    vault_root: Path, old_stem: str, new_stem: str, exclude: Optional[Path] = None
+) -> LinkSweep:
+    """Update all wikilinks from old_stem to new_stem, naming the notes it could not.
+
+    Runs after the rename has happened, so nothing here may stop it partway: a
+    locked or read-only linking note ended the sweep, and the caller reported a
+    rename that had happened as a note that could not be accessed, with every
+    later link left pointing at a name nothing holds (#167). Such a note is
+    passed over and named instead, so its link can be fixed by hand. A note
+    whose write failed partway and could not be put back is named apart from
+    those: its link is the least of what may be wrong with it (#168 review).
+    So is a note that could not be read at all, which may not link to the old
+    name at all - and one not UTF-8, which ended the sweep the same way.
+
+    Args:
+        vault_root: The vault to sweep.
+        old_stem: The renamed note's old filename, without its extension.
+        new_stem: Its new filename, without its extension.
+        exclude: A note to leave unswept, usually the renamed note itself.
+
+    Returns:
+        What was updated, and each note that was not, by why.
+    """
+    sweep = LinkSweep()
     exclude_resolved = exclude.resolve() if exclude else None
     for root, dirnames, filenames in os.walk(vault_root):
         # Skip hidden directories (.obsidian, .git, etc.) before descending into them.
@@ -1414,10 +1467,16 @@ def update_wikilinks_in_vault(
                 continue
             try:
                 if _sweep_one_note(md_file, old_stem, new_stem):
-                    updated_count += 1
+                    sweep.updated += 1
             except FileNotFoundError:
                 continue
-    return updated_count
+            except _LinksUnread:
+                sweep.unchecked.append(md_file)
+            except OSError:
+                sweep.unlinked.append(md_file)
+            except NoteWriteFailed:
+                sweep.damaged.append(md_file)
+    return sweep
 
 
 def _sweep_one_note(md_file: Path, old_stem: str, new_stem: str) -> bool:
@@ -1442,9 +1501,18 @@ def _sweep_one_note(md_file: Path, old_stem: str, new_stem: str) -> bool:
     Raises:
         FileNotFoundError: If the note is gone when read, or removed before the
             sweep writes it. It is never recreated (#128).
+        _LinksUnread: If the note could not be read, or is not UTF-8. Whether
+            it links to the old name is not known.
+        OSError: If the note links to the old name and could not be written.
+        NoteWriteFailed: If the write failed partway and could not be undone.
     """
     for _ in range(3):
-        content, fingerprint = read_note_with_fingerprint(md_file)
+        try:
+            content, fingerprint = read_note_with_fingerprint(md_file)
+        except FileNotFoundError:
+            raise
+        except (OSError, UnicodeDecodeError) as exc:
+            raise _LinksUnread(md_file) from exc
         new_content = content.replace(f"[[{old_stem}]]", f"[[{new_stem}]]")
         new_content = new_content.replace(f"[[{old_stem}|", f"[[{new_stem}|")
         new_content = new_content.replace(f"[[{old_stem}#", f"[[{new_stem}#")
@@ -1476,6 +1544,15 @@ class RenameResult:
     status: RenameStatus
     new_path: Optional[Path] = None
     detail: Optional[str] = None
+    # Notes found to link to the old name whose links could not be written
+    # (#167). The rename itself happened.
+    unlinked: tuple[Path, ...] = ()
+    # Notes that could not be read, so may or may not link to the old name
+    # (#168 review).
+    unchecked: tuple[Path, ...] = ()
+    # Notes whose link update failed partway and could not be put back, so may
+    # be damaged (#168 review).
+    damaged: tuple[Path, ...] = ()
 
 
 def rename_book_file(
@@ -1518,5 +1595,11 @@ def rename_book_file(
     file_path.rename(new_path)
 
     # Update wikilinks across the vault
-    update_wikilinks_in_vault(search_root, old_stem, new_stem, exclude=new_path)
-    return RenameResult(status="renamed", new_path=new_path)
+    sweep = sweep_wikilinks(search_root, old_stem, new_stem, exclude=new_path)
+    return RenameResult(
+        status="renamed",
+        new_path=new_path,
+        unlinked=tuple(sweep.unlinked),
+        unchecked=tuple(sweep.unchecked),
+        damaged=tuple(sweep.damaged),
+    )

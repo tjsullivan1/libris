@@ -208,6 +208,69 @@ def test_a_book_gone_before_the_write_comes_back_readable(shelved, monkeypatch):
     assert note.path.name in text(result)
 
 
+def test_a_locked_book_comes_back_readable_and_not_as_a_miss(shelved, lock_note):
+    # Given a book whose note is locked against writing - open in another
+    # program, or read-only
+    note = next(
+        n
+        for n in (BookNote.read(p) for p in Path(shelved).glob("*.md"))
+        if n.title == "Dune"
+    )
+    lock_note(note.path, writes=True)
+
+    # When it is updated
+    result = call("update_book", {"libris_id": note.libris_id, "status": "Read"})
+
+    # Then the tool names the note and says it could not be accessed - not that
+    # the Library holds no such book, which would send an agent to add it again
+    # (#167)
+    assert result.is_error
+    assert f"{note.path.name} could not be accessed" in text(result)
+    assert "No Book Note" not in text(result)
+
+
+def test_a_book_locked_against_reading_is_not_reported_absent(shelved, lock_note):
+    # Given a book whose note is locked against reading, so the index cannot
+    # see what it holds
+    note = next(
+        n
+        for n in (BookNote.read(p) for p in Path(shelved).glob("*.md"))
+        if n.title == "Dune"
+    )
+    lock_note(note.path, reads=True)
+
+    # When it is updated by its identity
+    result = call("update_book", {"libris_id": note.libris_id, "status": "Read"})
+
+    # Then the tool says it could not tell, naming the note, rather than that
+    # the Library holds no such book (#168 review)
+    assert result.is_error
+    assert "could not be read" in text(result)
+    assert note.path.name in text(result)
+    assert "No Book Note" not in text(result)
+
+
+def test_an_add_is_refused_while_a_note_it_could_not_read_may_be_the_book(
+    shelved, monkeypatch, lock_note
+):
+    # Given Dune on the Shelf, its note locked against reading
+    held = next(p for p in Path(shelved).glob("*.md") if p.name.startswith("Dune"))
+    lock_note(held, reads=True)
+    item = {"id": "v1", "volumeInfo": {"title": "Dune", "authors": ["Frank Herbert"]}}
+    monkeypatch.setattr("libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(item))
+    before = sorted(Path(shelved).glob("*.md"))
+
+    # When the model adds Dune
+    result = call("add_book", {"google_books_id": "v1"})
+
+    # Then nothing is added, and the model is told why: the duplicate check could
+    # not see the note, and a second note for one Book is what it prevents
+    assert result.is_error
+    assert held.name in text(result)
+    assert "Nothing was added" in text(result)
+    assert sorted(Path(shelved).glob("*.md")) == before
+
+
 def test_a_value_the_library_rejects_names_what_is_allowed(shelved):
     # Given a status the schema would have caught, sent anyway
     result = call("update_book", {"libris_id": "x", "status": "Finished"})

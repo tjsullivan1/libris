@@ -616,6 +616,8 @@ def add_book(
             define.
         ValueError: If an override names a field the canonical schema has no
             place for.
+        ShelfUnreadable: If no note it could read holds the Book, and some
+            notes could not be read. Nothing is written.
     """
     # Writes land on the Shelf, so the duplicate check is asked of the live Shelf:
     # the stronger guarantee, true at the moment of the write (ADR 0010).
@@ -627,9 +629,12 @@ def add_book(
         title=candidate.title,
         authors=candidate.authors,
     )
-    if existing is not None:
+    unread = store.unreadable()
+    if existing is not None and existing.path not in unread:
         # The exact check answers first, so a Book the Library provably holds is
         # reported as held rather than raised as a question with no useful answer.
+        # Not when the match is a note that could not be read: that is an
+        # earlier parse of it, and the note may no longer say this (#168 review).
         return AddResult(
             libris_id=existing.libris_id,
             path=existing.path,
@@ -637,6 +642,11 @@ def add_book(
             title=existing.title,
             authors=existing.authors,
         )
+
+    if unread:
+        # The duplicate check did not see these, and any of them may be this
+        # Book: written now, it would be a second note for it (#168 review).
+        raise ShelfUnreadable(unread, "whether the Library already holds this book")
 
     check: NearMatchCheck | None = None
     if stop_on_near_match:
@@ -652,6 +662,13 @@ def add_book(
                 near_matches=near.notes,
                 near_match_check=check,
             )
+
+    # Asked again just before writing: the near-match lookup scanned the Shelf
+    # once more, and a note that could not be read then has not been ruled out
+    # either (#168 review).
+    unread = store.unreadable()
+    if unread:
+        raise ShelfUnreadable(unread, "whether the Library already holds this book")
 
     # A check that could not run does not stop the write: ADR 0026 stops on a
     # Near Match there is to show, and there is none. The result says the check
@@ -669,6 +686,26 @@ def add_book(
         authors=note.authors if note else candidate.authors,
         near_match_check=check,
     )
+
+
+class ShelfUnreadable(Exception):
+    """A question about the Shelf cannot be answered, because notes could not be read.
+
+    Raised where an answer of "none" would be acted on: an update reporting a
+    Book absent that a locked note holds, or an add creating a second note for
+    it (#168 review).
+
+    Attributes:
+        paths: The notes that could not be read.
+    """
+
+    def __init__(self, paths: list[Path], question: str) -> None:
+        self.paths = paths
+        names = ", ".join(path.name for path in paths)
+        super().__init__(
+            f"{len(paths)} note(s) on the Shelf could not be read, so {question} "
+            f"is not known: {names}."
+        )
 
 
 class BookNotFound(Exception):
@@ -730,9 +767,18 @@ def update_book(
         InvalidFieldValue: If a value is not one the Library defines.
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
+        ShelfUnreadable: If no note it could read holds the identity, and some
+            notes could not be read. Nothing is written.
     """
-    note = find_by_libris_id(ShelfStore(vault_path), libris_id)
+    store = ShelfStore(vault_path)
+    note = find_by_libris_id(store, libris_id)
     if note is None:
+        unread = store.unreadable()
+        if unread:
+            # Not a miss: one of these may hold it (#168 review).
+            raise ShelfUnreadable(
+                unread, f"whether one of them holds the id {libris_id!r}"
+            )
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
     return _set_reader_fields(note.path, fields, holding=libris_id.strip())
 
@@ -765,6 +811,10 @@ def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed, or
             the file is not UTF-8.
+        OSError: If the note is there but cannot be opened - locked,
+            read-only, or denied. Nothing is written.
+        NoteWriteFailed: If the write failed partway and the note could not be
+            put back. It may be damaged.
     """
     return _set_reader_fields(path, fields)
 
@@ -802,6 +852,10 @@ def _set_reader_fields(
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed, or
             the file is not UTF-8.
+        OSError: If the note is there but cannot be opened - locked,
+            read-only, or denied. Nothing is written.
+        NoteWriteFailed: If the write failed partway and the note could not be
+            put back. It may be damaged.
     """
     written: dict[str, object] = {}
     for name, value in fields.items():
@@ -871,6 +925,9 @@ def _set_reader_fields(
         # that has since moved, or the CLI picked one that has. Nothing was
         # written, so it is a miss (ADR 0003).
         raise BookNotFound(f"No Book Note is at {path.name}.") from None
+    # Any other `OSError` - a locked or read-only note - and `NoteWriteFailed`
+    # are left to the Surface, which says which happened (#167). Turned into a
+    # miss here, a locked note would read as a Book the Library does not hold.
 
     # The frontmatter the write produced, rather than a read-back: a second read
     # is a second chance for the file to have gone, and would report a write
@@ -1149,6 +1206,9 @@ class _ShelfFile:
     # The SHA-256 of the bytes read, so a repair decided from this reading can
     # prove the note has not changed before writing it (#129 fifth review).
     fingerprint: str = ""
+    # The file is on the Shelf but could not be read - locked, denied, or a
+    # failing disk - so nothing about its contents is known (#167).
+    unreadable: bool = False
 
     def value(self, key: str) -> object:
         """Read a frontmatter field, whether or not the block parsed.
@@ -1215,6 +1275,12 @@ def _read_shelf(vault_path: Path) -> Iterator["_ShelfFile"]:
             # Listed, then gone before it was read - Obsidian renaming it, or a
             # sync client. The Shelf no longer holds it, and one moved note must
             # not stop `doctor` for the rest (#127 review).
+            continue
+        except OSError:
+            # There, but locked or denied. Not skipped as a vanished note is: the
+            # Shelf still holds it, and a check that never read it would call it
+            # sound. Raised, it stopped `doctor` for every note (#167).
+            yield _ShelfFile(path, {}, "", "", unreadable=True)
             continue
 
         fingerprint = hashlib.sha256(raw).hexdigest()
@@ -1948,11 +2014,15 @@ class ShelfReport:
     # Notes that are not UTF-8 text. Nothing else in Libris can read them - the
     # index treats them as unparseable - so this is the one place they surface.
     not_utf8: list[Path] = field(default_factory=list)
+    # Notes that could not be read, so no check above has seen them (#167).
+    unreadable: list[Path] = field(default_factory=list)
 
     @property
     def is_clean(self) -> bool:
         """Whether nothing found anything worth a person's attention."""
-        return not self.collisions and not self.encoding_damage and not self.not_utf8
+        return not (
+            self.collisions or self.encoding_damage or self.not_utf8 or self.unreadable
+        )
 
 
 def inspect_shelf(vault_path: Path) -> ShelfReport:
@@ -1974,6 +2044,7 @@ def inspect_shelf(vault_path: Path) -> ShelfReport:
         collisions=_id_collisions_in(files),
         encoding_damage=_encoding_damage_in(files),
         not_utf8=[shelf_file.path for shelf_file in files if shelf_file.not_utf8],
+        unreadable=[shelf_file.path for shelf_file in files if shelf_file.unreadable],
     )
 
 
@@ -2165,6 +2236,32 @@ def failed_note_name(exc: OSError, fallback: str) -> str:
         The note's file name, or `fallback`.
     """
     return Path(exc.filename).name if exc.filename else fallback
+
+
+def could_not_access(exc: OSError, fallback: str) -> str:
+    """Say that a note is there but could not be read or written, and why.
+
+    For an `OSError` that is not a `FileNotFoundError`, which every per-note
+    handler caught and nothing else did (#167). Most are a lock, a read-only
+    file or a permission, but a write that ran out of disk and was put back
+    raises one too, so the cause is only suggested when the error is a
+    `PermissionError` - it is not asserted otherwise (#168 review). One sentence
+    for every Surface, so the CLI and an agent are told the same thing.
+
+    Args:
+        exc: The error, which names the file it failed on when the OS said.
+        fallback: What to call the note when it did not.
+
+    Returns:
+        A sentence naming the note and the reason, without a full stop.
+    """
+    message = (
+        f"{failed_note_name(exc, fallback)} could not be accessed "
+        f"({exc.strerror or exc})"
+    )
+    if isinstance(exc, PermissionError):
+        message += " - locked, read-only, or denied by permissions"
+    return message
 
 
 def build_id_index(vault_path: Path) -> dict[str, BookNote]:

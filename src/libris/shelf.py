@@ -28,25 +28,32 @@ from .markdown import BookNote
 # Shelf cost about 30 milliseconds.
 Fingerprint = tuple[int, int]
 
+# What `_describe` answers for an entry that is there but could not be looked
+# at: told apart from one that is gone, which is no note at all (#168 review).
+_UNREADABLE = "unreadable"
 
-def _describe(entry: os.DirEntry) -> Fingerprint | None:
+
+def _describe(entry: os.DirEntry) -> Fingerprint | str | None:
     """Describe a file precisely enough to notice it changing.
 
     Args:
         entry: A directory entry from the Shelf.
 
     Returns:
-        The fingerprint, or None if this is not a readable file. `stat` and
-        `is_file` both reach the filesystem and can fail on an entry that is
-        being written or removed while the Shelf is listed, which is ordinary
-        on a vault that Obsidian and a sync client also write to.
+        The fingerprint; None if this is not a file, or was removed while the
+        Shelf was listed - ordinary on a vault Obsidian and a sync client also
+        write to; or `_UNREADABLE` if it is there and could not be looked at.
+        Folded into None, a note denied this way was left out of every answer
+        with nothing saying so (#168 review).
     """
     try:
         if not entry.is_file():
             return None
         info = entry.stat()
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        return _UNREADABLE
     return (info.st_mtime_ns, info.st_size)
 
 
@@ -65,6 +72,19 @@ class ShelfIndex:
     # Files whose frontmatter would not parse. Remembered so a broken note is
     # not re-read on every question, and re-read the moment it is edited.
     _unparseable: dict[str, Fingerprint] = field(default_factory=dict)
+    # Notes the last call could not read as they now stand - left out, or
+    # answered for by an earlier parse of what they used to say. Either way a
+    # question that found nothing has not ruled them out (#168 review).
+    _unread: list[Path] = field(default_factory=list)
+
+    @property
+    def unreadable(self) -> list[Path]:
+        """The notes the last `notes()` could not read as they now stand.
+
+        Returns:
+            Their paths, empty when every note was answered for as it is.
+        """
+        return list(self._unread)
 
     def notes(self) -> list[BookNote]:
         """Every Book Note on the Shelf, as it stands right now.
@@ -75,6 +95,7 @@ class ShelfIndex:
         """
         seen: set[str] = set()
         found: list[BookNote] = []
+        self._unread = []
 
         try:
             # Closed deterministically rather than left to exhaustion: if the
@@ -96,6 +117,13 @@ class ShelfIndex:
             seen.add(name)
 
             cached = self._notes.get(name)
+            if fingerprint == _UNREADABLE:
+                # Treated as a read that failed: the last parse stands, and the
+                # answer says it is incomplete.
+                if cached is not None:
+                    found.append(cached)
+                self._unread.append(Path(path))
+                continue
             if cached is not None and self._fingerprints.get(name) == fingerprint:
                 found.append(cached)
                 continue
@@ -104,9 +132,20 @@ class ShelfIndex:
 
             try:
                 note = BookNote.read(Path(path))
+            except FileNotFoundError:
+                # Listed, then gone. Not answered for from the cache: it is not
+                # on the Shelf under this name, and a lookup must not find a
+                # deleted note (#168 review). But a rename looks exactly like
+                # this, and the new name may not be in this listing, so the
+                # answer is incomplete as well - an add waits for a retry
+                # rather than writing a second note for a Book being renamed.
+                self._notes.pop(name, None)
+                self._fingerprints.pop(name, None)
+                self._unread.append(Path(path))
+                continue
             except OSError:
-                # The file moved, vanished or was locked between the listing and
-                # the read - Obsidian saving, a sync client, or Libris itself.
+                # The file was locked or denied between the listing and the read
+                # - Obsidian saving, a sync client, or Libris itself.
                 # The last parse stands rather than the Book being reported
                 # absent: a duplicate check that misses writes a second note and
                 # nothing ever surfaces it, where a momentarily stale title
@@ -114,6 +153,11 @@ class ShelfIndex:
                 # tries again rather than trusting what it could not read.
                 if cached is not None:
                     found.append(cached)
+                # Unread either way. A cached parse is of what the note used to
+                # say: edited from Emma to Dune and then locked, it still answers
+                # as Emma, and a check for Dune that trusted it would write a
+                # second Dune (#168 review).
+                self._unread.append(Path(path))
                 continue
 
             if note is None:

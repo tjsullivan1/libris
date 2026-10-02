@@ -355,6 +355,13 @@ def create_app() -> FastAPI:
             # unknown field and a value the Library does not define. Neither is
             # a crash: the caller sent something the Library will not accept.
             raise HTTPException(status_code=422, detail=str(exc)) from None
+        except service.ShelfUnreadable as exc:
+            # The Library cannot say whether it holds the Book until those notes
+            # can be read. Unavailable rather than a bad request: the same
+            # request succeeds once they can (#168 review).
+            raise HTTPException(
+                status_code=503, detail=f"{exc} Nothing was added."
+            ) from None
 
         if result.outcome is service.Outcome.ALREADY_PRESENT:
             response.status_code = 200

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from . import config, installed_version, service
 from .api import GoogleBooksClient
-from .markdown import BookNote
+from .markdown import BookNote, NoteWriteFailed
 from .note_format import (
     FORMAT_VALUES,
     PRIORITY_VALUES,
@@ -352,6 +352,8 @@ def create_server(name: str = "libris") -> "MCPServer":
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from None
+        except service.ShelfUnreadable as exc:
+            raise ToolError(f"{exc} Nothing was added.") from None
 
         return WriteAnswer(
             outcome=result.outcome.value,
@@ -398,11 +400,19 @@ def create_server(name: str = "libris") -> "MCPServer":
 
         try:
             result = service.update_book(_shelf(), libris_id, fields)
-        except service.BookNotFound as exc:
+        except (service.BookNotFound, service.ShelfUnreadable) as exc:
             raise ToolError(str(exc)) from None
         except ValueError as exc:
             # InvalidFieldValue subclasses ValueError, so this covers a value the
             # Library does not define and a field that is not the reader's.
+            raise ToolError(str(exc)) from None
+        except OSError as exc:
+            # There, but locked or denied. Untranslated, the agent was told only
+            # that the tool failed, with nothing to relay (#167).
+            raise ToolError(
+                f"{service.could_not_access(exc, 'The note')}. Nothing was written."
+            ) from None
+        except NoteWriteFailed as exc:
             raise ToolError(str(exc)) from None
 
         return WriteAnswer(

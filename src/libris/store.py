@@ -168,12 +168,36 @@ class ShelfStore:
     Every question reads the Shelf as it stands at that moment, so the answer is
     true when it is given (ADR 0010). Nothing is stored ahead: keys and words
     are computed from the notes on each question.
+
+    Every note any question could not read is remembered for the life of the
+    store, which is one operation: an answer is only as complete as the least
+    complete scan behind it, and a later scan that happened to read a note does
+    not make an earlier answer, given without it, complete (#168 review).
     """
 
     vault_path: Path
+    _unread: set[Path] = field(default_factory=set, repr=False, compare=False)
 
     def _notes(self) -> list[BookNote]:
-        return index_for(self.vault_path).notes()
+        index = index_for(self.vault_path)
+        notes = index.notes()
+        self._unread.update(index.unreadable)
+        return notes
+
+    def unreadable(self) -> list[Path]:
+        """The notes this store's questions could not read as they stood.
+
+        Scans once more as well, so a store asked nothing yet - a lookup with
+        nothing to look up by - still has an answer of its own rather than
+        another request's, or none (#168 review). A scan costs a stat per note;
+        only notes that changed are read.
+
+        Returns:
+            Their paths, in name order. Nothing these questions answered has
+            ruled them out, and a match on one of them may be a stale parse.
+        """
+        self._notes()
+        return sorted(self._unread, key=lambda path: path.name)
 
     def _titled(self, status: str | None) -> list[BookNote]:
         return [n for n in self._notes() if n.title and _in_status(n, status)]

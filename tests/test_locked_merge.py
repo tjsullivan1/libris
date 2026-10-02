@@ -31,43 +31,6 @@ from libris.service import DecisionStatus, apply_decisions
 
 runner = CliRunner()
 
-_WRITE_MODES = set("wax+")
-
-
-def _lock(
-    monkeypatch,
-    locked: Path,
-    *,
-    reads: bool = False,
-    writes: bool = False,
-    deletes: bool = False,
-) -> None:
-    """Refuse some kinds of access to one note, as a lock or a read-only file does.
-
-    Args:
-        monkeypatch: The test's monkeypatch fixture.
-        locked: The note to refuse.
-        reads: Refuse opening it to read.
-        writes: Refuse opening it to write.
-        deletes: Refuse removing it.
-    """
-    real_open = Path.open
-    real_unlink = Path.unlink
-
-    def _open(self, mode="r", *args, **kwargs):
-        writing = bool(_WRITE_MODES & set(mode))
-        if self == locked and ((writes and writing) or (reads and not writing)):
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_open(self, mode, *args, **kwargs)
-
-    def _unlink(self, *args, **kwargs):
-        if self == locked and deletes:
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_unlink(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", _open)
-    monkeypatch.setattr(Path, "unlink", _unlink)
-
 
 def _pair(vault: Path, title: str, subtitle: str) -> tuple[BookNote, BookNote]:
     """Two notes for one Book, differing by a subtitle."""
@@ -100,13 +63,15 @@ def _snapshot(*notes: BookNote) -> list[bytes]:
 # --- `libris merge --decisions` ---
 
 
-def test_a_note_that_cannot_be_read_is_left_out_of_the_index(tmp_path, monkeypatch):
+def test_a_note_that_cannot_be_read_is_left_out_of_the_index(
+    tmp_path, monkeypatch, lock_note
+):
     # Given a Shelf holding one note that cannot be opened at all
     unreadable = create_book_note(
         BookCandidate(title="Children of Dune", authors=["Frank Herbert"]), tmp_path
     )
     first, second = _pair(tmp_path, "Dune", "Deluxe Edition")
-    _lock(monkeypatch, unreadable, reads=True)
+    lock_note(unreadable, reads=True)
 
     # When a decision about another pair is applied
     outcomes = apply_decisions(tmp_path, [_decision(first, second)])
@@ -117,7 +82,9 @@ def test_a_note_that_cannot_be_read_is_left_out_of_the_index(tmp_path, monkeypat
 
 
 def test_a_note_locked_before_the_merge_reads_it_drifts_and_the_batch_goes_on(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    lock_note,
 ):
     # Given two decisions, the first pair's note locked after the Shelf was
     # indexed and before its merge reads it
@@ -127,7 +94,7 @@ def test_a_note_locked_before_the_merge_reads_it_drifts_and_the_batch_goes_on(
 
     def _locked_after_indexing(vault_path):
         index = real_index(vault_path)
-        _lock(monkeypatch, second.path, reads=True)
+        lock_note(second.path, reads=True)
         return index
 
     monkeypatch.setattr(service, "build_id_index", _locked_after_indexing)
@@ -148,7 +115,9 @@ def test_a_note_locked_before_the_merge_reads_it_drifts_and_the_batch_goes_on(
 
 
 def test_a_secondary_locked_before_the_check_drifts_and_nothing_is_written(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    lock_note,
 ):
     # Given two decisions, the first pair's secondary locked once the merge has
     # been worked out, before it is checked
@@ -164,7 +133,7 @@ def test_a_secondary_locked_before_the_check_drifts_and_nothing_is_written(
     def _locked_after_merging(primary_path, secondary_path, **kwargs):
         result = real_merge(primary_path, secondary_path, **kwargs)
         if secondary_path == secondary:
-            _lock(monkeypatch, secondary, reads=True)
+            lock_note(secondary, reads=True)
         return result
 
     monkeypatch.setattr(service, "merge_two_books", _locked_after_merging)
@@ -184,13 +153,15 @@ def test_a_secondary_locked_before_the_check_drifts_and_nothing_is_written(
 
 
 def test_a_primary_that_cannot_be_written_drifts_and_the_secondary_is_kept(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    lock_note,
 ):
     # Given two decisions, the first pair's primary read-only
     (first, second), _, decisions = _two_pairs(tmp_path)
     before = _snapshot(first, second)
     primary = get_primary_book(first.path, second.path)
-    _lock(monkeypatch, primary, writes=True)
+    lock_note(primary, writes=True)
 
     # When the decisions are applied
     outcomes = apply_decisions(tmp_path, decisions)
@@ -208,13 +179,15 @@ def test_a_primary_that_cannot_be_written_drifts_and_the_secondary_is_kept(
 
 
 def test_a_secondary_that_cannot_be_deleted_is_still_reported_merged(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    lock_note,
 ):
     # Given two decisions, the first pair's secondary impossible to delete
     (first, second), _, decisions = _two_pairs(tmp_path)
     primary = get_primary_book(first.path, second.path)
     secondary = second.path if primary == first.path else first.path
-    _lock(monkeypatch, secondary, deletes=True)
+    lock_note(secondary, deletes=True)
 
     # When the decisions are applied
     outcomes = apply_decisions(tmp_path, decisions)
@@ -234,7 +207,9 @@ def test_a_secondary_that_cannot_be_deleted_is_still_reported_merged(
 
 
 def test_a_merged_note_that_cannot_be_read_back_is_still_reported_merged(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    lock_note,
 ):
     # Given two decisions, the first pair's merged note locked once it is written
     # and the secondary deleted, before it is read back for the index
@@ -245,7 +220,7 @@ def test_a_merged_note_that_cannot_be_read_back_is_still_reported_merged(
     def _locked_after_deleting(secondary_path, *args):
         real_delete(secondary_path, *args)
         if secondary_path in (first.path, second.path):
-            _lock(monkeypatch, primary, reads=True)
+            lock_note(primary, reads=True)
 
     monkeypatch.setattr(service, "delete_secondary_file", _locked_after_deleting)
 
@@ -285,7 +260,9 @@ def _shelf(tmp_path, monkeypatch) -> Path:
     return vault
 
 
-def test_merge_skips_a_group_with_a_locked_note_and_goes_on(tmp_path, monkeypatch):
+def test_merge_skips_a_group_with_a_locked_note_and_goes_on(
+    tmp_path, monkeypatch, lock_note
+):
     # Given two groups of duplicates, a note of the first locked after the groups
     # were found and before they are shown
     vault = _shelf(tmp_path, monkeypatch)
@@ -295,7 +272,7 @@ def test_merge_skips_a_group_with_a_locked_note_and_goes_on(tmp_path, monkeypatc
 
     def _locked_after_finding(vault_path):
         groups = sorted(real_find(vault_path), key=lambda g: g[0] not in locked_group)
-        _lock(monkeypatch, locked_group[1], reads=True)
+        lock_note(locked_group[1], reads=True)
         return groups
 
     monkeypatch.setattr(cli_module, "find_duplicates", _locked_after_finding)
@@ -311,12 +288,14 @@ def test_merge_skips_a_group_with_a_locked_note_and_goes_on(tmp_path, monkeypatc
     assert "1 duplicate(s) merged" in result.output
 
 
-def test_merge_leaves_a_pair_whose_primary_cannot_be_written(tmp_path, monkeypatch):
+def test_merge_leaves_a_pair_whose_primary_cannot_be_written(
+    tmp_path, monkeypatch, lock_note
+):
     # Given one group of duplicates, its primary read-only
     vault = _shelf(tmp_path, monkeypatch)
     group = _auto_group(vault, "Dune")
     before = [path.read_bytes() for path in group]
-    _lock(monkeypatch, get_primary_book(*group), writes=True)
+    lock_note(get_primary_book(*group), writes=True)
 
     # When it is auto-merged
     result = runner.invoke(app, ["merge", "--auto"])
@@ -330,13 +309,15 @@ def test_merge_leaves_a_pair_whose_primary_cannot_be_written(tmp_path, monkeypat
     assert [path.read_bytes() for path in group] == before
 
 
-def test_merge_counts_a_merge_whose_secondary_cannot_be_deleted(tmp_path, monkeypatch):
+def test_merge_counts_a_merge_whose_secondary_cannot_be_deleted(
+    tmp_path, monkeypatch, lock_note
+):
     # Given one group of duplicates, its secondary impossible to delete
     vault = _shelf(tmp_path, monkeypatch)
     group = _auto_group(vault, "Dune")
     primary = get_primary_book(*group)
     secondary = next(path for path in group if path != primary)
-    _lock(monkeypatch, secondary, deletes=True)
+    lock_note(secondary, deletes=True)
 
     # When it is auto-merged
     result = runner.invoke(app, ["merge", "--auto"])
@@ -351,7 +332,9 @@ def test_merge_counts_a_merge_whose_secondary_cannot_be_deleted(tmp_path, monkey
 
 
 def test_merge_leaves_a_pair_whose_secondary_is_locked_before_the_check(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    lock_note,
 ):
     # Given one group of duplicates, the secondary locked after the merge was
     # worked out and before it is checked
@@ -362,7 +345,7 @@ def test_merge_leaves_a_pair_whose_secondary_is_locked_before_the_check(
 
     def _locked_after_checking(primary, secondary):
         result = real_check(primary, secondary)
-        _lock(monkeypatch, secondary, reads=True)
+        lock_note(secondary, reads=True)
         return result
 
     monkeypatch.setattr(cli_module, "check_auto_merge", _locked_after_checking)
@@ -439,7 +422,8 @@ def test_a_rewrite_that_cannot_be_put_back_is_not_an_os_error(tmp_path, monkeypa
 
 
 def test_a_primary_write_put_back_after_failing_leaves_the_pair_as_it_was(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     # Given two decisions, the first pair's primary write failing partway and
     # being put back
@@ -461,7 +445,8 @@ def test_a_primary_write_put_back_after_failing_leaves_the_pair_as_it_was(
 
 
 def test_a_primary_left_damaged_is_reported_and_the_secondary_kept(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     # Given two decisions, the first pair's primary write failing partway and
     # not able to be put back
@@ -486,7 +471,8 @@ def test_a_primary_left_damaged_is_reported_and_the_secondary_kept(
 
 
 def test_a_two_books_record_left_damaged_is_not_reported_as_nothing_recorded(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     # Given a decision that a pair is two books, the first note's write failing
     # partway and not able to be put back
@@ -548,7 +534,8 @@ def test_the_distinct_command_reports_a_note_left_damaged(tmp_path, monkeypatch)
 
 
 def test_a_primary_left_damaged_is_not_acted_on_by_a_later_decision(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     # Given the same decision twice - repeated decisions are valid input - and
     # the first one's primary write failing and not able to be put back, leaving
@@ -571,7 +558,8 @@ def test_a_primary_left_damaged_is_not_acted_on_by_a_later_decision(
 
 
 def test_a_first_note_left_damaged_by_a_two_books_record_is_not_acted_on_again(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     # Given the same two-books decision twice, the first note's write failing
     # and not able to be put back
@@ -590,7 +578,8 @@ def test_a_first_note_left_damaged_by_a_two_books_record_is_not_acted_on_again(
 
 
 def test_a_second_note_left_damaged_by_a_two_books_record_is_not_acted_on_again(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     # Given the same two-books decision twice, the first note written and the
     # second's write failing and not able to be put back
@@ -611,7 +600,8 @@ def test_a_second_note_left_damaged_by_a_two_books_record_is_not_acted_on_again(
 
 
 def test_merge_leaves_the_rest_of_a_group_whose_primary_was_left_damaged(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     # Given three copies of one Book, the first merge's write failing and not
     # able to be put back, leaving a primary that still parses
