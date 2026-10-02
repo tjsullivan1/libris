@@ -190,18 +190,28 @@ def _unlinked_lines(result: RenameResult, old_stem: str) -> list[str]:
         old_stem: The note's old filename, without its extension.
 
     Returns:
-        One line per note whose link could not be updated, and per note the
-        attempt may have damaged; none when every link was updated.
+        One line per note whose link could not be updated, per note that could
+        not be read to find out, and per note the attempt may have damaged;
+        none when every link was updated.
     """
-    return [
-        f"{path.name} still links to {old_stem} - it could not be accessed, so "
-        "that link needs fixing by hand."
-        for path in result.unlinked
-    ] + [
-        f"{path.name} may be damaged - updating its link to {old_stem} failed "
-        "partway and could not be undone. Check it, or restore it from a backup."
-        for path in result.damaged
-    ]
+    return (
+        [
+            f"{path.name} still links to {old_stem} - it could not be written, "
+            "so that link needs fixing by hand."
+            for path in result.unlinked
+        ]
+        + [
+            f"{path.name} could not be read, so whether it links to {old_stem} "
+            "is not known - check it once it can be opened."
+            for path in result.unchecked
+        ]
+        + [
+            f"{path.name} may be damaged - updating its link to {old_stem} "
+            "failed partway and could not be undone. Check it, or restore it "
+            "from a backup."
+            for path in result.damaged
+        ]
+    )
 
 
 def _books_on_the_shelf(vault_path: Path) -> list[Path]:

@@ -443,6 +443,64 @@ def test_a_rename_names_the_notes_whose_links_it_could_not_update(tmp_path, lock
     assert result.unlinked == (linking,)
 
 
+def test_a_rename_does_not_say_a_note_it_could_not_read_links_to_it(
+    tmp_path, lock_note
+):
+    # Given a note due a rename, and an unrelated note locked against reading
+    book = tmp_path / "Dune.md"
+    book.write_text(
+        "---\ntitle: Dune\nauthors:\n  - Frank Herbert\n---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    unrelated = tmp_path / "Unrelated.md"
+    unrelated.write_text("Nothing about that book.\n", encoding="utf-8")
+    lock_note(unrelated, reads=True)
+
+    # When it is renamed
+    result = rename_book_file(book, tmp_path)
+
+    # Then the locked note is named as unchecked, not as still linking: the sweep
+    # never saw what it holds (#168 review)
+    assert result.status == "renamed"
+    assert result.unchecked == (unrelated,)
+    assert result.unlinked == ()
+
+
+def test_a_note_that_is_not_utf8_does_not_stop_the_wikilink_sweep(tmp_path):
+    # Given three notes linking to one about to be renamed, the middle one not
+    # UTF-8 - a decoding error is not an OSError, and ended the sweep the same way
+    for name in ("A.md", "C.md"):
+        (tmp_path / name).write_text("See [[Old Name]].\n", encoding="utf-8")
+    (tmp_path / "B.md").write_bytes("Søren: [[Old Name]].\n".encode("latin-1"))
+
+    # When the links are updated
+    sweep = markdown.sweep_wikilinks(tmp_path, "Old Name", "New Name")
+
+    # Then the notes either side of it are updated, and it is named as unchecked
+    assert sweep.updated == 2
+    assert sweep.unchecked == [tmp_path / "B.md"]
+
+
+def test_cleanup_says_it_could_not_check_a_note_it_could_not_read(shelf, lock_note):
+    # Given a note due a rename, and an unrelated note locked against reading
+    (shelf / "Dune.md").write_text(
+        "---\ntitle: Dune\nauthors:\n  - Frank Herbert\n---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    locked = shelf / "Zed.md"
+    locked.write_text("Nothing about that book.\n", encoding="utf-8")
+    lock_note(locked, reads=True)
+
+    # When cleanup renames it
+    result = runner.invoke(app, ["cleanup", "--rename"])
+
+    # Then it says it does not know, rather than that the note still links
+    assert result.exit_code == 0, result.output
+    assert "Renamed: Dune.md" in result.output
+    assert "Zed.md could not be read, so whether it links to Dune" in result.output
+    assert "Zed.md still links" not in result.output
+
+
 def test_cleanup_says_which_links_a_rename_left_pointing_at_the_old_name(
     shelf, lock_note
 ):
