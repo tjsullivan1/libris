@@ -98,6 +98,17 @@ uv run --no-sync --extra hosted uvicorn --factory libris.hosted:create_app_from_
 
 Without `LIBRIS_COSMOS_ENDPOINT`, clients and tokens are kept in memory and lost on restart.
 
+## Troubleshooting
+
+**`RequestDisallowedByAzure ... without authenticating through MFA`**. Azure has required MFA for
+every create, update or delete made from the CLI or an IaC tool since October 2025. Read-only calls
+don't need it, so `init` and `plan` work and `apply` fails. Run `az logout` and then
+`az login --tenant <tenant id>`, and complete the MFA prompt. If the error persists, your tenant
+doesn't ask for MFA at sign-in. Attempt any small write with the CLI (for example `az group create`),
+and it refuses with the exact `az login ... --claims-challenge "..."` command to run instead. Don't
+repeat the write afterwards; let Terraform create the resource. See
+[Microsoft's guide](https://learn.microsoft.com/en-us/cli/azure/use-azure-cli-successfully-troubleshooting#troubleshooting-multifactor-authentication-mfa).
+
 ## Things that are deliberate
 
 - **One replica, at most.** Sign-ins in progress live in memory (ADR 0035).
