@@ -46,11 +46,14 @@ needs an image. And the right Google account ID is only known once someone tries
    `suffix` in `terraform.tfvars` (1-14 lowercase letters or digits). Changing it later renames
    and replaces every resource, including the app's address and therefore the Google redirect URI.
 
-2. **Create the Google OAuth client.** In the Google Cloud console: create a project, then on the
-   **OAuth consent screen** choose External and add yourself as a test user. Leaving the app in
-   *Testing* is fine, because Libris asks Google only who you are and keeps no Google token. Then
-   go to **Credentials → Create credentials → OAuth client ID → Web application**, and add the
-   `google_redirect_uri` from step 1 as an authorized redirect URI.
+2. **Create the Google OAuth client.** In the Google Cloud console, create a project and open
+   **Google Auth Platform**:
+   - **Get started**: an app name and support email, audience **External**, and a contact email.
+   - **Audience → Test users → Add users**: your Gmail address. Leave the app in *Testing*.
+     Google expires a test user's consent after seven days, but that doesn't matter here: Libris
+     asks Google only who you are, once per sign-in, and keeps no Google token.
+   - **Clients → Create client**, type **Web application**. Under **Authorized redirect URIs**,
+     add the `google_redirect_uri` from step 1. Leave **Authorized JavaScript origins** empty.
 
 3. **Write `infra/terraform.tfvars`**. The file is git-ignored.
 
