@@ -88,7 +88,6 @@ from .service import (
     csv_view,
     export_notes,
     failed_note_name,
-    find_encoding_damage,
     inspect_shelf,
     propose_encoding_repair,
     record_two_books,
@@ -1650,7 +1649,7 @@ def _rename_damaged_filenames(damaged: list[EncodingDamage], vault_path: Path) -
     pen name - which the move does not carry across.
 
     Args:
-        damaged: The notes from `find_encoding_damage` whose filename is
+        damaged: The notes from `inspect_shelf` whose filename is
             damaged.
         vault_path: The Shelf, used to sweep wikilinks when no wider Obsidian
             vault is configured.
@@ -1790,9 +1789,25 @@ def repair(
     import questionary
 
     vault_path = _require_vault_path()
-    damaged = find_encoding_damage(vault_path)
+    # Through `inspect_shelf` rather than `find_encoding_damage`, which has no
+    # way to say a note could not be read: a locked note with damage in it was
+    # left out, and the Shelf reported as having none (#168 review).
+    report = inspect_shelf(vault_path)
+    damaged = report.encoding_damage
+    if report.unreadable:
+        typer.echo(
+            f"{len(report.unreadable)} note(s) could not be read, so were not "
+            "checked for lost characters:"
+        )
+        for path in report.unreadable:
+            typer.echo(f"  {path.name}")
+        typer.echo("")
     if not damaged:
-        typer.echo("No note has lost a character.")
+        typer.echo(
+            "No note it could read has lost a character."
+            if report.unreadable
+            else "No note has lost a character."
+        )
         return
 
     in_place = [note for note in damaged if note.repairable_in_place]

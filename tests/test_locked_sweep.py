@@ -377,6 +377,23 @@ def test_repair_reports_a_note_left_damaged_and_repairs_the_rest(shelf, monkeypa
     assert "Søren" in kept.read_text(encoding="utf-8")
 
 
+def test_repair_names_a_damaged_note_it_could_not_read(shelf, lock_note):
+    # Given one damaged note, locked against reading
+    locked = _damaged(shelf, "Locked.md")
+    lock_note(locked, reads=True)
+
+    # When repair looks for damage
+    result = runner.invoke(app, ["repair"])
+
+    # Then it names the note it could not check, and does not say the Shelf has
+    # no damage - it could not see this note's (#168 review)
+    assert result.exit_code == 0, result.output
+    assert "1 note(s) could not be read" in result.output
+    assert "Locked.md" in result.output
+    assert "No note has lost a character" not in result.output
+    assert "No note it could read has lost a character" in result.output
+
+
 def test_repair_rename_reports_a_locked_note_and_renames_the_rest(
     shelf, monkeypatch, lock_note
 ):
