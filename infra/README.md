@@ -70,14 +70,25 @@ needs an image. And the right Google account ID is only known once someone tries
 
 5. **Deploy everything**: `terraform -chdir=infra apply`
 
-6. **Find your Google account ID.** In Claude, go to **Settings → Connectors → Add custom
-   connector** and enter `terraform -chdir=infra output -raw mcp_url`. Sign in when asked. The
-   sign-in is refused, because no account is allowed yet, and the refusal page shows your Google
-   ID. Add `allowed_google_sub = "<that id>"` to `terraform.tfvars` and apply again.
+6. **Add the connector in Claude and find your Google account ID.** Get the connector URL with
+   `terraform -chdir=infra output -raw mcp_url`. Then, in claude.ai:
+   - On Free, Pro or Max: **Customize → Connectors → Add custom connector**.
+   - On Team or Enterprise, an Owner adds it under **Organization settings → Connectors → Add →
+     Custom** (choose **Web** if asked), and you connect from **Customize → Connectors**.
+
+   Paste the URL. If the dialog asks for settings, choose **Sign in now** and, for the OAuth
+   client, **Register automatically**. Libris supports Dynamic Client Registration (ADR 0035) but
+   doesn't publish the metadata that **Use Claude's published identity** needs. Leave the client ID
+   and secret empty.
+
+   Connect and sign in. The sign-in is refused, because no account is allowed yet, and the
+   refusal page in the sign-in window shows your Google ID. Add `allowed_google_sub = "<that id>"`
+   to `terraform.tfvars` and apply again.
 
 7. **Connect for real**:
-   - **Claude**: remove the connector and add it again, sign in, and ask Claude to call the
-     `ping` tool.
+   - **Claude**: in **Customize → Connectors**, click **Connect** on the connector again and sign
+     in. Changing the allowed account changes nothing in the connector's settings, so it doesn't
+     need removing. Then ask Claude to call the `ping` tool.
    - **Gemini**: at gemini.google.com go to **Settings → Connected apps → Add a custom app**,
      enter the same URL, sign in, and ask for `ping`. This needs a personal Google account in the
      US.
