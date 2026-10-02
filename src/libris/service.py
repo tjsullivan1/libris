@@ -23,6 +23,7 @@ from .markdown import (
     BookNote,
     FrontmatterUnreadable,
     NoteChanged,
+    NoteWriteFailed,
     create_book_note,
     edit_note,
     list_books,
@@ -1983,13 +1984,16 @@ class TwoBooksRecord:
     Attributes:
         written: The notes that gained an entry. Empty when both already held
             one, which is not a failure: the pair was settled before.
-        one_sided: Why the second note was not written, when it was not. The
-            pair is still settled - either side's record is read as enough -
-            but only one note says so.
+        one_sided: Why the second note was not written, when it was not, as a
+            clause without closing punctuation. The pair is still settled -
+            either side's record is read as enough - but only one note says so.
+        damaged: The second note, when writing it failed partway and it could
+            not be put back. Nothing more should be done to it this run.
     """
 
     written: list[Path] = field(default_factory=list)
     one_sided: str | None = None
+    damaged: Path | None = None
 
 
 class NotTwoNotes(ValueError):
@@ -2064,6 +2068,8 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
             locked, read-only. Nothing is written.
         FrontmatterUnreadable: If the first note's frontmatter cannot be
             parsed. Nothing is written.
+        NoteWriteFailed: If writing the first note failed partway and it could
+            not be put back. It may be damaged; the second is not written.
     """
     check_two_books(first, second)
 
@@ -2081,7 +2087,15 @@ def record_two_books(first: BookNote, second: BookNote) -> TwoBooksRecord:
         # OSError, not only FileNotFoundError: a locked or read-only note is as
         # unwritable as a missing one, and raising here would report a failure
         # after the first note had already settled the pair (#164 review).
-        record.one_sided = f"{second.path.name} was not written: {exc}"
+        # Without its closing period: both readers punctuate after it, and the
+        # messages of NoteChanged and FrontmatterUnreadable end in one (#166
+        # third review).
+        record.one_sided = f"{second.path.name} was not written: {exc}".rstrip(".")
+    except NoteWriteFailed as exc:
+        # The pair is settled by the first note all the same, but the second
+        # was not left as it was (#166 review).
+        record.one_sided = str(exc).rstrip(".")
+        record.damaged = second.path
     return record
 
 
@@ -2140,6 +2154,19 @@ class DecisionOutcome:
     detail: str
 
 
+def failed_note_name(exc: OSError, fallback: str) -> str:
+    """The name of the note an `OSError` was raised for, or `fallback`.
+
+    Args:
+        exc: The error, which names the file it failed on when the OS said.
+        fallback: What to call the note when it did not.
+
+    Returns:
+        The note's file name, or `fallback`.
+    """
+    return Path(exc.filename).name if exc.filename else fallback
+
+
 def build_id_index(vault_path: Path) -> dict[str, BookNote]:
     """Map every Libris ID the Shelf answers for to the note that answers.
 
@@ -2161,7 +2188,13 @@ def build_id_index(vault_path: Path) -> dict[str, BookNote]:
     live: dict[str, list[BookNote]] = {}
 
     for book_path in list_books(vault_path):
-        note = BookNote.read(book_path)
+        try:
+            note = BookNote.read(book_path)
+        except OSError:
+            # Locked or gone. Left out, as `read_shelf_notes` leaves it out: one
+            # note that cannot be opened stopped every decision in the file
+            # before any was applied (#165). A decision naming it drifts.
+            continue
         if note is None:
             continue
         for superseded in note.superseded_ids:
@@ -2176,8 +2209,27 @@ def build_id_index(vault_path: Path) -> dict[str, BookNote]:
     return index
 
 
+def _forget(index: dict[str, BookNote], path: Path) -> None:
+    """Drop every identity the index resolves to one note.
+
+    For a note the run must not act on again: a later decision naming it
+    drifts rather than reading or rewriting it.
+
+    Args:
+        index: The run's index, from `build_id_index`.
+        path: The note to forget.
+    """
+    for key, note in list(index.items()):
+        if note.path == path:
+            del index[key]
+
+
 def _record_decided_two_books(
-    label: str, first: BookNote, second: BookNote, dry_run: bool
+    label: str,
+    first: BookNote,
+    second: BookNote,
+    dry_run: bool,
+    index: dict[str, BookNote],
 ) -> DecisionOutcome:
     """Carry out a decision that a pair is two books.
 
@@ -2186,6 +2238,7 @@ def _record_decided_two_books(
         first: One note of the pair, resolved from the decision.
         second: The other.
         dry_run: Report what would be written, and write nothing.
+        index: The run's index. A note left damaged is dropped from it.
 
     Returns:
         The decision's outcome.
@@ -2237,7 +2290,15 @@ def _record_decided_two_books(
         return DecisionOutcome(
             DecisionStatus.DRIFTED, f"{label}: {exc} Nothing recorded."
         )
+    except NoteWriteFailed as exc:
+        # Not "nothing recorded": the first note may be half-written (#166
+        # review). Forgotten, so no later decision rewrites it (#166 second
+        # review).
+        _forget(index, exc.path)
+        return DecisionOutcome(DecisionStatus.DRIFTED, f"{label}: {exc}")
 
+    if record.damaged is not None:
+        _forget(index, record.damaged)
     detail = f"{label}: recorded as two books"
     if not record.written:
         detail = f"{label}: already recorded as two books"
@@ -2304,13 +2365,15 @@ def apply_decisions(
             outcomes.append(
                 DecisionOutcome(
                     DecisionStatus.DRIFTED,
-                    f"{label}: no longer two notes on the Shelf",
+                    f"{label}: no longer two readable notes on the Shelf",
                 )
             )
             continue
 
         if verdict == "different":
-            outcomes.append(_record_decided_two_books(label, first, second, dry_run))
+            outcomes.append(
+                _record_decided_two_books(label, first, second, dry_run, index)
+            )
             continue
 
         try:
@@ -2374,6 +2437,17 @@ def apply_decisions(
                 )
             )
             continue
+        except OSError as exc:
+            # There, but locked or denied. It ended the batch, taking every later
+            # decision with it (#165).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {failed_note_name(exc, 'a note of the pair')} could not "
+                    f"be read ({exc.strerror or exc}); nothing merged",
+                )
+            )
+            continue
         if conflicts and not allow_conflicts:
             fields = ", ".join(sorted({c.field for c in conflicts}))
             outcomes.append(
@@ -2418,6 +2492,15 @@ def apply_decisions(
                 )
             )
             continue
+        except OSError as exc:
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {secondary.name} could not be read "
+                    f"({exc.strerror or exc}); nothing merged",
+                )
+            )
+            continue
 
         try:
             write_merged_book(primary, merged_fm, merged_body, primary_fingerprint)
@@ -2450,6 +2533,34 @@ def apply_decisions(
                 )
             )
             continue
+        except OSError as exc:
+            # Read-only or locked, or failed partway and was put back: either
+            # way the primary is as it was, so the secondary is kept and the
+            # pair stands (#165).
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {primary.name} could not be written "
+                    f"({exc.strerror or exc}); nothing merged",
+                )
+            )
+            continue
+        except NoteWriteFailed as exc:
+            # Failed partway and could not be put back. The secondary is kept,
+            # so what it said survives; the primary's own text may not have. Said
+            # plainly, and the batch goes on (#166 review). The primary is
+            # forgotten, so a later or repeated decision naming it drifts rather
+            # than rewriting a damaged note; the secondary, untouched, stays
+            # (#166 second review).
+            _forget(index, primary)
+            outcomes.append(
+                DecisionOutcome(
+                    DecisionStatus.DRIFTED,
+                    f"{label}: {exc} {secondary.name} was kept; the merge did "
+                    "not complete",
+                )
+            )
+            continue
         notes: list[str] = []
         secondary_kept = False
         try:
@@ -2472,21 +2583,35 @@ def apply_decisions(
                 f"{secondary.name} was not where it was, so it was not deleted; "
                 "if it was moved, a copy remains"
             )
+        except OSError as exc:
+            secondary_kept = True
+            # Locked or read-only. The merged note is written, so the merge
+            # happened; the batch used to end here, reporting it nowhere (#165).
+            # The kept secondary still claims the identity the merged note now
+            # supersedes, which `libris doctor` shows as a collision.
+            notes.append(
+                f"{secondary.name} could not be deleted ({exc.strerror or exc}), "
+                "so it was kept; `libris doctor` will show the pair"
+            )
 
         # The Shelf just changed, so the index has to change with it: the
         # survivor now answers for the identities the deleted note held.
         try:
             survivor = BookNote.read(primary)
-        except FileNotFoundError:
-            # The merged note moved or was removed once written. The merge still
-            # happened, so it is recorded as merged; and the index forgets both
-            # paths, so a later decision naming them drifts rather than reading a
-            # file that is gone (#131 second review).
+        except OSError as exc:
+            # The merged note moved, was removed or was locked once written. The
+            # merge still happened, so it is recorded as merged; and the index
+            # forgets both paths, so a later decision naming them drifts rather
+            # than reading a file it cannot (#131 second review, #165).
             survivor = None
-            for key, note in list(index.items()):
-                if note.path in (primary, secondary):
-                    del index[key]
-            notes.append(f"{primary.name} was then moved or removed")
+            _forget(index, primary)
+            _forget(index, secondary)
+            if isinstance(exc, FileNotFoundError):
+                notes.append(f"{primary.name} was then moved or removed")
+            else:
+                notes.append(
+                    f"{primary.name} could not be read back ({exc.strerror or exc})"
+                )
         if survivor is not None:
             for key, note in list(index.items()):
                 if note.path == primary or (

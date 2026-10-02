@@ -24,6 +24,7 @@ from .markdown import (
     BookNote,
     FrontmatterUnreadable,
     NoteChanged,
+    NoteWriteFailed,
     RenameResult,
     create_book_note,
     ensure_frontmatter_fields,
@@ -85,6 +86,7 @@ from .service import (
     apply_encoding_repair,
     csv_view,
     export_notes,
+    failed_note_name,
     find_encoding_damage,
     inspect_shelf,
     propose_encoding_repair,
@@ -2021,6 +2023,10 @@ def distinct(
             "Nothing recorded."
         )
         raise typer.Exit(code=1) from None
+    except NoteWriteFailed as exc:
+        # Not "nothing recorded": the note may be half-written (#166 review).
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
 
     if not record.written:
         typer.echo(f"Already recorded: {first} and {second} are two books.")
@@ -2118,6 +2124,14 @@ def merge(
                 "Group skipped; nothing merged."
             )
             continue
+        except OSError as exc:
+            # There, but locked or denied. Outside the per-pair handler, so it
+            # ended the command before any later group was merged (#165).
+            typer.echo(
+                f"  {failed_note_name(exc, 'A note of this group')} could not be read "
+                f"({exc.strerror or exc}). Group skipped; nothing merged."
+            )
+            continue
 
         typer.echo(f"\n  Primary (keeper): {primary.name}")
 
@@ -2205,6 +2219,24 @@ def merge(
                     "deleted."
                 )
                 continue
+            except OSError as exc:
+                # Locked or denied before the merge was read - `_write_merge`
+                # handles its own - so nothing was written. Said, rather than
+                # left to the bare "Error:" below (#165).
+                typer.echo(
+                    f"    {failed_note_name(exc, 'A note of the pair')} could not be "
+                    f"read ({exc.strerror or exc}). Nothing merged; nothing deleted."
+                )
+                continue
+            except NoteWriteFailed:
+                # `_write_merge` said what happened. The primary may be damaged,
+                # so nothing more of this group is merged into it (#166 second
+                # review).
+                typer.echo(
+                    f"  {primary.name} may be damaged, so the rest of this group "
+                    "was left alone."
+                )
+                break
             except Exception as e:
                 typer.echo(f"    Error: {e}")
                 continue
@@ -2245,6 +2277,11 @@ def _write_merge(
         not where it was by the time it was to be deleted - which it reports as
         not deleted, since it may have been moved. False when the primary was
         gone, so nothing was written and nothing deleted.
+
+    Raises:
+        NoteWriteFailed: If writing the primary failed partway and it could not
+            be put back. Reported here; the caller must merge nothing more into
+            it.
     """
     if secondary_sha256 is not None:
         try:
@@ -2267,6 +2304,12 @@ def _write_merge(
                 "was being decided. Nothing merged; nothing deleted."
             )
             return False
+        except OSError as exc:
+            typer.echo(
+                f"    {secondary.name} could not be read ({exc.strerror or exc}). "
+                "Nothing merged; nothing deleted."
+            )
+            return False
     try:
         write_merged_book(primary, merged_fm, merged_body, expected_sha256)
     except FileNotFoundError:
@@ -2286,6 +2329,22 @@ def _write_merge(
             "Nothing merged; nothing deleted."
         )
         return False
+    except OSError as exc:
+        # Read-only or locked, or failed partway and was put back: either way
+        # the primary is as it was. A bare "Error:" said nothing of what was
+        # left (#165).
+        typer.echo(
+            f"    {primary.name} could not be written ({exc.strerror or exc}). "
+            "Nothing merged; nothing deleted."
+        )
+        return False
+    except NoteWriteFailed as exc:
+        # Failed partway and could not be put back. The secondary is kept, so
+        # what it said survives (#166 review). Raised on, not returned as False:
+        # False lets the group go on merging into this primary (#166 second
+        # review).
+        typer.echo(f"    {exc} {secondary.name} was kept; the merge did not complete.")
+        raise
     try:
         delete_secondary_file(secondary, secondary_sha256)
     except NoteChanged:
@@ -2306,6 +2365,14 @@ def _write_merge(
             f"    Merged into {primary.name}, but {secondary.name} was not where it "
             "was, so it was not deleted. If it was moved rather than removed, a "
             "copy remains - `libris doctor` will show it."
+        )
+    except OSError as exc:
+        # Locked or read-only. The merged note is written, so the merge happened
+        # and counts; reported as a bare "Error:", it counted nothing (#165).
+        typer.echo(
+            f"    Merged into {primary.name}, but {secondary.name} could not be "
+            f"deleted ({exc.strerror or exc}), so it was kept - `libris doctor` "
+            "will show the pair."
         )
     return True
 
