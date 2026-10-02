@@ -28,3 +28,16 @@ node_modules/
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfvars.json
+# A saved plan (terraform plan -out) holds every variable, secrets included, in plain text.
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# Not .terraform.lock.hcl: it pins the provider builds and is committed.
