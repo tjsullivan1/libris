@@ -13,6 +13,7 @@ See ADR 0001, ADR 0005, ADR 0009, ADR 0011 and ADR 0012.
 
 import difflib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import yaml
 from .markdown import (
     BookNote,
     NoteChanged,
+    NoteWriteFailed,
     list_books,
     read_note_with_fingerprint,
     rewrite_note,
@@ -305,6 +307,30 @@ def plan_note_migration(path: Path) -> NoteMigration:
     )
 
 
+def _planned(plan: Callable[[Path], NoteMigration], path: Path) -> NoteMigration:
+    """Plan one note, or a plan that leaves it alone when it cannot be read.
+
+    Every planner reads the whole Shelf, and read each note unguarded: one note
+    moved, locked or denied ended the run before a single diff was shown (#167).
+    Such a note is planned as unchanged and flagged, so it is named among the
+    notes that need a look and nothing is written to it.
+
+    Args:
+        plan: The planner for one note.
+        path: The note to plan.
+
+    Returns:
+        The plan, or an unchanged one carrying a warning saying why.
+    """
+    try:
+        return plan(path)
+    except FileNotFoundError:
+        warning = "moved or removed while planning; skipped"
+    except OSError as exc:
+        warning = f"could not be read ({exc.strerror or exc}); skipped"
+    return NoteMigration(path=path, original="", migrated="", warnings=[warning])
+
+
 def plan_migration(vault_path: Path) -> list[NoteMigration]:
     """Plan the migration for every Book Note on the Shelf.
 
@@ -314,7 +340,7 @@ def plan_migration(vault_path: Path) -> list[NoteMigration]:
     Returns:
         One plan per note, including notes that need no change.
     """
-    return [plan_note_migration(path) for path in list_books(vault_path)]
+    return [_planned(plan_note_migration, path) for path in list_books(vault_path)]
 
 
 def _render_formats(formats: list[str]) -> str:
@@ -424,7 +450,9 @@ def plan_format_migration(vault_path: Path) -> list[NoteMigration]:
     Returns:
         One plan per note, including notes that need no change.
     """
-    return [plan_note_format_migration(path) for path in list_books(vault_path)]
+    return [
+        _planned(plan_note_format_migration, path) for path in list_books(vault_path)
+    ]
 
 
 def _render_isbn(value: str) -> str:
@@ -564,7 +592,7 @@ def plan_isbn_migration(vault_path: Path) -> list[NoteMigration]:
     Returns:
         One plan per note, including notes that need no change.
     """
-    return [plan_note_isbn_migration(path) for path in list_books(vault_path)]
+    return [_planned(plan_note_isbn_migration, path) for path in list_books(vault_path)]
 
 
 @dataclass(frozen=True)
@@ -574,6 +602,10 @@ class MigrationOutcome:
     written: int
     gone: int
     changed: int
+    # There, but locked or denied, so left as they were (#167).
+    unopened: list[Path] = field(default_factory=list)
+    # A write failed partway and could not be undone (#166 review).
+    damaged: list[Path] = field(default_factory=list)
 
 
 def apply_migration(plans: list[NoteMigration]) -> MigrationOutcome:
@@ -586,17 +618,21 @@ def apply_migration(plans: list[NoteMigration]) -> MigrationOutcome:
     and writing it would discard the edit the reader made while reading the
     diffs (#132). The two are counted separately because they are different
     news: one note left the Shelf, the other is on it and newer than the plan.
+    A note that could not be opened, or whose write failed partway, is named
+    and passed over too, rather than ending the run for every later note (#167).
 
     Args:
         plans: Plans from `plan_migration`.
 
     Returns:
         How many notes were rewritten, were gone, and had changed since they
-        were planned.
+        were planned, and which could not be opened or may be damaged.
     """
     written = 0
     gone = 0
     changed = 0
+    unopened: list[Path] = []
+    damaged: list[Path] = []
     for plan in plans:
         if plan.changed:
             try:
@@ -607,5 +643,17 @@ def apply_migration(plans: list[NoteMigration]) -> MigrationOutcome:
             except NoteChanged:
                 changed += 1
                 continue
+            except OSError:
+                unopened.append(plan.path)
+                continue
+            except NoteWriteFailed:
+                damaged.append(plan.path)
+                continue
             written += 1
-    return MigrationOutcome(written=written, gone=gone, changed=changed)
+    return MigrationOutcome(
+        written=written,
+        gone=gone,
+        changed=changed,
+        unopened=unopened,
+        damaged=damaged,
+    )

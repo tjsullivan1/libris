@@ -219,13 +219,15 @@ def _apply_updates(path: Path, book: ImportBook, updates: List[str]) -> bool:
     # never recreates a note that has gone.
     try:
         set_frontmatter_fields(path, changes)
-    except (FrontmatterUnreadable, FileNotFoundError):
+    except (FrontmatterUnreadable, OSError):
         # Report the note as untouched rather than guessing at its shape. There
         # is deliberately no regex fallback for broken YAML: format is a list
         # (ADR 0017), and a line-level substitution would write a Python repr and
         # strand the block items below it, turning a note we could not parse into
         # one nobody can. An import run writes many notes and must not stop on
-        # one it cannot read, nor on one moved after the Shelf was scanned.
+        # one it cannot read, nor on one moved after the Shelf was scanned, nor
+        # on one locked or read-only - `OSError`, which a gone note's
+        # `FileNotFoundError` is one kind of (#167).
         return False
     return True
 

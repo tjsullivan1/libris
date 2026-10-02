@@ -208,6 +208,27 @@ def test_a_book_gone_before_the_write_comes_back_readable(shelved, monkeypatch):
     assert note.path.name in text(result)
 
 
+def test_a_locked_book_comes_back_readable_and_not_as_a_miss(shelved, lock_note):
+    # Given a book whose note is locked against writing - open in another
+    # program, or read-only
+    note = next(
+        n
+        for n in (BookNote.read(p) for p in Path(shelved).glob("*.md"))
+        if n.title == "Dune"
+    )
+    lock_note(note.path, writes=True)
+
+    # When it is updated
+    result = call("update_book", {"libris_id": note.libris_id, "status": "Read"})
+
+    # Then the tool names the note and says it could not be opened - not that
+    # the Library holds no such book, which would send an agent to add it again
+    # (#167)
+    assert result.is_error
+    assert f"{note.path.name} could not be opened" in text(result)
+    assert "No Book Note" not in text(result)
+
+
 def test_a_value_the_library_rejects_names_what_is_allowed(shelved):
     # Given a status the schema would have caught, sent anyway
     result = call("update_book", {"libris_id": "x", "status": "Finished"})

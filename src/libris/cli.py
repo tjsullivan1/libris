@@ -84,6 +84,7 @@ from .service import (
     accept_correction,
     apply_decisions,
     apply_encoding_repair,
+    could_not_open,
     csv_view,
     export_notes,
     failed_note_name,
@@ -179,6 +180,23 @@ def _format_rename_skip(filename: str, result: RenameResult) -> str | None:
     if msg is None:
         return None
     return f"Skipped rename for {filename}: {msg}"
+
+
+def _unlinked_lines(result: RenameResult, old_stem: str) -> list[str]:
+    """Name the notes a rename left linking to the old name, one line each.
+
+    Args:
+        result: A rename that happened.
+        old_stem: The note's old filename, without its extension.
+
+    Returns:
+        One line per note whose link could not be updated, none when all were.
+    """
+    return [
+        f"{path.name} still links to {old_stem} - it could not be opened, so "
+        "that link needs fixing by hand."
+        for path in result.unlinked
+    ]
 
 
 def _books_on_the_shelf(vault_path: Path) -> list[Path]:
@@ -362,6 +380,14 @@ def status(
         typer.echo(f"{exc} Nothing was written to it.")
         raise typer.Exit(code=1) from None
     except (InvalidFieldValue, BookNotFound) as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        # There, but locked or denied: a message, where it was a traceback
+        # (#167). A note that is gone is a `BookNotFound` by now.
+        typer.echo(f"{could_not_open(exc, 'The note')}. Nothing was written to it.")
+        raise typer.Exit(code=1) from None
+    except NoteWriteFailed as exc:
         typer.echo(str(exc))
         raise typer.Exit(code=1) from None
 
@@ -622,6 +648,8 @@ def clean(
             result = rename_book_file(selected_file, vault_root, frontmatter=fm)
             if result.status == "renamed":
                 typer.echo(f"Renamed: {selected_file_name} → {result.new_path.name}")
+                for line in _unlinked_lines(result, selected_file.stem):
+                    typer.echo(line)
             else:
                 msg = _format_rename_skip(selected_file_name, result)
                 if msg:
@@ -640,6 +668,14 @@ def clean(
             f"{selected_file_name} changed while it was being cleaned - saved in "
             "Obsidian, or synced. Nothing written; run it again."
         )
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        # There, but locked or denied: a traceback, where a note that is gone
+        # was a message (#167).
+        typer.echo(f"{could_not_open(exc, selected_file_name)}. Nothing more written.")
+        raise typer.Exit(code=1) from None
+    except NoteWriteFailed as exc:
+        typer.echo(str(exc))
         raise typer.Exit(code=1) from None
 
 
@@ -685,6 +721,8 @@ def cleanup(
     skipped_count = 0
     gone_count = 0
     changed_count = 0
+    unopened_count = 0
+    damaged: list[str] = []
     action_count = 0
     unmatched_files: list[str] = []
     for i, book_file in enumerate(books, 1):
@@ -739,6 +777,8 @@ def cleanup(
                         f"\n  Renamed: {book_file.name} → {result.new_path.name}",
                         nl=False,
                     )
+                    for line in _unlinked_lines(result, book_file.stem):
+                        typer.echo(f"\n  {line}", nl=False)
                 elif result.status not in ("already_canonical",):
                     msg = _format_rename_skip(book_file.name, result)
                     if msg:
@@ -769,6 +809,20 @@ def cleanup(
                 "Obsidian, or synced. Skipped.",
                 nl=False,
             )
+        except OSError as exc:
+            # There, but locked or denied. Caught as gone only, one such note
+            # ended the sweep for every note after it (#167).
+            unopened_count += 1
+            file_had_action = True
+            typer.echo(
+                f"\n  {could_not_open(exc, book_file.name)}. Nothing more written.",
+                nl=False,
+            )
+        except NoteWriteFailed as exc:
+            # Not "skipped": the note may be half-written (#166 review).
+            damaged.append(book_file.name)
+            file_had_action = True
+            typer.echo(f"\n  {exc}", nl=False)
 
         typer.echo("")  # final newline for this file
         if file_had_action:
@@ -777,7 +831,7 @@ def cleanup(
     typer.echo("")
     if updated_count:
         typer.echo(f"Finished. Updated {updated_count} books.")
-    elif not gone_count and not changed_count:
+    elif not (gone_count or changed_count or unopened_count or damaged):
         typer.echo("All books are already up to date.")
     if changed_count:
         # Said for the same reason a vanished note is: a note whose repair was
@@ -793,6 +847,19 @@ def cleanup(
         typer.echo(
             f"{gone_count} note(s) were gone - moved or removed while cleanup ran."
         )
+    if unopened_count:
+        typer.echo(
+            f"{unopened_count} note(s) could not be opened, so cleanup did not "
+            "finish them. Close whatever holds them, or make them writable, and "
+            "run it again."
+        )
+    if damaged:
+        typer.echo(
+            f"{len(damaged)} note(s) may be damaged - a write failed partway and "
+            "could not be undone. Check them, or restore them from a backup:"
+        )
+        for name in damaged:
+            typer.echo(f"  {name}")
 
     if rename:
         if renamed_count:
@@ -801,7 +868,7 @@ def cleanup(
             typer.echo(
                 f"No files renamed. {skipped_count} file(s) could not be renamed."
             )
-        elif not gone_count and not changed_count:
+        elif not (gone_count or changed_count or unopened_count or damaged):
             # Not when a note vanished, and not when one changed: neither was
             # renamed, so nothing here says its name is canonical (#131 second
             # review, #133 review).
@@ -1035,6 +1102,8 @@ def autoenrich(
     skipped = 0
     gone: list[str] = []
     changed_notes: list[str] = []
+    unopened: list[str] = []
+    damaged: list[str] = []
     needs_interactive: list[str] = []
     unmatched: list[str] = []
     action_count = 0
@@ -1129,6 +1198,20 @@ def autoenrich(
             changed_notes.append(book_file.name)
             action_count += 1
             continue
+        except OSError as exc:
+            # There, but locked or denied. Caught as gone only, one such note
+            # ended the run for every note after it (#167).
+            typer.echo(f" — {could_not_open(exc, book_file.name)}. Skipped.")
+            unopened.append(book_file.name)
+            action_count += 1
+            continue
+        except NoteWriteFailed as exc:
+            # Not skipped, and not enriched: the note may be half-written (#166
+            # review).
+            typer.echo(f" — {exc}")
+            damaged.append(book_file.name)
+            action_count += 1
+            continue
 
         action_count += 1
 
@@ -1138,7 +1221,7 @@ def autoenrich(
         # A vanished note used an action but was never going to be enriched, so
         # it is not counted as one that would be - and it is said here, because
         # the dry run returns before the full summary (#131 third review).
-        would = action_count - len(gone) - len(changed_notes)
+        would = action_count - len(gone) - len(changed_notes) - len(unopened)
         typer.echo(
             f"Dry run: {would} book(s) would be enriched, {skipped} already complete."
         )
@@ -1146,6 +1229,8 @@ def autoenrich(
             typer.echo(f"Gone (moved or removed while running): {len(gone)}")
         if changed_notes:
             typer.echo(f"Changed while running, so not enriched: {len(changed_notes)}")
+        if unopened:
+            typer.echo(f"Could not be opened: {len(unopened)}")
         return
 
     typer.echo(f"Enriched (auto): {enriched_auto}")
@@ -1161,6 +1246,14 @@ def autoenrich(
         # Also not "already complete", and not gone either: these notes are on
         # the Shelf, newer than the enrichment worked out for them (#132).
         typer.echo(f"Changed while running, so not enriched: {len(changed_notes)}")
+    if unopened:
+        # Locked, read-only or denied: on the Shelf and not enriched, which is
+        # neither complete nor gone (#167).
+        typer.echo(f"Could not be opened: {len(unopened)}")
+    if damaged:
+        typer.echo(f"May be damaged: {len(damaged)}")
+        for name in damaged:
+            typer.echo(f"  • {name}")
 
     if needs_interactive:
         typer.echo(
@@ -1227,6 +1320,14 @@ def enrich(
             f"{selected_file.name} changed while it was being enriched - saved in "
             "Obsidian, or synced. Nothing written; run it again."
         )
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        # There, but locked or denied: a message, as a note that is gone is
+        # (#167).
+        typer.echo(f"{could_not_open(exc, selected_file.name)}. Nothing written.")
+        raise typer.Exit(code=1) from None
+    except NoteWriteFailed as exc:
+        typer.echo(str(exc))
         raise typer.Exit(code=1) from None
 
 
@@ -1418,6 +1519,8 @@ def doctor(
         )
     if report.not_utf8:
         sections.append(lambda: _report_not_utf8(report.not_utf8))
+    if report.unreadable:
+        sections.append(lambda: _report_unreadable(report.unreadable))
 
     for index, section in enumerate(sections):
         if index:
@@ -1439,6 +1542,21 @@ def _report_not_utf8(paths: list[Path]) -> None:
         "search passes over them and `libris status` refuses them. Save each as "
         "UTF-8 in an editor that can tell which encoding it was written in - the "
         "file does not say, so Libris does not guess (ADR 0003)."
+    )
+
+
+def _report_unreadable(paths: list[Path]) -> None:
+    """Print the notes that could not be opened, so were not checked (#167).
+
+    Args:
+        paths: The notes from `inspect_shelf`.
+    """
+    typer.echo(f"{len(paths)} note(s) could not be read, so were not checked.\n")
+    for path in paths:
+        typer.echo(f"    {path.name}")
+    typer.echo(
+        "\nEach is locked, read-only to this user, or denied by permissions. "
+        "Close whatever holds them, or fix their permissions, and run it again."
     )
 
 
@@ -1537,6 +1655,12 @@ def _rename_damaged_filenames(damaged: list[EncodingDamage], vault_path: Path) -
             typer.echo("  is gone - moved or removed since it was reported. Skipped.")
             gone += 1
             continue
+        except OSError as exc:
+            # There, but locked or denied. Raised, it ended the renames for
+            # every note after it (#167).
+            typer.echo(f"  {could_not_open(exc, path.name)}. Left alone.")
+            left += 1
+            continue
 
         if note is None:
             # Read through `BookNote` rather than `compute_canonical_filename`,
@@ -1585,9 +1709,15 @@ def _rename_damaged_filenames(damaged: list[EncodingDamage], vault_path: Path) -
             typer.echo("  is gone - moved or removed mid-rename. Nothing renamed.")
             gone += 1
             continue
+        except OSError as exc:
+            typer.echo(f"  {could_not_open(exc, path.name)}. Nothing renamed.")
+            left += 1
+            continue
 
         if result.status == "renamed":
             typer.echo(f"  Renamed to {result.new_path.name}")
+            for line in _unlinked_lines(result, path.stem):
+                typer.echo(f"  {line}")
             renamed += 1
             continue
 
@@ -1656,6 +1786,7 @@ def repair(
 
     client = GoogleBooksClient()
     repaired = untouched = 0
+    damaged_writes: list[str] = []
 
     for damage in in_place[: limit or None]:
         typer.echo(f"{damage.path.name}")
@@ -1749,6 +1880,21 @@ def repair(
             typer.echo(f"  {exc} Nothing was written to it.\n")
             untouched += 1
             continue
+        except OSError as exc:
+            # There, but locked or denied. Raised, it ended the repair for every
+            # note after it, answers already typed included (#167).
+            typer.echo(
+                f"  {could_not_open(exc, damage.path.name)}. "
+                "Nothing was written to it.\n"
+            )
+            untouched += 1
+            continue
+        except NoteWriteFailed as exc:
+            # Neither repaired nor left alone: it may be half-written (#166
+            # review).
+            typer.echo(f"  {exc}\n")
+            damaged_writes.append(damage.path.name)
+            continue
 
         if not applied:
             # Counted as repaired, this reported a write that never happened
@@ -1765,6 +1911,13 @@ def repair(
         repaired += 1
 
     typer.echo(f"Repaired {repaired} note(s); left {untouched} alone.")
+    if damaged_writes:
+        typer.echo(
+            f"{len(damaged_writes)} may be damaged - a write failed partway and "
+            "could not be undone. Check them, or restore them from a backup:"
+        )
+        for name in damaged_writes:
+            typer.echo(f"  {name}")
     renames = [note for note in damaged if note.touches_filename]
     if not renames:
         return
@@ -2475,7 +2628,7 @@ def import_cmd(
         result = run_import(
             file_path, vault_path, apply=apply, format_name=fmt, limit=limit
         )
-    except (ValueError, FileNotFoundError) as e:
+    except (ValueError, OSError) as e:
         typer.echo(f"Error: {e}")
         raise typer.Exit(code=1)
 
@@ -2622,6 +2775,22 @@ def migrate(
             f"{outcome.changed} changed since they were planned and were left "
             "alone. Re-run the migration to plan them again."
         )
+    if outcome.unopened:
+        # Locked, read-only or denied. Named, since each needs something done
+        # to it outside Libris before a re-run can reach it (#167).
+        typer.echo(
+            f"{len(outcome.unopened)} could not be opened and were left alone - "
+            "locked, read-only, or denied by permissions:"
+        )
+        for path in outcome.unopened:
+            typer.echo(f"  {path.name}")
+    if outcome.damaged:
+        typer.echo(
+            f"{len(outcome.damaged)} may be damaged - a write failed partway and "
+            "could not be undone. Check them, or restore them from a backup:"
+        )
+        for path in outcome.damaged:
+            typer.echo(f"  {path.name}")
 
 
 if __name__ == "__main__":

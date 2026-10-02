@@ -1389,7 +1389,9 @@ def update_wikilinks_in_vault(
 
     A linking note removed while the sweep runs is skipped. It holds no link
     left to fix, and one note moving must not stop the rest of the vault being
-    updated - nor be written back into existence (#128).
+    updated - nor be written back into existence (#128). A note that is there
+    but cannot be opened is skipped too, for the same reason; `sweep_wikilinks`
+    says which those were.
 
     Args:
         vault_root: The vault to sweep.
@@ -1400,7 +1402,34 @@ def update_wikilinks_in_vault(
     Returns:
         How many notes had a link updated.
     """
+    updated, _ = sweep_wikilinks(vault_root, old_stem, new_stem, exclude)
+    return updated
+
+
+def sweep_wikilinks(
+    vault_root: Path, old_stem: str, new_stem: str, exclude: Optional[Path] = None
+) -> tuple[int, list[Path]]:
+    """Update all wikilinks from old_stem to new_stem, naming the notes it could not.
+
+    Runs after the rename has happened, so nothing here may stop it partway: a
+    locked or read-only linking note ended the sweep, and the caller reported a
+    rename that had happened as a note that could not be opened, with every
+    later link left pointing at a name nothing holds (#167). Such a note is
+    passed over and named instead, so its link can be fixed by hand.
+
+    Args:
+        vault_root: The vault to sweep.
+        old_stem: The renamed note's old filename, without its extension.
+        new_stem: Its new filename, without its extension.
+        exclude: A note to leave unswept, usually the renamed note itself.
+
+    Returns:
+        How many notes had a link updated, and the notes that could not be
+        opened or were left damaged by a failed write - each may still link to
+        the old name.
+    """
     updated_count = 0
+    unlinked: list[Path] = []
     exclude_resolved = exclude.resolve() if exclude else None
     for root, dirnames, filenames in os.walk(vault_root):
         # Skip hidden directories (.obsidian, .git, etc.) before descending into them.
@@ -1417,7 +1446,9 @@ def update_wikilinks_in_vault(
                     updated_count += 1
             except FileNotFoundError:
                 continue
-    return updated_count
+            except (OSError, NoteWriteFailed):
+                unlinked.append(md_file)
+    return updated_count, unlinked
 
 
 def _sweep_one_note(md_file: Path, old_stem: str, new_stem: str) -> bool:
@@ -1476,6 +1507,9 @@ class RenameResult:
     status: RenameStatus
     new_path: Optional[Path] = None
     detail: Optional[str] = None
+    # Notes whose links to the old name could not be updated, because they
+    # could not be opened (#167). The rename itself happened.
+    unlinked: tuple[Path, ...] = ()
 
 
 def rename_book_file(
@@ -1518,5 +1552,5 @@ def rename_book_file(
     file_path.rename(new_path)
 
     # Update wikilinks across the vault
-    update_wikilinks_in_vault(search_root, old_stem, new_stem, exclude=new_path)
-    return RenameResult(status="renamed", new_path=new_path)
+    _, unlinked = sweep_wikilinks(search_root, old_stem, new_stem, exclude=new_path)
+    return RenameResult(status="renamed", new_path=new_path, unlinked=tuple(unlinked))
