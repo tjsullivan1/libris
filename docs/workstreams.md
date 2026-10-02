@@ -102,11 +102,15 @@ Carried forward into this workstream from those decisions:
   refuses to push while `find_id_collisions` reports a shared ID, which it would otherwise
   collapse into one remote document.
 
-## 4. Infrastructure
+## 4. Authentication and infrastructure
 
-Terraform: Container Apps, ACR, Cosmos serverless, managed identity, `azuread_application`
-(ADR 0006, ADR 0007).
+Moved ahead of sync once the tool surface had proved itself over stdio. What remained risky was
+whether Claude and Gemini could sign in at all, so that is tested first, in #171.
 
-## 5. Authentication
+Neither client works with Entra by default, so Libris is its own OAuth authorization server and
+Google identifies the one allowed account (ADR 0035). There is no `azuread_application` and no
+manually registered client. Terraform in `infra/` provisions the Container App (one replica at
+most), ACR, Key Vault, Cosmos serverless and a managed identity (ADR 0006, ADR 0007).
 
-Entra, Streamable HTTP, OAuth with manually registered clients (ADR 0004).
+The rest of the hosted work is tracked as issues: #172 and #173 lead to the read-only release in
+#175, and Intents follow in #176-#178.

@@ -22,3 +22,9 @@ wheels/
 # Node, for the extension test and lint tooling only. The extension itself
 # ships no dependencies and needs no build step.
 node_modules/
+
+# Terraform. State holds secrets (infra/README.md); tfvars holds the Google client secret.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars

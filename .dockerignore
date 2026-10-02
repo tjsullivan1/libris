@@ -1,0 +1,11 @@
+.git
+.venv
+.claude
+.github
+extension
+contrib
+docs
+infra
+tests
+**/__pycache__
+*.env
