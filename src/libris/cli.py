@@ -81,6 +81,7 @@ from .service import (
     IsbnAgreement,
     NotTwoNotes,
     ShelfExport,
+    ShelfUnreadable,
     accept_correction,
     apply_decisions,
     apply_encoding_repair,
@@ -395,6 +396,9 @@ def status(
         raise typer.Exit(code=1) from None
     except (InvalidFieldValue, BookNotFound) as exc:
         typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
+    except ShelfUnreadable as exc:
+        typer.echo(f"{exc} Nothing was written.")
         raise typer.Exit(code=1) from None
     except OSError as exc:
         # There, but locked or denied: a message, where it was a traceback
@@ -2850,9 +2854,8 @@ def migrate(
         # Locked, read-only or denied. Named, since each needs something done
         # to it outside Libris before a re-run can reach it (#167).
         typer.echo(
-            f"{len(outcome.unopened)} could not be accessed and were left alone - "
-            "locked, denied by permissions, or a write that failed and was put "
-            "back:"
+            f"{len(outcome.unopened)} could not be read or written, and were "
+            "left as they were:"
         )
         for path in outcome.unopened:
             typer.echo(f"  {path.name}")

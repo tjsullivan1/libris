@@ -352,6 +352,8 @@ def create_server(name: str = "libris") -> "MCPServer":
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from None
+        except service.ShelfUnreadable as exc:
+            raise ToolError(f"{exc} Nothing was added.") from None
 
         return WriteAnswer(
             outcome=result.outcome.value,
@@ -398,7 +400,7 @@ def create_server(name: str = "libris") -> "MCPServer":
 
         try:
             result = service.update_book(_shelf(), libris_id, fields)
-        except service.BookNotFound as exc:
+        except (service.BookNotFound, service.ShelfUnreadable) as exc:
             raise ToolError(str(exc)) from None
         except ValueError as exc:
             # InvalidFieldValue subclasses ValueError, so this covers a value the

@@ -552,6 +552,28 @@ def test_creating_a_book_note_answers_with_its_identity(token, tmp_path):
     assert (tmp_path / "Dune - Frank Herbert.md").exists()
 
 
+def test_adding_a_book_whose_note_could_not_be_read_is_unavailable(
+    token, tmp_path, lock_note
+):
+    # Given the book on the Shelf, its note locked against reading
+    config.set_book_vault_path(tmp_path)
+    _post_book(token)
+    held = tmp_path / "Dune - Frank Herbert.md"
+    lock_note(held, reads=True)
+
+    # When it is captured again by a fresh daemon, with no earlier parse of it
+    from libris import shelf
+
+    shelf.forget_indexes()
+    response = _post_book(token)
+
+    # Then it is refused as unavailable for now, naming the note, rather than
+    # written as a second note for the Book (#168 review)
+    assert response.status_code == 503
+    assert held.name in response.json()["detail"]
+    assert list(tmp_path.glob("*.md")) == [held]
+
+
 def test_adding_a_book_already_held_leaves_it_untouched(token, tmp_path):
     # Given the book already on the Shelf
     config.set_book_vault_path(tmp_path)

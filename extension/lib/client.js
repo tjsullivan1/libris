@@ -62,7 +62,9 @@ async function call(path, { method = "GET", body, auth = true } = {}) {
 
   if (response.status === 401) throw new DaemonError(Problem.UNAUTHORIZED, settings);
   if (response.status === 502) throw new DaemonError(Problem.UPSTREAM, settings);
-  if (response.status === 422) {
+  // 503: the daemon could not read every note, so cannot say whether the Book
+  // is already held. Its detail names them; "start the server" would be wrong.
+  if (response.status === 422 || response.status === 503) {
     throw new DaemonError(Problem.REFUSED, settings, await detailOf(response));
   }
   if (!response.ok) {

@@ -290,7 +290,7 @@ def test_migrate_reports_a_note_it_could_not_write(shelf, monkeypatch, lock_note
 
     # Then it is named, and the note after it is still written
     assert result.exit_code == 0, result.output
-    assert "1 could not be accessed" in result.output
+    assert "1 could not be read or written" in result.output
     assert "A Locked.md" in result.output
     assert "Migrated 1 notes." in result.output
     assert "libris_id" in kept.read_text(encoding="utf-8")
@@ -749,3 +749,46 @@ def test_status_reports_a_locked_note_rather_than_a_traceback(shelf, lock_note):
     assert result.exit_code == 1, result.output
     assert f"{locked.name} could not be accessed" in result.output
     assert not isinstance(result.exception, PermissionError)
+
+
+# --- a lookup that could not read a note has not ruled it out (#168 review) ---
+
+
+def test_status_by_id_does_not_call_a_book_it_could_not_read_absent(shelf, lock_note):
+    # Given a note locked against reading, named by its identity
+    from libris.markdown import BookNote
+
+    path = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), shelf
+    )
+    libris_id = BookNote.read(path).libris_id
+    lock_note(path, reads=True)
+
+    # When its status is set by that identity
+    result = runner.invoke(app, ["status", "--id", libris_id, "--set", "Read"])
+
+    # Then the command says it could not tell, naming the note - not that no
+    # note holds the id, which is not known
+    assert result.exit_code == 1, result.output
+    assert "could not be read" in result.output
+    assert path.name in result.output
+    assert "No Book Note holds" not in result.output
+
+
+def test_adding_a_book_whose_note_could_not_be_read_writes_nothing(tmp_path, lock_note):
+    # Given a Shelf holding Dune, its note locked against reading
+    from libris import service
+
+    held = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), tmp_path
+    )
+    lock_note(held, reads=True)
+
+    # When Dune is added again
+    # Then the add is refused, naming the note, and no second note is written:
+    # the duplicate check could not see the first one
+    with pytest.raises(service.ShelfUnreadable, match=held.name):
+        service.add_book(
+            tmp_path, BookCandidate(title="Dune", authors=["Frank Herbert"])
+        )
+    assert list(tmp_path.glob("*.md")) == [held]

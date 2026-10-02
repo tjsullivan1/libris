@@ -175,6 +175,14 @@ class ShelfStore:
     def _notes(self) -> list[BookNote]:
         return index_for(self.vault_path).notes()
 
+    def unreadable(self) -> list[Path]:
+        """The notes the last question could not read, so did not consider.
+
+        Returns:
+            Their paths. A question that found nothing has not ruled them out.
+        """
+        return index_for(self.vault_path).unreadable
+
     def _titled(self, status: str | None) -> list[BookNote]:
         return [n for n in self._notes() if n.title and _in_status(n, status)]
 

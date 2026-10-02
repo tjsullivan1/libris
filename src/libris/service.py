@@ -616,6 +616,8 @@ def add_book(
             define.
         ValueError: If an override names a field the canonical schema has no
             place for.
+        ShelfUnreadable: If no note it could read holds the Book, and some
+            notes could not be read. Nothing is written.
     """
     # Writes land on the Shelf, so the duplicate check is asked of the live Shelf:
     # the stronger guarantee, true at the moment of the write (ADR 0010).
@@ -637,6 +639,12 @@ def add_book(
             title=existing.title,
             authors=existing.authors,
         )
+
+    unread = store.unreadable()
+    if unread:
+        # The duplicate check did not see these, and any of them may be this
+        # Book: written now, it would be a second note for it (#168 review).
+        raise ShelfUnreadable(unread, "whether the Library already holds this book")
 
     check: NearMatchCheck | None = None
     if stop_on_near_match:
@@ -669,6 +677,26 @@ def add_book(
         authors=note.authors if note else candidate.authors,
         near_match_check=check,
     )
+
+
+class ShelfUnreadable(Exception):
+    """A question about the Shelf cannot be answered, because notes could not be read.
+
+    Raised where an answer of "none" would be acted on: an update reporting a
+    Book absent that a locked note holds, or an add creating a second note for
+    it (#168 review).
+
+    Attributes:
+        paths: The notes that could not be read.
+    """
+
+    def __init__(self, paths: list[Path], question: str) -> None:
+        self.paths = paths
+        names = ", ".join(path.name for path in paths)
+        super().__init__(
+            f"{len(paths)} note(s) on the Shelf could not be read, so {question} "
+            f"is not known: {names}."
+        )
 
 
 class BookNotFound(Exception):
@@ -730,9 +758,18 @@ def update_book(
         InvalidFieldValue: If a value is not one the Library defines.
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
+        ShelfUnreadable: If no note it could read holds the identity, and some
+            notes could not be read. Nothing is written.
     """
-    note = find_by_libris_id(ShelfStore(vault_path), libris_id)
+    store = ShelfStore(vault_path)
+    note = find_by_libris_id(store, libris_id)
     if note is None:
+        unread = store.unreadable()
+        if unread:
+            # Not a miss: one of these may hold it (#168 review).
+            raise ShelfUnreadable(
+                unread, f"whether one of them holds the id {libris_id!r}"
+            )
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
     return _set_reader_fields(note.path, fields, holding=libris_id.strip())
 

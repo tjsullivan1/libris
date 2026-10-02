@@ -65,6 +65,19 @@ class ShelfIndex:
     # Files whose frontmatter would not parse. Remembered so a broken note is
     # not re-read on every question, and re-read the moment it is edited.
     _unparseable: dict[str, Fingerprint] = field(default_factory=dict)
+    # Notes the last call could not read and had no earlier parse of, so left
+    # out of its answer. A question that found nothing has not ruled them out
+    # (#168 review).
+    _unread: list[Path] = field(default_factory=list)
+
+    @property
+    def unreadable(self) -> list[Path]:
+        """The notes the last `notes()` left out because it could not read them.
+
+        Returns:
+            Their paths, empty when every note on the Shelf was answered for.
+        """
+        return list(self._unread)
 
     def notes(self) -> list[BookNote]:
         """Every Book Note on the Shelf, as it stands right now.
@@ -75,6 +88,7 @@ class ShelfIndex:
         """
         seen: set[str] = set()
         found: list[BookNote] = []
+        self._unread = []
 
         try:
             # Closed deterministically rather than left to exhaustion: if the
@@ -104,6 +118,11 @@ class ShelfIndex:
 
             try:
                 note = BookNote.read(Path(path))
+            except FileNotFoundError:
+                # Gone: not on the Shelf, so nothing to answer for.
+                if cached is not None:
+                    found.append(cached)
+                continue
             except OSError:
                 # The file moved, vanished or was locked between the listing and
                 # the read - Obsidian saving, a sync client, or Libris itself.
@@ -114,6 +133,10 @@ class ShelfIndex:
                 # tries again rather than trusting what it could not read.
                 if cached is not None:
                     found.append(cached)
+                else:
+                    # Nothing to stand in for it, so the answer is incomplete,
+                    # and says so (#168 review).
+                    self._unread.append(Path(path))
                 continue
 
             if note is None:
