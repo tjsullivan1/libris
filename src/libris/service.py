@@ -1160,8 +1160,8 @@ class _ShelfFile:
     # The SHA-256 of the bytes read, so a repair decided from this reading can
     # prove the note has not changed before writing it (#129 fifth review).
     fingerprint: str = ""
-    # The file is on the Shelf but could not be opened - locked, read-only or
-    # denied - so nothing about its contents is known (#167).
+    # The file is on the Shelf but could not be read - locked, denied, or a
+    # failing disk - so nothing about its contents is known (#167).
     unreadable: bool = False
 
     def value(self, key: str) -> object:
@@ -1968,7 +1968,7 @@ class ShelfReport:
     # Notes that are not UTF-8 text. Nothing else in Libris can read them - the
     # index treats them as unparseable - so this is the one place they surface.
     not_utf8: list[Path] = field(default_factory=list)
-    # Notes that could not be opened, so no check above has seen them (#167).
+    # Notes that could not be read, so no check above has seen them (#167).
     unreadable: list[Path] = field(default_factory=list)
 
     @property
@@ -2192,13 +2192,15 @@ def failed_note_name(exc: OSError, fallback: str) -> str:
     return Path(exc.filename).name if exc.filename else fallback
 
 
-def could_not_open(exc: OSError, fallback: str) -> str:
-    """Say that a note is there but could not be opened, and why.
+def could_not_access(exc: OSError, fallback: str) -> str:
+    """Say that a note is there but could not be read or written, and why.
 
-    For a note that is locked, read-only or denied by permissions - an `OSError`
-    that is not a `FileNotFoundError`, which every per-note handler caught and
-    nothing else did (#167). One sentence for every Surface, so the CLI and an
-    agent are told the same thing.
+    For an `OSError` that is not a `FileNotFoundError`, which every per-note
+    handler caught and nothing else did (#167). Most are a lock, a read-only
+    file or a permission, but a write that ran out of disk and was put back
+    raises one too, so the cause is only suggested when the error is a
+    `PermissionError` - it is not asserted otherwise (#168 review). One sentence
+    for every Surface, so the CLI and an agent are told the same thing.
 
     Args:
         exc: The error, which names the file it failed on when the OS said.
@@ -2207,10 +2209,13 @@ def could_not_open(exc: OSError, fallback: str) -> str:
     Returns:
         A sentence naming the note and the reason, without a full stop.
     """
-    return (
-        f"{failed_note_name(exc, fallback)} could not be opened "
-        f"({exc.strerror or exc}) - locked, read-only, or denied by permissions"
+    message = (
+        f"{failed_note_name(exc, fallback)} could not be accessed "
+        f"({exc.strerror or exc})"
     )
+    if isinstance(exc, PermissionError):
+        message += " - locked, read-only, or denied by permissions"
+    return message
 
 
 def build_id_index(vault_path: Path) -> dict[str, BookNote]:

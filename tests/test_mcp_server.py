@@ -221,11 +221,11 @@ def test_a_locked_book_comes_back_readable_and_not_as_a_miss(shelved, lock_note)
     # When it is updated
     result = call("update_book", {"libris_id": note.libris_id, "status": "Read"})
 
-    # Then the tool names the note and says it could not be opened - not that
+    # Then the tool names the note and says it could not be accessed - not that
     # the Library holds no such book, which would send an agent to add it again
     # (#167)
     assert result.is_error
-    assert f"{note.path.name} could not be opened" in text(result)
+    assert f"{note.path.name} could not be accessed" in text(result)
     assert "No Book Note" not in text(result)
 
 

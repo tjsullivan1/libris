@@ -618,7 +618,7 @@ def apply_migration(plans: list[NoteMigration]) -> MigrationOutcome:
     and writing it would discard the edit the reader made while reading the
     diffs (#132). The two are counted separately because they are different
     news: one note left the Shelf, the other is on it and newer than the plan.
-    A note that could not be opened, or whose write failed partway, is named
+    A note that could not be accessed, or whose write failed partway, is named
     and passed over too, rather than ending the run for every later note (#167).
 
     Args:
@@ -626,7 +626,7 @@ def apply_migration(plans: list[NoteMigration]) -> MigrationOutcome:
 
     Returns:
         How many notes were rewritten, were gone, and had changed since they
-        were planned, and which could not be opened or may be damaged.
+        were planned, and which could not be accessed or may be damaged.
     """
     written = 0
     gone = 0

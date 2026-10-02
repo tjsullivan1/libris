@@ -9,6 +9,7 @@ from .api import UNKNOWN_AUTHOR, BookCandidate
 from .markdown import (
     BookNote,
     FrontmatterUnreadable,
+    NoteWriteFailed,
     create_book_note,
     list_books,
     set_frontmatter_fields,
@@ -148,6 +149,12 @@ class ImportResult:
         default_factory=list
     )
     skipped_books: List[ImportBook] = field(default_factory=list)
+    # Due an update that could not be written: unparseable, gone, or not
+    # accessible. Counted as skipped, a locked note read as one already up to
+    # date (#168 review).
+    unapplied_books: List[Tuple[ImportBook, Path]] = field(default_factory=list)
+    # Due an update whose write failed partway and could not be put back.
+    damaged_books: List[Tuple[ImportBook, Path]] = field(default_factory=list)
 
 
 def _check_duplicate(
@@ -266,10 +273,19 @@ def run_import(
         else:
             dup_path, _, updates = dup
             if updates:
-                result.updated_books.append((book, dup_path, updates))
                 if apply:
-                    if not _apply_updates(dup_path, book, updates):
-                        result.skipped_books.append(book)
+                    # Caught here rather than in `_apply_updates`, which answers
+                    # only whether the note is untouched: this one may not be,
+                    # and an import must not stop on one note (#168 review).
+                    try:
+                        applied = _apply_updates(dup_path, book, updates)
+                    except NoteWriteFailed:
+                        result.damaged_books.append((book, dup_path))
+                        continue
+                    if not applied:
+                        result.unapplied_books.append((book, dup_path))
+                        continue
+                result.updated_books.append((book, dup_path, updates))
             else:
                 result.skipped_books.append(book)
 

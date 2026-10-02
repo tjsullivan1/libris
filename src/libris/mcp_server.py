@@ -408,7 +408,7 @@ def create_server(name: str = "libris") -> "MCPServer":
             # There, but locked or denied. Untranslated, the agent was told only
             # that the tool failed, with nothing to relay (#167).
             raise ToolError(
-                f"{service.could_not_open(exc, 'The note')}. Nothing was written."
+                f"{service.could_not_access(exc, 'The note')}. Nothing was written."
             ) from None
         except NoteWriteFailed as exc:
             raise ToolError(str(exc)) from None

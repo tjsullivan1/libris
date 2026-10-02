@@ -48,15 +48,24 @@ def shelf(tmp_path, monkeypatch) -> Path:
     return vault
 
 
-def _fail_partway(monkeypatch) -> None:
-    """Make the first rewrite fail halfway, and fail putting it back too (#166)."""
+def _fail_partway(monkeypatch, *, restore_fails: bool = True, skip: int = 0) -> None:
+    """Make the first rewrite fail halfway, and by default fail putting it back.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        restore_fails: Fail putting the old bytes back as well, which raises
+            `NoteWriteFailed` (#166). Otherwise the note is put back and the
+            write's `OSError` - a full disk, not a lock - is raised.
+        skip: Let this many rewrites succeed before the one that fails.
+    """
     real = markdown._replace_bytes
     calls = 0
+    failing = (skip + 1, skip + 2) if restore_fails else (skip + 1,)
 
     def _replace(fd, data):
         nonlocal calls
         calls += 1
-        if calls in (1, 2):
+        if calls in failing:
             real(fd, data[: len(data) // 2])
             raise OSError(errno.ENOSPC, "No space left on device")
         return real(fd, data)
@@ -81,8 +90,8 @@ def test_cleanup_reports_a_locked_note_and_repairs_the_rest(shelf, lock_note, re
     # Then the locked note is named and left as it was, and the note after it is
     # still repaired. Caught as gone only, the lock ended the sweep there.
     assert result.exit_code == 0, result.output
-    assert "A Locked.md could not be opened" in result.output
-    assert "1 note(s) could not be opened" in result.output
+    assert "A Locked.md could not be accessed" in result.output
+    assert "1 note(s) could not be accessed" in result.output
     assert "tags: Book" in kept.read_text(encoding="utf-8")
     lock_note(locked)
     assert locked.read_bytes() == before
@@ -121,7 +130,7 @@ def test_clean_reports_a_locked_note_rather_than_a_traceback(
 
     # Then the command says so and exits 1, as it does for a note that is gone
     assert result.exit_code == 1
-    assert "Locked.md could not be opened" in result.output
+    assert "Locked.md could not be accessed" in result.output
     assert not isinstance(result.exception, PermissionError)
 
 
@@ -162,8 +171,8 @@ def test_autoenrich_reports_a_locked_note_and_enriches_the_rest(
     # Then the locked note is named and counted apart from a complete one, and
     # the note after it is still enriched
     assert result.exit_code == 0, result.output
-    assert "Alpha.md could not be opened" in result.output
-    assert "Could not be opened: 1" in result.output
+    assert "Alpha.md could not be accessed" in result.output
+    assert "Could not be accessed: 1" in result.output
     assert "Skipped (already complete): 0" in result.output
     assert read_frontmatter(kept)["authors"] == ["A"]
     lock_note(locked)
@@ -210,7 +219,7 @@ def test_enrich_reports_a_locked_note_rather_than_a_traceback(
 
     # Then the command says so and exits 1
     assert result.exit_code == 1, result.output
-    assert "Dune.md could not be opened" in result.output
+    assert "Dune.md could not be accessed" in result.output
     assert not isinstance(result.exception, PermissionError)
 
 
@@ -281,7 +290,7 @@ def test_migrate_reports_a_note_it_could_not_write(shelf, monkeypatch, lock_note
 
     # Then it is named, and the note after it is still written
     assert result.exit_code == 0, result.output
-    assert "1 could not be opened" in result.output
+    assert "1 could not be accessed" in result.output
     assert "A Locked.md" in result.output
     assert "Migrated 1 notes." in result.output
     assert "libris_id" in kept.read_text(encoding="utf-8")
@@ -345,7 +354,7 @@ def test_repair_reports_a_locked_note_and_repairs_the_rest(
 
     # Then the locked note is named and left alone, and the other repaired
     assert result.exit_code == 0, result.output
-    assert "A Locked.md could not be opened" in result.output
+    assert "A Locked.md could not be accessed" in result.output
     assert "Repaired 1 note(s); left 1 alone." in result.output
     assert "Søren" in kept.read_text(encoding="utf-8")
     lock_note(locked)
@@ -390,7 +399,7 @@ def test_repair_rename_reports_a_locked_note_and_renames_the_rest(
 
     # Then the locked note is named and the other is still renamed
     assert result.exit_code == 0, result.output
-    assert "could not be opened" in result.output
+    assert "could not be accessed" in result.output
     assert (shelf / "B Søren - Kierkegaard.md").exists()
 
 
@@ -408,7 +417,7 @@ def test_a_locked_linking_note_does_not_stop_the_wikilink_sweep(tmp_path, lock_n
 
     # Then the notes either side of it are updated. Raised, the lock ended the
     # sweep after the rename itself had happened, and the caller reported a
-    # rename that happened as a note that could not be opened.
+    # rename that happened as a note that could not be accessed.
     assert updated == 2
     assert "[[New Name]]" in (tmp_path / "C.md").read_text(encoding="utf-8")
     assert "[[Old Name]]" in (tmp_path / "B.md").read_text(encoding="utf-8")
@@ -480,6 +489,135 @@ def test_import_passes_over_a_locked_note_and_updates_the_rest(tmp_path, lock_no
     assert _apply_updates(locked, book, ["status"]) is False
 
 
+def _import_two_finished(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Two notes marked To Read, and an Audible export saying both are finished."""
+    import json
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    first = create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]), vault
+    )
+    second = create_book_note(
+        BookCandidate(title="Emma", authors=["Jane Austen"]), vault
+    )
+    export = tmp_path / "library.json"
+    export.write_text(
+        json.dumps(
+            [
+                {"title": "Dune", "author": "Frank Herbert", "finished": "Yes"},
+                {"title": "Emma", "author": "Jane Austen", "finished": "Yes"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return vault, export, first, second
+
+
+def test_an_import_reports_a_locked_note_apart_from_one_up_to_date(
+    tmp_path, monkeypatch, lock_note
+):
+    # Given an import due to update two notes, the first read-only
+    vault, export, locked, kept = _import_two_finished(tmp_path)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    lock_note(locked, writes=True)
+
+    # When it is applied
+    result = runner.invoke(app, ["import", str(export), "--apply"])
+
+    # Then the locked note is said not to have been updated - not counted among
+    # the duplicates already up to date, which it is not - and the other is
+    assert result.exit_code == 0, result.output
+    assert "Could not be updated (1)" in result.output
+    assert f"! {locked.name}" in result.output
+    assert "0 duplicate(s) already up-to-date" in result.output
+    assert "1 existing book(s) updated" in result.output
+    assert read_frontmatter(kept)["status"] == "Read"
+
+
+def test_an_import_reports_a_note_left_damaged_and_goes_on(tmp_path, monkeypatch):
+    # Given an import due to update two notes, and the first write failing
+    # partway with nothing put back
+    from libris.importer import run_import
+
+    vault, export, damaged, kept = _import_two_finished(tmp_path)
+    _fail_partway(monkeypatch)
+
+    # When it is applied
+    result = run_import(export, vault, apply=True)
+
+    # Then the damaged note is named as such, and the import went on. Not an
+    # `OSError`, it escaped and ended the import (#168 review).
+    assert [path for _, path in result.damaged_books] == [damaged]
+    assert [path for _, path, _ in result.updated_books] == [kept]
+    assert read_frontmatter(kept)["status"] == "Read"
+
+
+# --- what a failure is said to be (#168 review) ---
+
+
+def test_a_write_put_back_after_a_full_disk_is_not_called_a_lock(shelf, monkeypatch):
+    # Given a note due a repair, and its write failing on a full disk - put
+    # back, so an ordinary `OSError` rather than a lock or a permission
+    _legacy_note(shelf, "A Full.md")
+    _fail_partway(monkeypatch, restore_fails=False)
+
+    # When cleanup runs
+    result = runner.invoke(app, ["cleanup"])
+
+    # Then the reason the OS gave is said, and no cause is invented for it
+    assert result.exit_code == 0, result.output
+    assert "A Full.md could not be accessed (No space left on device)" in result.output
+    assert "locked" not in result.output
+
+
+def test_a_link_update_left_damaged_is_named_apart_from_one_not_reached(
+    tmp_path, monkeypatch
+):
+    # Given a note due a rename, a note linking to it, and that link's write
+    # failing partway with nothing put back
+    book = tmp_path / "Dune.md"
+    book.write_text(
+        "---\ntitle: Dune\nauthors:\n  - Frank Herbert\n---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    linking = tmp_path / "Links.md"
+    linking.write_text("See [[Dune]].\n", encoding="utf-8")
+    _fail_partway(monkeypatch)
+
+    # When it is renamed
+    result = rename_book_file(book, tmp_path)
+
+    # Then the linking note is named as possibly damaged - not merely as still
+    # holding the old link, which hides that it may need restoring
+    assert result.status == "renamed"
+    assert result.damaged == (linking,)
+    assert result.unlinked == ()
+
+
+def test_cleanup_says_a_link_update_may_have_damaged_a_note(shelf, monkeypatch):
+    # Given a note due a rename, and the write to a note linking to it failing
+    # partway with nothing put back - the second rewrite, after cleanup's own
+    # repair of the note being renamed
+    (shelf / "Dune.md").write_text(
+        "---\ntitle: Dune\nauthors:\n  - Frank Herbert\n---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+    (shelf / "Links.md").write_text(
+        "---\ntitle: Links\nauthors:\n  - Links\n---\n\nSee [[Dune]].\n",
+        encoding="utf-8",
+    )
+    _fail_partway(monkeypatch, skip=1)
+
+    # When cleanup renames it
+    result = runner.invoke(app, ["cleanup", "--rename"])
+
+    # Then the rename is reported, and so is the damage
+    assert result.exit_code == 0, result.output
+    assert "Renamed: Dune.md" in result.output
+    assert "Links.md may be damaged" in result.output
+
+
 # --- `libris status` and the MCP update_book tool ---
 
 
@@ -495,5 +633,5 @@ def test_status_reports_a_locked_note_rather_than_a_traceback(shelf, lock_note):
 
     # Then the command says so and exits 1
     assert result.exit_code == 1, result.output
-    assert f"{locked.name} could not be opened" in result.output
+    assert f"{locked.name} could not be accessed" in result.output
     assert not isinstance(result.exception, PermissionError)
