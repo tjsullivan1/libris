@@ -16,3 +16,8 @@ output "registry" {
 output "resource_group" {
   value = azurerm_resource_group.main.name
 }
+
+output "suffix" {
+  description = "The suffix every resource name ends in. Set it as `suffix` to pin it."
+  value       = local.suffix
+}

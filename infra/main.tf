@@ -5,27 +5,29 @@
 
 data "azurerm_client_config" "current" {}
 
+# Generated only when no suffix is given.
 resource "random_string" "suffix" {
+  count   = var.suffix == null ? 1 : 0
   length  = 6
   upper   = false
   special = false
 }
 
 locals {
-  suffix   = random_string.suffix.result
-  app_name = "libris-mcp"
+  suffix   = var.suffix != null ? var.suffix : random_string.suffix[0].result
+  app_name = "libris-mcp-${local.suffix}"
   # Known before the app exists, so the app can be told its own address.
   public_url = "https://${local.app_name}.${azurerm_container_app_environment.main.default_domain}"
   image      = "${azurerm_container_registry.main.login_server}/libris-hosted:${var.image_tag}"
 }
 
 resource "azurerm_resource_group" "main" {
-  name     = "rg-libris"
+  name     = "rg-libris-${local.suffix}"
   location = var.location
 }
 
 resource "azurerm_user_assigned_identity" "app" {
-  name                = "id-libris-mcp"
+  name                = "id-libris-mcp-${local.suffix}"
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
 }
@@ -168,7 +170,7 @@ resource "azurerm_cosmosdb_sql_role_assignment" "deployer" {
 # The app -------------------------------------------------------------------
 
 resource "azurerm_log_analytics_workspace" "main" {
-  name                = "log-libris"
+  name                = "log-libris-${local.suffix}"
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
   sku                 = "PerGB2018"
@@ -176,7 +178,7 @@ resource "azurerm_log_analytics_workspace" "main" {
 }
 
 resource "azurerm_container_app_environment" "main" {
-  name                       = "cae-libris"
+  name                       = "cae-libris-${local.suffix}"
   location                   = azurerm_resource_group.main.location
   resource_group_name        = azurerm_resource_group.main.name
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id

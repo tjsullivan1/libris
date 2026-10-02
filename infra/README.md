@@ -21,12 +21,18 @@ needs an image. And the right Google account ID is only known once someone tries
 
    ```bash
    az login
+   export ARM_SUBSCRIPTION_ID=<id>     # or set subscription_id in terraform.tfvars
    cd infra
    terraform init
-   terraform apply -var subscription_id=<id> \
+   terraform apply \
      -target=azurerm_container_registry.main -target=azurerm_container_app_environment.main
    terraform output google_redirect_uri
    ```
+
+   Every resource name ends in a suffix, which keeps globally unique names unique (the
+   registry, Key Vault, Cosmos, and the app's address). Terraform generates one unless you set
+   `suffix` in `terraform.tfvars` (1-14 lowercase letters or digits). Changing it later renames
+   and replaces every resource, including the app's address and therefore the Google redirect URI.
 
 2. **Create the Google OAuth client.** In the Google Cloud console: create a project, then on the
    **OAuth consent screen** choose External and add yourself as a test user. Leaving the app in
@@ -37,7 +43,6 @@ needs an image. And the right Google account ID is only known once someone tries
 3. **Write `infra/terraform.tfvars`**. The file is git-ignored.
 
    ```hcl
-   subscription_id      = "<id>"
    google_client_id     = "<client id>.apps.googleusercontent.com"
    google_client_secret = "<client secret>"
    ```
