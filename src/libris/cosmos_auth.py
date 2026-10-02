@@ -8,6 +8,7 @@ One container, `auth`, partitioned by `/id`. Each document's id says what it
 is, so a client and a token can never collide.
 """
 
+import logging
 import time
 
 from azure.core import MatchConditions
@@ -20,6 +21,11 @@ from mcp.shared.auth import OAuthClientInformationFull
 from .oauth import StoredRefreshToken
 
 CONTAINER = "auth"
+
+# The SDK logs every request and response header at INFO, about sixty lines per
+# Cosmos call, which buried the container's request log the first time anyone
+# needed to read it. Its warnings and errors still come through.
+logging.getLogger("azure.cosmos._cosmos_http_logging_policy").setLevel(logging.WARNING)
 
 
 class CosmosAuthStore:
