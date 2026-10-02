@@ -29,6 +29,18 @@ needs an image. And the right Google account ID is only known once someone tries
    terraform output google_redirect_uri
    ```
 
+   In PowerShell, quote each `-target`. Otherwise PowerShell splits the argument at the `.` and
+   Terraform reports "Too many command line arguments":
+
+   ```powershell
+   az login
+   $env:ARM_SUBSCRIPTION_ID = "<id>"
+   cd infra
+   terraform init
+   terraform apply '-target=azurerm_container_registry.main' '-target=azurerm_container_app_environment.main'
+   terraform output google_redirect_uri
+   ```
+
    Every resource name ends in a suffix, which keeps globally unique names unique (the
    registry, Key Vault, Cosmos, and the app's address). Terraform generates one unless you set
    `suffix` in `terraform.tfvars` (1-14 lowercase letters or digits). Changing it later renames
