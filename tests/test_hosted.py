@@ -171,19 +171,55 @@ def sign_in(client: TestClient, client_id: str, challenge: str) -> httpx.Respons
 
 
 def exchange(
-    client: TestClient, client_id: str, code: str, verifier: str
+    client: TestClient,
+    client_id: str,
+    code: str,
+    verifier: str,
+    secret: str | None = None,
 ) -> httpx.Response:
-    return client.post(
-        "/token",
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": CLAUDE_CALLBACK,
-            "client_id": client_id,
-            "code_verifier": verifier,
-            "resource": RESOURCE,
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": CLAUDE_CALLBACK,
+        "client_id": client_id,
+        "code_verifier": verifier,
+        "resource": RESOURCE,
+    }
+    if secret is not None:
+        data["client_secret"] = secret
+    return client.post("/token", data=data)
+
+
+def refresh(
+    client: TestClient, client_id: str, token: str, secret: str | None = None
+) -> httpx.Response:
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": token,
+        "client_id": client_id,
+    }
+    if secret is not None:
+        data["client_secret"] = secret
+    return client.post("/token", data=data)
+
+
+def register_confidential(client: TestClient) -> tuple[str, str]:
+    """Register the way Claude actually did: a web client holding a secret."""
+    response = client.post(
+        "/register",
+        json={
+            "redirect_uris": [CLAUDE_CALLBACK],
+            "client_name": "Claude",
+            "token_endpoint_auth_method": "client_secret_post",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "application_type": "web",
         },
     )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["client_secret"]
+    return body["client_id"], body["client_secret"]
 
 
 def tokens(client: TestClient) -> tuple[str, dict]:
@@ -536,64 +572,48 @@ def test_nothing_a_client_can_present_is_stored_as_issued(
     assert any(kind == "refresh" for kind, _ in store.records)
 
 
+def reissued(client: TestClient, key: str = SIGNING_KEY, **changes: object) -> str:
+    """A real sign-in's access token, re-signed with one thing changed.
+
+    Starting from a real token keeps every other claim valid, including the
+    grant, so a refusal can only be for the change under test. Tokens built
+    from scratch went blind the day a new required claim arrived: they were
+    refused for lacking it, whatever they were meant to test.
+    """
+    _, issued = tokens(client)
+    claims = jwt.decode(issued["access_token"], options={"verify_signature": False})
+    assert call_ping(client, issued["access_token"]).status_code == 200
+    return jwt.encode({**claims, **changes}, key, algorithm="HS256")
+
+
 def test_a_token_signed_with_another_key_is_refused(client: TestClient) -> None:
-    # Given a token shaped exactly like Libris's, signed with some other key
-    now = int(time.time())
-    forged = jwt.encode(
-        {
-            "iss": PUBLIC_URL,
-            "aud": RESOURCE,
-            "sub": OWNER_SUB,
-            "client_id": "x",
-            "scope": "libris",
-            "iat": now,
-            "exp": now + 600,
-        },
-        "f" * 48,
-        algorithm="HS256",
-    )
+    # Given a real token re-signed with some other key
+    forged = reissued(client, key="f" * 48)
 
     # Then it reaches no tool
     assert call_ping(client, forged).status_code == 401
 
 
 def test_a_token_for_another_audience_is_refused(client: TestClient) -> None:
-    # Given a token signed with Libris's own key but issued for another resource
-    now = int(time.time())
-    elsewhere = jwt.encode(
-        {
-            "iss": PUBLIC_URL,
-            "aud": "https://elsewhere.test/mcp",
-            "sub": OWNER_SUB,
-            "client_id": "x",
-            "scope": "libris",
-            "iat": now,
-            "exp": now + 600,
-        },
-        SIGNING_KEY,
-        algorithm="HS256",
-    )
+    # Given a real token, signed with Libris's own key, but for another resource
+    elsewhere = reissued(client, aud="https://elsewhere.test/mcp")
 
     # Then it reaches no tool
     assert call_ping(client, elsewhere).status_code == 401
 
 
+def test_a_token_from_another_issuer_is_refused(client: TestClient) -> None:
+    # Given a real token, signed with Libris's own key, claiming another issuer
+    impostor = reissued(client, iss="https://elsewhere.test")
+
+    # Then it reaches no tool
+    assert call_ping(client, impostor).status_code == 401
+
+
 def test_an_expired_token_is_refused(client: TestClient) -> None:
-    # Given a correctly signed token that expired a minute ago
+    # Given a real token, correctly signed, that expired a minute ago
     now = int(time.time())
-    expired = jwt.encode(
-        {
-            "iss": PUBLIC_URL,
-            "aud": RESOURCE,
-            "sub": OWNER_SUB,
-            "client_id": "x",
-            "scope": "libris",
-            "iat": now - 3600,
-            "exp": now - 60,
-        },
-        SIGNING_KEY,
-        algorithm="HS256",
-    )
+    expired = reissued(client, iat=now - 3600, exp=now - 60)
 
     # Then it reaches no tool
     assert call_ping(client, expired).status_code == 401
@@ -829,3 +849,112 @@ def test_the_consent_cookie_cannot_travel_cross_site(client: TestClient) -> None
     assert "secure" in cookie
     assert "httponly" in cookie
     assert "path=/oauth/consent" in cookie
+
+
+# A client with a secret, as Claude registered -------------------------------
+
+
+def test_a_confidential_client_signs_in_and_refreshes_across_restarts(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a client registered as Claude really did, with a secret, which
+    # signed in before the app restarted
+    with TestClient(
+        create_app(settings(), store=store, identity=google), base_url=PUBLIC_URL
+    ) as before:
+        client_id, secret = register_confidential(before)
+        verifier, challenge = pkce()
+        code = query(sign_in(before, client_id, challenge).headers["location"])["code"]
+        issued = exchange(before, client_id, code, verifier, secret)
+        assert issued.status_code == 200, issued.text
+
+    # When it refreshes against the restarted app, presenting its secret
+    with TestClient(
+        create_app(settings(), store=store, identity=google), base_url=PUBLIC_URL
+    ) as after:
+        renewed = refresh(after, client_id, issued.json()["refresh_token"], secret)
+
+        # Then the secret survived the store and the restart, and the new
+        # token reaches the tools
+        assert renewed.status_code == 200, renewed.text
+        assert call_ping(after, renewed.json()["access_token"]).status_code == 200
+
+
+def test_a_confidential_client_without_its_secret_gets_nothing(
+    client: TestClient,
+) -> None:
+    # Given a confidential client holding a code
+    client_id, secret = register_confidential(client)
+    verifier, challenge = pkce()
+    code = query(sign_in(client, client_id, challenge).headers["location"])["code"]
+
+    # When the code is exchanged with the wrong secret, then with none
+    wrong = exchange(client, client_id, code, verifier, "not-the-secret")
+    missing = exchange(client, client_id, code, verifier)
+
+    # Then both are refused, and the code still works with the right one
+    assert wrong.status_code == 401
+    assert missing.status_code == 401
+    assert exchange(client, client_id, code, verifier, secret).status_code == 200
+
+
+# Revocation ------------------------------------------------------------------
+
+
+def revoke(client: TestClient, client_id: str, token: str) -> httpx.Response:
+    # The SDK's revocation request declares client_secret as `str | None` with
+    # no default, which pydantic reads as required, so a public client has to
+    # send it empty. Claude registers with a secret and always sends one.
+    return client.post(
+        "/revoke", data={"token": token, "client_id": client_id, "client_secret": ""}
+    )
+
+
+def test_revoking_the_access_token_ends_the_whole_sign_in(client: TestClient) -> None:
+    # Given a client holding both tokens
+    client_id, issued = tokens(client)
+
+    # When it revokes with the access token, as a client disconnecting may
+    assert revoke(client, client_id, issued["access_token"]).status_code == 200
+
+    # Then the access token stops working now, not in an hour, and the
+    # refresh token from the same sign-in cannot replace it
+    assert call_ping(client, issued["access_token"]).status_code == 401
+    assert refresh(client, client_id, issued["refresh_token"]).status_code == 400
+
+
+def test_revoking_the_refresh_token_ends_the_whole_sign_in(client: TestClient) -> None:
+    # Given a client holding both tokens
+    client_id, issued = tokens(client)
+
+    # When it revokes with the refresh token
+    assert revoke(client, client_id, issued["refresh_token"]).status_code == 200
+
+    # Then the access token issued alongside it stops working too
+    assert call_ping(client, issued["access_token"]).status_code == 401
+    assert refresh(client, client_id, issued["refresh_token"]).status_code == 400
+
+
+def test_revoking_after_a_refresh_still_ends_the_sign_in(client: TestClient) -> None:
+    # Given a sign-in whose tokens have been rotated once
+    client_id, issued = tokens(client)
+    renewed = refresh(client, client_id, issued["refresh_token"]).json()
+
+    # When the client revokes the token it now holds
+    assert revoke(client, client_id, renewed["access_token"]).status_code == 200
+
+    # Then every token from that sign-in is dead, old and new
+    assert call_ping(client, renewed["access_token"]).status_code == 401
+    assert refresh(client, client_id, renewed["refresh_token"]).status_code == 400
+
+
+def test_revoking_one_sign_in_leaves_another_alone(client: TestClient) -> None:
+    # Given two separate sign-ins, as two devices would have
+    first_id, first = tokens(client)
+    _, second = tokens(client)
+
+    # When the first is revoked
+    revoke(client, first_id, first["access_token"])
+
+    # Then the second still works
+    assert call_ping(client, second["access_token"]).status_code == 200

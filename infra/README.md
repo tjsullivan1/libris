@@ -89,9 +89,10 @@ needs an image. And the right Google account ID is only known once someone tries
    - **Claude**: in **Customize → Connectors**, click **Connect** on the connector again and sign
      in. Changing the allowed account changes nothing in the connector's settings, so it doesn't
      need removing. Then ask Claude to call the `ping` tool.
-   - **Gemini**: at gemini.google.com go to **Settings → Connected apps → Add a custom app**,
-     enter the same URL, sign in, and ask for `ping`. This needs a personal Google account in the
-     US.
+   - **Gemini (untested).** Nobody has connected Gemini yet, and #180 tracks doing it. From
+     Google's documentation, the route should be gemini.google.com, then **Settings → Connected
+     apps → Add a custom app**, entering the same URL. It needs a personal Google account in the
+     US. Treat the menu names as a guess, and correct them here once #180 is done.
 
 ## Updating the app
 

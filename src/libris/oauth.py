@@ -528,7 +528,7 @@ class LibrisAuthProvider:
         if (
             record is None
             or record["client_id"] != client.client_id
-            or record["expires_at"] <= self._clock()
+            or await self._get("grant", record.get("grant", "")) is None
         ):
             return None
         return RefreshToken(
@@ -550,11 +550,15 @@ class LibrisAuthProvider:
         record = await self._take("refresh", _hash(refresh_token.token))
         if record is None:
             raise TokenError("invalid_grant", "The refresh token was already used")
+        if await self._get("grant", record.get("grant", "")) is None:
+            raise TokenError("invalid_grant", "This sign-in was revoked")
         if not self._is_allowed(record["subject"]):
             raise TokenError(
                 "invalid_grant", "This account can no longer use this Library"
             )
-        return await self._issue(client, record["subject"], scopes or record["scopes"])
+        return await self._issue(
+            client, record["subject"], scopes or record["scopes"], grant=record["grant"]
+        )
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         try:
@@ -564,13 +568,17 @@ class LibrisAuthProvider:
                 algorithms=["HS256"],
                 audience=self.resource_url,
                 issuer=self.public_url,
-                options={"require": ["exp", "sub", "client_id"]},
+                options={"require": ["exp", "sub", "client_id", "grant"]},
             )
         except jwt.InvalidTokenError:
             return None
         # Checked on every call, not only at sign-in, so changing the allowed
         # account cuts off the old one within the hour rather than never.
         if not self._is_allowed(claims["sub"]):
+            return None
+        # And the grant must still exist, so revoking either token ends this
+        # one at once rather than when it expires. One point read per call.
+        if await self._get("grant", claims["grant"]) is None:
             return None
         return AccessToken(
             token=token,
@@ -579,21 +587,46 @@ class LibrisAuthProvider:
             expires_at=int(claims["exp"]),
             resource=self.resource_url,
             subject=claims["sub"],
+            claims={"grant": claims["grant"]},
         )
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
-        # Access tokens are stateless and expire within the hour; a refresh
-        # token is what keeps a client signed in, so that is what goes.
-        if isinstance(token, RefreshToken):
-            await self._delete("refresh", _hash(token.token))
+        # Either token revokes the whole sign-in: deleting the grant ends the
+        # access token on its next call, and every refresh token issued under
+        # it, however many rotations later.
+        if isinstance(token, AccessToken):
+            grant = (token.claims or {}).get("grant")
+        else:
+            record = await self._take("refresh", _hash(token.token))
+            grant = None if record is None else record.get("grant")
+        if grant:
+            await self._delete("grant", grant)
 
     # Internals ----------------------------------------------------------
 
     async def _issue(
-        self, client: OAuthClientInformationFull, subject: str, scopes: list[str]
+        self,
+        client: OAuthClientInformationFull,
+        subject: str,
+        scopes: list[str],
+        grant: str | None = None,
     ) -> OAuthToken:
+        """Issue an access and refresh token under a grant.
+
+        A grant is one sign-in. Every token issued from it, through any number
+        of refreshes, carries its id, so revoking the grant revokes them all.
+        A new sign-in starts a new grant; a refresh continues the old one.
+        """
         now = self._now()
         client_id = client.client_id or ""
+        expires_at = now + REFRESH_TOKEN_SECONDS
+        grant = grant or secrets.token_urlsafe(16)
+        await self._put(
+            "grant",
+            grant,
+            {"client_id": client_id, "subject": subject, "expires_at": expires_at},
+            expires_at,
+        )
         access_token = jwt.encode(
             {
                 "iss": self.public_url,
@@ -601,6 +634,7 @@ class LibrisAuthProvider:
                 "sub": subject,
                 "client_id": client_id,
                 "scope": " ".join(scopes),
+                "grant": grant,
                 "iat": now,
                 "exp": now + ACCESS_TOKEN_SECONDS,
                 "jti": secrets.token_urlsafe(16),
@@ -609,7 +643,6 @@ class LibrisAuthProvider:
             algorithm="HS256",
         )
         refresh_token = secrets.token_urlsafe(32)
-        expires_at = now + REFRESH_TOKEN_SECONDS
         await self._put(
             "refresh",
             _hash(refresh_token),
@@ -617,6 +650,7 @@ class LibrisAuthProvider:
                 "client_id": client_id,
                 "subject": subject,
                 "scopes": scopes,
+                "grant": grant,
                 "expires_at": expires_at,
             },
             expires_at,

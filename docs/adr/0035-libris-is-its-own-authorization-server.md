@@ -39,11 +39,18 @@ names the client and the host it will be sent back to, as the MCP authorization 
 page sets a `SameSite=Strict` cookie that its own form must return, so a page on another site cannot
 submit the form for you.
 
-**What is kept, and where.** Access tokens are signed JWTs that last an hour. They are checked without
-a lookup: signature, issuer, audience and expiry, and the subject against the allowed account on every
-call, so changing that account cuts off its tokens within the hour. Everything else lives in Cosmos
-(ADR 0006 brings Cosmos to the project anyway): registered clients, refresh tokens, authorization
-codes and sign-ins in progress. A first draft kept codes and sign-ins in memory, and review caught why
+**What is kept, and where.** Access tokens are signed JWTs that last an hour. Every call checks the
+signature, issuer, audience and expiry, checks the subject against the allowed account, and checks
+that the token's grant still exists.
+
+**A grant is one sign-in.** Every token issued from a sign-in carries the grant's id, through any
+number of refreshes. Revoking either the access token or the refresh token deletes the grant, which
+ends both at once. Without it, revoking with an access token did nothing: the token lived out its
+hour and its refresh token stayed valid, while `/revoke` reported success. The price is one Cosmos
+point read per tool call, which is nothing at one person's volume.
+
+**All of it lives in Cosmos** (ADR 0006 brings Cosmos to the project anyway): grants, registered
+clients, refresh tokens, authorization codes and sign-ins in progress. A first draft kept codes and sign-ins in memory, and review caught why
 that fails. The app scales to zero, and while a person is on Google's page no request reaches Libris,
 so the sign-in it would come back to was gone. Holding no state in the process also means any
 replica can finish a sign-in another one started. Codes and refresh tokens are kept as hashes, and
