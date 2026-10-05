@@ -49,6 +49,12 @@ ends both at once. Without it, revoking with an access token did nothing: the to
 hour and its refresh token stayed valid, while `/revoke` reported success. The price is one Cosmos
 point read per tool call, which is nothing at one person's volume.
 
+The grant also catches a stolen refresh token. A rotated token stays behind as a spent marker for the
+rest of its life. If it is presented again, one of its two holders is not the client it was issued
+to, and there is no telling which, so the grant is deleted (RFC 9700 §4.14.2). Refusing only the
+replay would have left a thief who redeemed the token first holding a live sign-in. The cost falls on
+a client that retries a refresh whose answer it never received: it is signed out, not attacked.
+
 **All of it lives in Cosmos** (ADR 0006 brings Cosmos to the project anyway): grants, registered
 clients, refresh tokens, authorization codes and sign-ins in progress. A first draft kept codes and sign-ins in memory, and review caught why
 that fails. The app scales to zero, and while a person is on Google's page no request reaches Libris,

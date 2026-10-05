@@ -72,10 +72,17 @@ resource "azurerm_role_assignment" "app_reads_secrets" {
   principal_id         = azurerm_user_assigned_identity.app.principal_id
 }
 
-# A new role assignment takes a while to reach Key Vault's data plane, and the
-# secret writes below fail with a 403 until it has.
+# A new role assignment takes a while to reach the data plane it grants, and
+# depends_on waits only for the assignment to exist. Without this wait, the
+# secret writes below fail with a 403, and on a clean deployment the Container
+# App can try to read its Key Vault secrets or pull its image before its own
+# roles work. So every role either side needs goes through this one wait.
 resource "time_sleep" "secrets_role_propagates" {
-  depends_on      = [azurerm_role_assignment.deployer_writes_secrets]
+  depends_on = [
+    azurerm_role_assignment.deployer_writes_secrets,
+    azurerm_role_assignment.app_reads_secrets,
+    azurerm_role_assignment.app_pulls_images,
+  ]
   create_duration = "60s"
 }
 
@@ -279,8 +286,7 @@ resource "azurerm_container_app" "mcp" {
   }
 
   depends_on = [
-    azurerm_role_assignment.app_pulls_images,
-    azurerm_role_assignment.app_reads_secrets,
+    time_sleep.secrets_role_propagates,
     azurerm_cosmosdb_sql_role_assignment.app,
   ]
 }

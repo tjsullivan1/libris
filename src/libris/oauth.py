@@ -546,12 +546,24 @@ class LibrisAuthProvider:
         scopes: list[str],
     ) -> OAuthToken:
         # Taking the token is the rotation: whoever takes it first gets the new
-        # pair, and anyone presenting it afterwards gets nothing.
-        record = await self._take("refresh", _hash(refresh_token.token))
+        # pair, and a second taker racing it gets nothing.
+        key = _hash(refresh_token.token)
+        record = await self._take("refresh", key)
         if record is None:
             raise TokenError("invalid_grant", "The refresh token was already used")
         if await self._get("grant", record.get("grant", "")) is None:
             raise TokenError("invalid_grant", "This sign-in was revoked")
+        if record.get("spent"):
+            # A token already rotated away is being used again. One of its two
+            # holders is not the client it was issued to, and there is no
+            # telling which, so the whole sign-in ends (RFC 9700 4.14.2).
+            # Deleting the predecessor alone would leave a thief who redeemed
+            # it first holding a live successor.
+            await self._delete("grant", record["grant"])
+            raise TokenError("invalid_grant", "This refresh token was reused")
+        # Kept as a spent marker for the rest of its life, so a later replay
+        # is recognised rather than looking like a token that never existed.
+        await self._put("refresh", key, {**record, "spent": True}, record["expires_at"])
         if not self._is_allowed(record["subject"]):
             raise TokenError(
                 "invalid_grant", "This account can no longer use this Library"

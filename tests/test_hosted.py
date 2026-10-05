@@ -958,3 +958,32 @@ def test_revoking_one_sign_in_leaves_another_alone(client: TestClient) -> None:
 
     # Then the second still works
     assert call_ping(client, second["access_token"]).status_code == 200
+
+
+def test_a_replayed_refresh_token_ends_the_thiefs_sign_in_too(
+    client: TestClient,
+) -> None:
+    # Given a refresh token that a thief redeemed before its owner did
+    client_id, issued = tokens(client)
+    stolen = refresh(client, client_id, issued["refresh_token"]).json()
+    assert call_ping(client, stolen["access_token"]).status_code == 200
+
+    # When the owner presents the same token, now spent
+    replayed = refresh(client, client_id, issued["refresh_token"])
+
+    # Then the owner is refused, and the thief's tokens stop working too:
+    # refusing the replay alone would leave the thief holding a live sign-in
+    assert replayed.status_code == 400
+    assert call_ping(client, stolen["access_token"]).status_code == 401
+    assert refresh(client, client_id, stolen["refresh_token"]).status_code == 400
+
+
+def test_a_replay_ends_only_its_own_sign_in(client: TestClient) -> None:
+    # Given two sign-ins, and a replay within the first
+    first_id, first = tokens(client)
+    _, second = tokens(client)
+    refresh(client, first_id, first["refresh_token"])
+    refresh(client, first_id, first["refresh_token"])
+
+    # Then the other sign-in is untouched
+    assert call_ping(client, second["access_token"]).status_code == 200
