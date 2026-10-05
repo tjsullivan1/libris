@@ -147,3 +147,27 @@ def test_a_taker_whose_record_vanished_gets_nothing(
 
 def test_deleting_a_missing_record_is_not_an_error(store: CosmosAuthStore) -> None:
     store.delete("refresh", "never")
+
+
+def test_a_document_from_the_first_deployment_reads_as_absent(
+    store: CosmosAuthStore, container: FakeContainer
+) -> None:
+    # Given a refresh token and a client as the first deployment wrote them,
+    # before every record shared one shape
+    container.upsert_item(
+        {
+            "id": "refresh:h",
+            "client_id": "c",
+            "subject": "s",
+            "scopes": [],
+            "expires_at": 9,
+            "ttl": 60,
+        }
+    )
+    container.upsert_item({"id": "client:c", "client": {"client_id": "c"}})
+
+    # Then they read as absent, so the client is asked to sign in again
+    # rather than getting a server error
+    assert store.get("refresh", "h") is None
+    assert store.take("refresh", "h") is None
+    assert store.get("client", "c") is None

@@ -8,6 +8,10 @@ App's managed identity, so no key exists to leak (ADR 0006).
 One container, `auth`, partitioned by `/id`. A document's id is its kind and
 key, so records of different kinds can never collide. Each carries a `ttl`, so
 Cosmos removes it once it can no longer be used.
+
+A document without `data` was written by the first deployment, before every
+record shared this shape. It reads as absent, so a client holding one is asked
+to sign in again rather than getting a server error.
 """
 
 import logging
@@ -50,12 +54,12 @@ class CosmosAuthStore:
 
     def get(self, kind: str, key: str) -> dict | None:
         item = self._read(f"{kind}:{key}")
-        return None if item is None else item["data"]
+        return None if item is None else item.get("data")
 
     def take(self, kind: str, key: str) -> dict | None:
         item_id = f"{kind}:{key}"
         item = self._read(item_id)
-        if item is None:
+        if item is None or "data" not in item:
             return None
         # Delete only the version just read. If another request deleted it in
         # between, this one loses, so a record is taken exactly once. Cosmos
