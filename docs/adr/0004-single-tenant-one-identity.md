@@ -13,3 +13,5 @@ Microsoft Entra is the identity plane, since the service is hosted in Azure anyw
 uses a Gmail address via Google federation, which Entra External ID supports for Gmail
 accounts specifically. Should sharing ever mean real multi-user access, this decision is the
 one to revisit first.
+
+Superseded in part by ADR 0035: authorization is still the single question "is this Tim", but Google answers it, through Libris acting as its own OAuth authorization server. Entra remains the identity plane for Azure itself, not for signing in to Libris.

@@ -1,6 +1,6 @@
 [project]
 name = "libris"
-version = "0.13.2"
+version = "0.14.0"
 description = "A simple CLI tool to track your reading list in Obsidian"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -26,6 +26,19 @@ server = [
 # CLI installs without either, and cli.py imports this lazily too.
 mcp = [
     "mcp>=2.1.1",
+]
+
+# The hosted MCP server on the Container App (#171, ADR 0035): the mcp extra
+# plus an ASGI server and Cosmos, reached by managed identity. Only the
+# container installs it; nothing on the PC needs Azure SDKs.
+hosted = [
+    "libris[mcp]",
+    "uvicorn>=0.30",
+    "azure-cosmos>=4.9",
+    "azure-identity>=1.19",
+    # Seals client secrets at rest (ADR 0035). Also arrives through pyjwt[crypto],
+    # but oauth.py imports it directly, so it is declared rather than inherited.
+    "cryptography>=43",
 ]
 
 [dependency-groups]

@@ -20,3 +20,5 @@ Narrowed by ADR 0020: the tool definitions do not change between the transports,
 answers do. A tool that writes reports a different Duplicate Guarantee and a different outcome
 vocabulary over Streamable HTTP than over stdio, because only the local transport reaches the
 live Shelf.
+
+Narrowed by ADR 0035: the Streamable HTTP server is not behind Entra. Libris is its own authorization server and Google identifies the person, because neither target client works with Entra by default.
