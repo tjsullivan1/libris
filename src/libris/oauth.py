@@ -27,8 +27,9 @@ import secrets
 import threading
 import time
 from base64 import urlsafe_b64encode
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import urlencode, urlsplit
 
@@ -56,10 +57,18 @@ SIGN_IN_SECONDS = 10 * 60
 # A client unused for this long is forgotten. Registration is open (ADR 0035),
 # so clients nobody uses must go away by themselves.
 CLIENT_IDLE_SECONDS = 60 * 24 * 60 * 60
+# Each sign-in writes a document, and any registered client can start one.
+# Counted per client, after the SDK has validated the request, so neither
+# malformed requests nor another client's flood can use up the allowance of
+# the client a person is actually connecting.
+SIGN_INS_PER_CLIENT_PER_HOUR = 10
 
 CONSENT_PATH = "/oauth/consent"
 GOOGLE_CALLBACK_PATH = "/oauth/google/callback"
 CONSENT_COOKIE = "libris_consent"
+# Set when consent is given, and required back at Google's callback, so the
+# browser that finishes a sign-in is the one that approved it.
+APPROVAL_COOKIE = "libris_approved"
 
 GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105 - a URL, not a secret
@@ -110,6 +119,8 @@ class GoogleIdentity:
 
     client_id: str
     client_secret: str
+    # Only tests set this, to stand in for Google's token endpoint.
+    transport: httpx.AsyncBaseTransport | None = field(default=None, compare=False)
 
     def authorization_url(
         self, *, state: str, code_challenge: str, redirect_uri: str
@@ -140,7 +151,7 @@ class GoogleIdentity:
         Libris's client secret, so its signature is not checked again: OIDC
         Core 3.1.3.7 allows exactly that. Issuer, audience and expiry are.
         """
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, transport=self.transport) as client:
             response = await client.post(
                 GOOGLE_TOKEN_URL,
                 data={
@@ -380,6 +391,8 @@ class LibrisAuthProvider:
         store: AuthStore,
         identity: IdentityProvider,
         clock: Callable[[], float] = time.time,
+        sign_ins_per_client_per_hour: int = SIGN_INS_PER_CLIENT_PER_HOUR,
+        limit_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if len(signing_key) < 32:
             raise ValueError("The token signing key must be at least 32 characters")
@@ -391,6 +404,9 @@ class LibrisAuthProvider:
         self._store = store
         self._identity = identity
         self._clock = clock
+        self._sign_ins_per_client = sign_ins_per_client_per_hour
+        self._limit_clock = limit_clock
+        self._recent_sign_ins: dict[str, deque[float]] = {}
 
     # Clients ------------------------------------------------------------
 
@@ -429,6 +445,7 @@ class LibrisAuthProvider:
             raise AuthorizeError(
                 "invalid_target", "Libris issues tokens for its own MCP endpoint only"
             )
+        self._count_sign_in(client.client_id or "")
         request_id = secrets.token_urlsafe(32)
         sign_in = _SignIn(
             client_id=client.client_id or "",
@@ -493,7 +510,7 @@ class LibrisAuthProvider:
 
         sign_in.sent_to_google = True
         await self._put("sign_in", request_id, sign_in.record(), sign_in.expires_at)
-        return RedirectResponse(
+        response = RedirectResponse(
             self._identity.authorization_url(
                 state=request_id,
                 code_challenge=_challenge(sign_in.google_verifier),
@@ -501,6 +518,23 @@ class LibrisAuthProvider:
             ),
             status_code=303,
         )
+        # The Google link this redirects to can be copied, and `state` alone
+        # would let anyone's browser finish the sign-in. Someone could approve
+        # their own client's consent page and send the link to the owner, who
+        # signs in and hands a code to that client. This cookie stays with the
+        # browser that approved, and the callback requires it. Lax rather than
+        # Strict, because Google's redirect back is a cross-site navigation and
+        # a Strict cookie would never arrive.
+        response.set_cookie(
+            APPROVAL_COOKIE,
+            sign_in.consent_token,
+            max_age=SIGN_IN_SECONDS,
+            path=GOOGLE_CALLBACK_PATH,
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+        return response
 
     async def google_callback(self, request: Request) -> Response:
         """Finish a sign-in: issue a code only for the one allowed account."""
@@ -514,6 +548,16 @@ class LibrisAuthProvider:
             or sign_in.expires_at <= self._clock()
         ):
             return _page(*_EXPIRED)
+        # Checked before Google is asked anything, and after the sign-in was
+        # taken, so a refused attempt cannot be retried from another browser.
+        approved = request.cookies.get(APPROVAL_COOKIE, "")
+        if not secrets.compare_digest(approved, sign_in.consent_token):
+            return _page(
+                "Not allowed",
+                "<p>This sign-in was approved in a different browser. "
+                "Start again from the app you were connecting.</p>",
+                403,
+            )
 
         code = request.query_params.get("code")
         if not code:
@@ -778,6 +822,24 @@ class LibrisAuthProvider:
             return None
         sign_in = _SignIn.of(record)
         return None if sign_in.expires_at <= self._clock() else sign_in
+
+    def _count_sign_in(self, client_id: str) -> None:
+        """Refuse a sign-in beyond this client's hourly allowance.
+
+        In memory, so a restart forgets the count. That is fine for a limit
+        whose job is to stop a flood. A refusal reaches the client as OAuth's
+        own temporarily_unavailable, on its redirect URI.
+        """
+        recent = self._recent_sign_ins.setdefault(client_id, deque())
+        now = self._limit_clock()
+        while recent and recent[0] <= now - 3600:
+            recent.popleft()
+        if len(recent) >= self._sign_ins_per_client:
+            raise AuthorizeError(
+                "temporarily_unavailable",
+                "Too many sign-ins for this application. Try again later.",
+            )
+        recent.append(now)
 
     def _is_allowed(self, sub: str) -> bool:
         return self._allowed_sub is not None and secrets.compare_digest(

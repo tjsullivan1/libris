@@ -31,6 +31,7 @@ from libris.hosted import HostedConfigError, HostedSettings, create_app  # noqa:
 from libris.oauth import (  # noqa: E402
     CONSENT_COOKIE,
     GoogleAccount,
+    GoogleIdentity,
     LibrisAuthProvider,
     MemoryAuthStore,
     SignInFailed,
@@ -749,11 +750,14 @@ def test_a_sign_in_survives_a_restart_while_the_person_is_at_google(
         client_id = register(before)
         verifier, challenge = pkce()
         to_google = consent(before, client_id, challenge)
+        browser_cookies = before.cookies
     state = query(to_google.headers["location"])["state"]
 
     # When Google sends them back to a freshly started instance
     app = create_app(settings(), store=store, identity=google)
     with TestClient(app, base_url=PUBLIC_URL) as after:
+        # The same browser, so the same cookies: only the server restarted
+        after.cookies = browser_cookies
         back = after.get(
             "/oauth/google/callback",
             params={"state": state, "code": "google-code"},
@@ -994,44 +998,68 @@ def test_a_replay_ends_only_its_own_sign_in(client: TestClient) -> None:
     assert call_ping(client, second["access_token"]).status_code == 200
 
 
-def test_sign_ins_beyond_the_hourly_limit_are_refused(
+def test_sign_ins_beyond_a_clients_hourly_limit_are_refused(
     google: FakeGoogle, store: MemoryAuthStore
 ) -> None:
-    # Given a limit of two sign-ins an hour, and a registered client
+    # Given a limit of two sign-ins per client an hour, and two clients
     now = [1000.0]
     app = create_app(
         settings(),
         store=store,
         identity=google,
-        sign_ins_per_hour=2,
+        sign_ins_per_client_per_hour=2,
         clock=lambda: now[0],
     )
     with TestClient(app, base_url=PUBLIC_URL) as client:
-        client_id = register(client)
+        flooder = register(client)
+        connecting = register(client)
         _, challenge = pkce()
-        start_sign_in(client, client_id, challenge)
-        start_sign_in(client, client_id, challenge)
+
+        # When one client floods /authorize with malformed requests, which the
+        # SDK rejects before Libris sees them, and then with valid ones
+        for _ in range(20):
+            client.get(
+                "/authorize", params={"client_id": flooder}, follow_redirects=False
+            )
+        start_sign_in(client, flooder, challenge)
+        start_sign_in(client, flooder, challenge)
         stored = len(store.records)
+        refused = start_sign_in(client, flooder, challenge)
 
-        # When a third sign-in starts within the hour
-        refused = start_sign_in(client, client_id, challenge)
-
-        # Then it is refused before anything is written, and registering is
-        # still allowed, because each endpoint counts on its own
-        assert refused.status_code == 429
+        # Then only its valid sign-ins counted, its third is refused as
+        # temporarily unavailable on its own redirect URI, and nothing is written
+        assert refused.status_code == 302
+        assert query(refused.headers["location"])["error"] == "temporarily_unavailable"
         assert len(store.records) == stored
-        register(client)
 
-        # And once the hour has passed, sign-ins work again
+        # And the client a person is actually connecting is untouched
+        assert (
+            "consent"
+            in start_sign_in(client, connecting, challenge).headers["location"]
+        )
+
+        # And once the hour has passed, the flooder can sign in again
         now[0] += 3601
-        assert start_sign_in(client, client_id, challenge).status_code == 302
+        assert (
+            "consent" in start_sign_in(client, flooder, challenge).headers["location"]
+        )
 
 
-# Races -----------------------------------------------------------------------
-#
-# These drive the provider directly, so two refreshes really do run at once:
-# each store call runs in its own worker thread, and the store's hook between
-# reading a record and writing it holds them at the point that matters.
+def test_malformed_registrations_do_not_use_up_the_limit(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a limit of two registrations an hour
+    app = create_app(settings(), store=store, identity=google, registrations_per_hour=2)
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        # When a flood of malformed registrations arrives first
+        for _ in range(20):
+            assert (
+                client.post("/register", json={"redirect_uris": []}).status_code == 400
+            )
+
+        # Then a real connector can still register
+        register(client)
+        register(client)
 
 
 def provider_over(store: MemoryAuthStore, google: FakeGoogle) -> LibrisAuthProvider:
@@ -1141,3 +1169,146 @@ def test_a_refresh_cannot_bring_back_a_grant_revoked_while_it_ran(
     assert isinstance(outcome, TokenError)
     assert not [key for kind, key in store.records if kind == "grant"]
     assert anyio.run(provider.load_access_token, issued["access_token"]) is None
+
+
+def test_a_google_link_approved_in_another_browser_gives_the_owner_no_code(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given an attacker who registered a client and approved its consent page
+    # in their own browser, and so holds a Google sign-in link
+    app = create_app(settings(), store=store, identity=google)
+    # A second browser on the same app. Not entered as a context manager: that
+    # would start the app's lifespan a second time, and nothing here uses /mcp.
+    owner = TestClient(app, base_url=PUBLIC_URL)
+    with TestClient(app, base_url=PUBLIC_URL) as attacker:
+        client_id = register(attacker)
+        _, challenge = pkce()
+        to_google = consent(attacker, client_id, challenge)
+        state = query(to_google.headers["location"])["state"]
+
+        # When the owner, sent that link, signs in with Google, which returns
+        # them to Libris in their own browser
+        back = owner.get(
+            "/oauth/google/callback",
+            params={"state": state, "code": "google-code"},
+            follow_redirects=False,
+        )
+
+        # Then no code goes anywhere, Google is never asked about the owner's
+        # account, and the attacker cannot finish it from their browser either
+        assert back.status_code == 403
+        assert "location" not in back.headers
+        assert google.verifiers == []
+        retry = attacker.get(
+            "/oauth/google/callback",
+            params={"state": state, "code": "google-code"},
+            follow_redirects=False,
+        )
+        assert retry.status_code == 400
+
+
+def test_the_approval_cookie_survives_googles_redirect_back(client: TestClient) -> None:
+    # Given consent approved in a browser
+    client_id = register(client)
+    _, challenge = pkce()
+    to_google = consent(client, client_id, challenge)
+
+    # Then the cookie it sets is one a browser sends on Google's cross-site
+    # redirect back (Lax, not Strict), and only to the callback, over https,
+    # never to script
+    cookie = to_google.headers["set-cookie"].lower()
+    assert "samesite=lax" in cookie
+    assert "path=/oauth/google/callback" in cookie
+    assert "secure" in cookie
+    assert "httponly" in cookie
+
+
+# The real Google exchange ----------------------------------------------------
+#
+# Everything above signs in through FakeGoogle. These drive GoogleIdentity
+# itself against a stand-in for Google's token endpoint, so a wrong URL,
+# verifier, redirect or credential fails here instead of on the first real
+# sign-in.
+
+GOOGLE_REDIRECT = f"{PUBLIC_URL}/oauth/google/callback"
+
+
+def google_answering(
+    answer: httpx.Response, seen: list[httpx.Request]
+) -> GoogleIdentity:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return answer
+
+    return GoogleIdentity(
+        "google-client",
+        "google-secret",  # noqa: S106 - a test value
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_the_exchange_sends_google_what_it_needs() -> None:
+    # Given Google answering with an ID token for the owner
+    seen: list[httpx.Request] = []
+    identity = google_answering(
+        httpx.Response(200, json={"id_token": id_token()}), seen
+    )
+
+    # When a code is exchanged
+    account = anyio.run(
+        lambda: identity.account(
+            code="the-code", code_verifier="the-verifier", redirect_uri=GOOGLE_REDIRECT
+        )
+    )
+
+    # Then it went to Google's token endpoint as a form, carrying the code,
+    # the PKCE verifier, the same redirect URI and Libris's own credentials
+    assert account.sub == OWNER_SUB
+    (request,) = seen
+    assert request.method == "POST"
+    assert str(request.url) == "https://oauth2.googleapis.com/token"
+    assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert dict(parse_qs(request.content.decode())) == {
+        "code": ["the-code"],
+        "code_verifier": ["the-verifier"],
+        "redirect_uri": [GOOGLE_REDIRECT],
+        "client_id": ["google-client"],
+        "client_secret": ["google-secret"],
+        "grant_type": ["authorization_code"],
+    }
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(400, json={"error": "invalid_grant"}),
+        httpx.Response(500, text="oops"),
+        httpx.Response(200, json={"access_token": "no id token"}),
+    ],
+    ids=["code refused", "google failing", "no id token"],
+)
+def test_a_failed_exchange_signs_nobody_in(answer: httpx.Response) -> None:
+    identity = google_answering(answer, [])
+    with pytest.raises(SignInFailed):
+        anyio.run(
+            lambda: identity.account(
+                code="c", code_verifier="v", redirect_uri=GOOGLE_REDIRECT
+            )
+        )
+
+
+def test_the_sign_in_link_asks_google_only_for_identity_with_pkce() -> None:
+    link = GoogleIdentity("google-client", "google-secret").authorization_url(  # noqa: S106
+        state="the-state", code_challenge="the-challenge", redirect_uri=GOOGLE_REDIRECT
+    )
+    assert link.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+    assert query(link) == {
+        "client_id": "google-client",
+        "redirect_uri": GOOGLE_REDIRECT,
+        "response_type": "code",
+        "scope": "openid email",
+        "state": "the-state",
+        "code_challenge": "the-challenge",
+        "code_challenge_method": "S256",
+        "prompt": "select_account",
+    }

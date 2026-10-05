@@ -36,6 +36,7 @@ from .oauth import (
     CONSENT_PATH,
     GOOGLE_CALLBACK_PATH,
     SCOPE,
+    SIGN_INS_PER_CLIENT_PER_HOUR,
     AuthStore,
     GoogleIdentity,
     IdentityProvider,
@@ -43,53 +44,59 @@ from .oauth import (
     MemoryAuthStore,
 )
 
-# The two public endpoints that create a document for any caller (ADR 0035):
-# /register writes a client, and /authorize writes a sign-in for any registered
-# one. Everything else either changes a record that already exists or needs a
-# code only the allowed account can get. Claude registers and authorizes once
-# per connection, so these are far above real use and far below any cost.
+# Registration is open by design (ADR 0035), and each one writes a document.
+# Claude registers once per connection; this is far above any real use. Only
+# registrations that succeed are counted, so a flood of malformed requests
+# cannot use up the allowance and lock out a real connector. A determined
+# caller can still use it up with valid ones, but that only delays new
+# connectors: clients already registered keep working. Counting per source
+# was ruled out, because uvicorn trusts every forwarded-for header here, so a
+# source address is whatever the caller says it is.
 REGISTRATIONS_PER_HOUR = 30
-SIGN_INS_PER_HOUR = 60
 
 
-class WriteLimit:
-    """Refuse calls to the public writing endpoints beyond a number per hour.
+class RegistrationLimit:
+    """Refuse registrations once an hour's worth have succeeded.
 
-    Each limited path counts separately, before the request reaches the SDK or
-    the store. In memory, so a restart forgets the counts; that is fine for a
-    limit whose job is to stop a flood, not to account for every request.
-    Answers 429 rather than letting the SDK report a refusal as a bad request.
+    In memory, so a restart forgets the count. That is fine for a limit whose
+    job is to stop a flood, not to account for every request. Answers 429
+    rather than letting the SDK report a refusal as invalid client metadata.
     """
 
     def __init__(
-        self, app: ASGIApp, *, per_hour: dict[str, int], clock: Callable[[], float]
+        self, app: ASGIApp, *, per_hour: int, clock: Callable[[], float]
     ) -> None:
         self._app = app
         self._per_hour = per_hour
         self._clock = clock
-        self._recent: dict[str, deque[float]] = {path: deque() for path in per_hour}
+        self._recent: deque[float] = deque()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        path = scope.get("path", "")
-        if scope["type"] == "http" and path in self._per_hour:
-            recent = self._recent[path]
-            now = self._clock()
-            while recent and recent[0] <= now - 3600:
-                recent.popleft()
-            if len(recent) >= self._per_hour[path]:
-                retry_after = int(recent[0] + 3600 - now) + 1
-                response = JSONResponse(
-                    {
-                        "error": "temporarily_unavailable",
-                        "error_description": "Too many requests. Try again later.",
-                    },
-                    status_code=429,
-                    headers={"Retry-After": str(retry_after)},
-                )
-                await response(scope, receive, send)
-                return
-            recent.append(now)
-        await self._app(scope, receive, send)
+        if not (scope["type"] == "http" and scope.get("path") == "/register"):
+            await self._app(scope, receive, send)
+            return
+        now = self._clock()
+        while self._recent and self._recent[0] <= now - 3600:
+            self._recent.popleft()
+        if len(self._recent) >= self._per_hour:
+            retry_after = int(self._recent[0] + 3600 - now) + 1
+            response = JSONResponse(
+                {
+                    "error": "temporarily_unavailable",
+                    "error_description": "Too many registrations. Try again later.",
+                },
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+            await response(scope, receive, send)
+            return
+
+        async def counting_send(message: dict) -> None:
+            if message["type"] == "http.response.start" and message["status"] == 201:
+                self._recent.append(self._clock())
+            await send(message)
+
+        await self._app(scope, receive, counting_send)
 
 
 class HostedConfigError(Exception):
@@ -144,7 +151,7 @@ def create_app(
     store: AuthStore | None = None,
     identity: IdentityProvider | None = None,
     registrations_per_hour: int = REGISTRATIONS_PER_HOUR,
-    sign_ins_per_hour: int = SIGN_INS_PER_HOUR,
+    sign_ins_per_client_per_hour: int = SIGN_INS_PER_CLIENT_PER_HOUR,
     clock: Callable[[], float] = time.monotonic,
 ) -> Starlette:
     """Build the hosted ASGI app.
@@ -155,7 +162,8 @@ def create_app(
             Cosmos when an endpoint is configured, and to memory otherwise.
         identity: Who proves the person's identity. Defaults to Google.
         registrations_per_hour: How many clients may register in any hour.
-        sign_ins_per_hour: How many sign-ins may start in any hour.
+        sign_ins_per_client_per_hour: How many sign-ins one client may start in
+            any hour.
         clock: The time, for the write limits.
     """
     if store is None:
@@ -179,6 +187,8 @@ def create_app(
         allowed_sub=settings.allowed_google_sub,
         store=store,
         identity=identity,
+        sign_ins_per_client_per_hour=sign_ins_per_client_per_hour,
+        limit_clock=clock,
     )
     mcp = MCPServer(
         name="libris",
@@ -228,11 +238,7 @@ def create_app(
             enable_dns_rebinding_protection=False
         ),
     )
-    app.add_middleware(
-        WriteLimit,
-        per_hour={"/register": registrations_per_hour, "/authorize": sign_ins_per_hour},
-        clock=clock,
-    )
+    app.add_middleware(RegistrationLimit, per_hour=registrations_per_hour, clock=clock)
     return app
 
 

@@ -39,6 +39,13 @@ names the client and the host it will be sent back to, as the MCP authorization 
 page sets a `SameSite=Strict` cookie that its own form must return, so a page on another site cannot
 submit the form for you.
 
+Approving sets a second cookie that Google's callback requires, so the sign-in has to finish in the
+browser that approved it. Without it the Google link was transferable. Someone could approve their
+own client's consent page in their own browser and send the link to the owner, and the owner's
+sign-in would hand that client a code. That cookie is `SameSite=Lax`, because Google's redirect back
+is a cross-site navigation and a Strict cookie would never arrive. Review caught this one. Every
+sign-in check before it had assumed the person approving and the person signing in were the same.
+
 **What is kept, and where.** Access tokens are signed JWTs that last an hour. Every call checks the
 signature, issuer, audience and expiry, checks the subject against the allowed account, and checks
 that the token's grant still exists.
@@ -71,10 +78,18 @@ Refresh tokens rotate on every use, as OAuth 2.1 requires for public clients.
 
 **The open endpoints have limits.** Two endpoints write a document for any caller: `/register`
 writes a client, and `/authorize` writes a sign-in for any registered client. Every other write
-either changes a record that already exists or needs a code only the allowed account can get. Each
-of the two is capped per hour (30 registrations, 60 sign-ins), and a call beyond the cap is refused
-with a 429 before it reaches Cosmos. A client that goes 60 days without being issued a token is
-forgotten. Sign-ins expire after ten minutes anyway.
+either changes a record that already exists or needs a code only the allowed account can get.
+
+A limit is also a way to lock the owner out, so these count only what they have to. Sign-ins are
+capped per client (10 an hour), counted after the SDK has validated the request. A flood of malformed
+requests, or another client's flood, leaves the client a person is connecting untouched. A refusal is
+OAuth's own `temporarily_unavailable`, on the client's redirect URI. Registrations are capped at 30
+an hour, counting only those that succeed. Someone who uses that up with valid registrations delays
+new connectors, but clients already registered keep working. Limiting by source address was ruled
+out: uvicorn here trusts every forwarded-for header, so the address is whatever the caller claims.
+
+A client that goes 60 days without being issued a token is forgotten. Sign-ins expire after ten
+minutes anyway.
 
 **Entra stays, for Azure only.** Terraform and `libris sync` reach Azure as the person's Azure account,
 and the Container App reaches Cosmos and Key Vault as its managed identity (ADR 0006). None of those
