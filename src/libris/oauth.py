@@ -90,7 +90,12 @@ _PAGE_HEADERS = {
     "Cache-Control": "no-store",
     "X-Frame-Options": "DENY",
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'",
-    "Referrer-Policy": "no-referrer",
+    # same-origin, not no-referrer. Under no-referrer a browser sends
+    # `Origin: null` on every form POST, its own origin included (Fetch,
+    # "append a request Origin header"), so the consent form's exact Origin
+    # check refused the owner. That shipped once. same-origin keeps the
+    # Origin on the consent POST and still sends no Referer to Google.
+    "Referrer-Policy": "same-origin",
 }
 
 
