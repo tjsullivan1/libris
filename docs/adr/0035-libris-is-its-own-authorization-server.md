@@ -55,6 +55,12 @@ to, and there is no telling which, so the grant is deleted (RFC 9700 §4.14.2). 
 replay would have left a thief who redeemed the token first holding a live sign-in. The cost falls on
 a client that retries a refresh whose answer it never received: it is signed out, not attacked.
 
+Both decisions are made by atomic store operations, because the requests that test them arrive
+together. Marking a token spent is a write conditioned on the version just read, and losing that race
+counts as a replay, since two parties presented one token. A refresh extends its grant the same way,
+and that write never creates one. Writing the grant outright would have brought back a grant that a
+revocation deleted mid-refresh, and with it every token the revocation was meant to end.
+
 **All of it lives in Cosmos** (ADR 0006 brings Cosmos to the project anyway): grants, registered
 clients, refresh tokens, authorization codes and sign-ins in progress. A first draft kept codes and sign-ins in memory, and review caught why
 that fails. The app scales to zero, and while a person is on Google's page no request reaches Libris,

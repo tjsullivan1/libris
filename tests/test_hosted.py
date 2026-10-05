@@ -9,6 +9,7 @@ Google is replaced by a fake that names whichever account a test chooses.
 import hashlib
 import json
 import secrets
+import threading
 import time
 from base64 import urlsafe_b64encode
 from collections.abc import Iterator
@@ -19,14 +20,18 @@ import pytest
 
 pytest.importorskip("mcp")
 
+import anyio  # noqa: E402
 import httpx  # noqa: E402
 import jwt  # noqa: E402
+from mcp.server.auth.provider import TokenError  # noqa: E402
+from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 from libris.hosted import HostedConfigError, HostedSettings, create_app  # noqa: E402
 from libris.oauth import (  # noqa: E402
     CONSENT_COOKIE,
     GoogleAccount,
+    LibrisAuthProvider,
     MemoryAuthStore,
     SignInFailed,
     account_from_id_token,
@@ -1020,3 +1025,119 @@ def test_sign_ins_beyond_the_hourly_limit_are_refused(
         # And once the hour has passed, sign-ins work again
         now[0] += 3601
         assert start_sign_in(client, client_id, challenge).status_code == 302
+
+
+# Races -----------------------------------------------------------------------
+#
+# These drive the provider directly, so two refreshes really do run at once:
+# each store call runs in its own worker thread, and the store's hook between
+# reading a record and writing it holds them at the point that matters.
+
+
+def provider_over(store: MemoryAuthStore, google: FakeGoogle) -> LibrisAuthProvider:
+    return LibrisAuthProvider(
+        public_url=PUBLIC_URL,
+        signing_key=SIGNING_KEY,
+        allowed_sub=OWNER_SUB,
+        store=store,
+        identity=google,
+    )
+
+
+def signed_in(
+    store: MemoryAuthStore, google: FakeGoogle
+) -> tuple[OAuthClientInformationFull, dict]:
+    """A client and its tokens, from a real sign-in over HTTP."""
+    with TestClient(
+        create_app(settings(), store=store, identity=google), base_url=PUBLIC_URL
+    ) as client:
+        client_id, issued = tokens(client)
+    registered = OAuthClientInformationFull.model_validate(
+        store.get("client", client_id)["client"]
+    )
+    return registered, issued
+
+
+def test_two_requests_spending_one_refresh_token_at_once_end_the_sign_in(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a refresh token, and two requests that both read it unspent before
+    # either marks it spent
+    registered, issued = signed_in(store, google)
+    provider = provider_over(store, google)
+    both_have_read = threading.Barrier(2, timeout=5)
+
+    def hold_refresh(kind: str, key: str) -> None:
+        if kind == "refresh":
+            both_have_read.wait()
+
+    store.between_read_and_write = hold_refresh
+    outcomes: list[object] = []
+
+    async def spend() -> None:
+        token = await provider.load_refresh_token(registered, issued["refresh_token"])
+        try:
+            outcomes.append(
+                await provider.exchange_refresh_token(registered, token, [])
+            )
+        except TokenError as refused:
+            outcomes.append(refused)
+
+    async def race() -> None:
+        async with anyio.create_task_group() as group:
+            group.start_soon(spend)
+            group.start_soon(spend)
+
+    # When they race
+    anyio.run(race)
+    store.between_read_and_write = lambda kind, key: None
+
+    # Then at least one is refused as a replay, and nothing from the sign-in
+    # still works: two parties held one token. Which order the rest happens
+    # in is the scheduler's choice, and both are safe. Either the refusal
+    # revokes the grant before the winner can extend it, so the winner is
+    # refused too, or the winner gets tokens the refusal then kills.
+    won = [o for o in outcomes if not isinstance(o, TokenError)]
+    lost = [o for o in outcomes if isinstance(o, TokenError)]
+    assert len(outcomes) == 2 and lost
+    assert {refused.error for refused in lost} == {"invalid_grant"}
+    for tokens_won in won:
+        assert anyio.run(provider.load_access_token, tokens_won.access_token) is None
+        assert (
+            anyio.run(provider.load_refresh_token, registered, tokens_won.refresh_token)
+            is None
+        )
+    assert not [key for kind, key in store.records if kind == "grant"]
+    assert anyio.run(provider.load_access_token, issued["access_token"]) is None
+
+
+def test_a_refresh_cannot_bring_back_a_grant_revoked_while_it_ran(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a refresh that has spent its token, and is about to extend the
+    # grant, when the sign-in is revoked
+    registered, issued = signed_in(store, google)
+    provider = provider_over(store, google)
+
+    def revoke_first(kind: str, key: str) -> None:
+        if kind == "grant":
+            store.delete("grant", key)
+
+    store.between_read_and_write = revoke_first
+
+    async def refresh_it() -> object:
+        token = await provider.load_refresh_token(registered, issued["refresh_token"])
+        try:
+            return await provider.exchange_refresh_token(registered, token, [])
+        except TokenError as refused:
+            return refused
+
+    # When the refresh carries on
+    outcome = anyio.run(refresh_it)
+    store.between_read_and_write = lambda kind, key: None
+
+    # Then it is refused, and the revocation stands: no grant came back, so
+    # the access token issued before it is dead as well
+    assert isinstance(outcome, TokenError)
+    assert not [key for kind, key in store.records if kind == "grant"]
+    assert anyio.run(provider.load_access_token, issued["access_token"]) is None

@@ -24,6 +24,7 @@ import hashlib
 import html
 import json
 import secrets
+import threading
 import time
 from base64 import urlsafe_b64encode
 from collections.abc import Callable
@@ -190,15 +191,20 @@ def account_from_id_token(
 class AuthStore(Protocol):
     """Everything the authorization server must not forget, as expiring records.
 
-    Clients, sign-ins in progress, authorization codes and refresh tokens are
-    all kept here rather than in memory. The Container App scales to zero, and
-    a person can be on Google's page while it does: nothing reaches Libris then,
-    so a sign-in held in memory would be gone when Google sends them back.
+    Clients, sign-ins in progress, authorization codes, refresh tokens and
+    grants are all kept here rather than in memory. The Container App scales to
+    zero, and a person can be on Google's page while it does: nothing reaches
+    Libris then, so a sign-in held in memory would be gone when Google sends
+    them back.
 
     Each record has a kind, a key and an expiry. Records are removed once they
     expire, but readers check `expires_at` themselves because removal can lag.
     Anything a client could present (a code, a refresh token) is keyed by its
     hash, so a copy of the store holds nothing that works.
+
+    `take` and `transition` are the two operations that must be atomic, because
+    concurrent requests decide things by them: who redeemed a code, whether a
+    refresh token was used twice, whether a grant survived a revocation.
     """
 
     def put(self, kind: str, key: str, data: dict, expires_at: int) -> None:
@@ -213,6 +219,21 @@ class AuthStore(Protocol):
         """Remove and return a record, so that only one caller ever gets it."""
         ...
 
+    def transition(
+        self,
+        kind: str,
+        key: str,
+        change: Callable[[dict], dict],
+        expires_at: int,
+    ) -> dict | None:
+        """Replace a record with `change(record)`, if nothing changed it meanwhile.
+
+        Returns the record as it was before, or None if there was none or
+        another writer got to it between the read and the write. A record that
+        is gone stays gone: this never creates one.
+        """
+        ...
+
     def delete(self, kind: str, key: str) -> None:
         """Remove a record if it exists."""
         ...
@@ -222,25 +243,57 @@ class MemoryAuthStore:
     """An `AuthStore` that forgets everything on restart: for tests and local runs.
 
     Records go through JSON on the way in and out, as they do in Cosmos, so a
-    value that only survives in memory fails here first.
+    value that only survives in memory fails here first. Each carries a version,
+    as a Cosmos etag does, so `transition` loses a race the way Cosmos would.
+    `between_read_and_write` lets a test hold a transition at that point while
+    another request runs.
     """
 
     def __init__(self) -> None:
-        self.records: dict[tuple[str, str], str] = {}
+        self.records: dict[tuple[str, str], tuple[str, int]] = {}
+        self._versions = 0
+        self._lock = threading.Lock()
+        self.between_read_and_write: Callable[[str, str], None] = lambda kind, key: None
+
+    def _write(self, kind: str, key: str, data: dict) -> None:
+        self._versions += 1
+        self.records[(kind, key)] = (json.dumps(data), self._versions)
 
     def put(self, kind: str, key: str, data: dict, expires_at: int) -> None:
-        self.records[(kind, key)] = json.dumps(data)
+        with self._lock:
+            self._write(kind, key, data)
 
     def get(self, kind: str, key: str) -> dict | None:
-        raw = self.records.get((kind, key))
-        return None if raw is None else json.loads(raw)
+        held = self.records.get((kind, key))
+        return None if held is None else json.loads(held[0])
 
     def take(self, kind: str, key: str) -> dict | None:
-        raw = self.records.pop((kind, key), None)
-        return None if raw is None else json.loads(raw)
+        with self._lock:
+            held = self.records.pop((kind, key), None)
+        return None if held is None else json.loads(held[0])
+
+    def transition(
+        self,
+        kind: str,
+        key: str,
+        change: Callable[[dict], dict],
+        expires_at: int,
+    ) -> dict | None:
+        held = self.records.get((kind, key))
+        if held is None:
+            return None
+        before = json.loads(held[0])
+        after = change(before)
+        self.between_read_and_write(kind, key)
+        with self._lock:
+            if self.records.get((kind, key)) != held:
+                return None
+            self._write(kind, key, after)
+        return before
 
     def delete(self, kind: str, key: str) -> None:
-        self.records.pop((kind, key), None)
+        with self._lock:
+            self.records.pop((kind, key), None)
 
 
 @dataclass
@@ -271,6 +324,16 @@ class _SignIn:
         return cls(
             **{**record, "params": AuthorizationParams.model_validate(record["params"])}
         )
+
+
+class _Refresh(RefreshToken):
+    """A refresh token as loaded, carrying the grant it belongs to.
+
+    The SDK hands back whatever `load_refresh_token` returned, so the grant id
+    travels with the token into the exchange and the revocation.
+    """
+
+    grant: str
 
 
 def _hash(token: str) -> str:
@@ -517,13 +580,15 @@ class LibrisAuthProvider:
     ) -> OAuthToken:
         if await self._take("code", _hash(authorization_code.code)) is None:
             raise TokenError("invalid_grant", "The authorization code was already used")
+        subject = authorization_code.subject or ""
+        grant, expires_at = await self._new_grant(client, subject)
         return await self._issue(
-            client, authorization_code.subject or "", authorization_code.scopes
+            client, subject, authorization_code.scopes, grant, expires_at
         )
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
-    ) -> RefreshToken | None:
+    ) -> "_Refresh | None":
         record = await self._get("refresh", _hash(refresh_token))
         if (
             record is None
@@ -531,45 +596,61 @@ class LibrisAuthProvider:
             or await self._get("grant", record.get("grant", "")) is None
         ):
             return None
-        return RefreshToken(
+        return _Refresh(
             token=refresh_token,
             client_id=record["client_id"],
             scopes=record["scopes"],
             expires_at=record["expires_at"],
             subject=record["subject"],
+            grant=record["grant"],
         )
 
     async def exchange_refresh_token(
         self,
         client: OAuthClientInformationFull,
-        refresh_token: RefreshToken,
+        refresh_token: "_Refresh",
         scopes: list[str],
     ) -> OAuthToken:
-        # Taking the token is the rotation: whoever takes it first gets the new
-        # pair, and a second taker racing it gets nothing.
-        key = _hash(refresh_token.token)
-        record = await self._take("refresh", key)
-        if record is None:
-            raise TokenError("invalid_grant", "The refresh token was already used")
-        if await self._get("grant", record.get("grant", "")) is None:
-            raise TokenError("invalid_grant", "This sign-in was revoked")
-        if record.get("spent"):
-            # A token already rotated away is being used again. One of its two
-            # holders is not the client it was issued to, and there is no
-            # telling which, so the whole sign-in ends (RFC 9700 4.14.2).
-            # Deleting the predecessor alone would leave a thief who redeemed
-            # it first holding a live successor.
-            await self._delete("grant", record["grant"])
+        # Spending the token is one atomic step: it is marked spent only if
+        # nothing changed it since it was read. The marker stays for the rest
+        # of the token's life, so a later replay is recognised rather than
+        # looking like a token that never existed.
+        before = await self._transition(
+            "refresh",
+            _hash(refresh_token.token),
+            lambda record: {**record, "spent": True},
+            int(refresh_token.expires_at or 0),
+        )
+        if before is None or before.get("spent"):
+            # Spent already, or spent by another request in the same instant.
+            # Either way two parties presented one token, one of them is not
+            # the client it was issued to, and there is no telling which, so
+            # the whole sign-in ends (RFC 9700 4.14.2). Refusing only this
+            # request would leave whoever won holding a live successor.
+            await self._delete("grant", refresh_token.grant)
             raise TokenError("invalid_grant", "This refresh token was reused")
-        # Kept as a spent marker for the rest of its life, so a later replay
-        # is recognised rather than looking like a token that never existed.
-        await self._put("refresh", key, {**record, "spent": True}, record["expires_at"])
-        if not self._is_allowed(record["subject"]):
+        if not self._is_allowed(before["subject"]):
             raise TokenError(
                 "invalid_grant", "This account can no longer use this Library"
             )
+        # Extend the grant only if it still exists. Writing it outright would
+        # bring back a grant that a revocation deleted after the checks above,
+        # and every token the revocation was meant to end along with it.
+        expires_at = self._now() + REFRESH_TOKEN_SECONDS
+        extended = await self._transition(
+            "grant",
+            refresh_token.grant,
+            lambda grant: {**grant, "expires_at": expires_at},
+            expires_at,
+        )
+        if extended is None:
+            raise TokenError("invalid_grant", "This sign-in was revoked")
         return await self._issue(
-            client, record["subject"], scopes or record["scopes"], grant=record["grant"]
+            client,
+            before["subject"],
+            scopes or before["scopes"],
+            refresh_token.grant,
+            expires_at,
         )
 
     async def load_access_token(self, token: str) -> AccessToken | None:
@@ -602,43 +683,58 @@ class LibrisAuthProvider:
             claims={"grant": claims["grant"]},
         )
 
-    async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
+    async def revoke_token(self, token: "AccessToken | _Refresh") -> None:
         # Either token revokes the whole sign-in: deleting the grant ends the
         # access token on its next call, and every refresh token issued under
         # it, however many rotations later.
-        if isinstance(token, AccessToken):
-            grant = (token.claims or {}).get("grant")
+        if isinstance(token, _Refresh):
+            await self._delete("refresh", _hash(token.token))
+            grant = token.grant
         else:
-            record = await self._take("refresh", _hash(token.token))
-            grant = None if record is None else record.get("grant")
+            grant = (token.claims or {}).get("grant")
         if grant:
             await self._delete("grant", grant)
 
     # Internals ----------------------------------------------------------
+
+    async def _new_grant(
+        self, client: OAuthClientInformationFull, subject: str
+    ) -> tuple[str, int]:
+        """Start a grant: one sign-in, which every token issued from it shares.
+
+        Through any number of refreshes, the tokens carry its id, so deleting
+        it revokes all of them. Only a new sign-in creates one; a refresh can
+        only extend a grant that still exists.
+        """
+        grant = secrets.token_urlsafe(16)
+        expires_at = self._now() + REFRESH_TOKEN_SECONDS
+        await self._put(
+            "grant",
+            grant,
+            {
+                "client_id": client.client_id or "",
+                "subject": subject,
+                "expires_at": expires_at,
+            },
+            expires_at,
+        )
+        return grant, expires_at
 
     async def _issue(
         self,
         client: OAuthClientInformationFull,
         subject: str,
         scopes: list[str],
-        grant: str | None = None,
+        grant: str,
+        expires_at: int,
     ) -> OAuthToken:
-        """Issue an access and refresh token under a grant.
+        """Issue an access and refresh token under a grant that already exists.
 
-        A grant is one sign-in. Every token issued from it, through any number
-        of refreshes, carries its id, so revoking the grant revokes them all.
-        A new sign-in starts a new grant; a refresh continues the old one.
+        Never writes the grant. A revocation that lands while this runs leaves
+        these tokens pointing at a grant that is gone, so they are refused.
         """
         now = self._now()
         client_id = client.client_id or ""
-        expires_at = now + REFRESH_TOKEN_SECONDS
-        grant = grant or secrets.token_urlsafe(16)
-        await self._put(
-            "grant",
-            grant,
-            {"client_id": client_id, "subject": subject, "expires_at": expires_at},
-            expires_at,
-        )
         access_token = jwt.encode(
             {
                 "iss": self.public_url,
@@ -710,6 +806,13 @@ class LibrisAuthProvider:
 
     async def _take(self, kind: str, key: str) -> dict | None:
         return await anyio.to_thread.run_sync(self._store.take, kind, key)
+
+    async def _transition(
+        self, kind: str, key: str, change: Callable[[dict], dict], expires_at: int
+    ) -> dict | None:
+        return await anyio.to_thread.run_sync(
+            self._store.transition, kind, key, change, expires_at
+        )
 
     async def _delete(self, kind: str, key: str) -> None:
         await anyio.to_thread.run_sync(self._store.delete, kind, key)

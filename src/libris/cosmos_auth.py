@@ -16,6 +16,7 @@ to sign in again rather than getting a server error.
 
 import logging
 import time
+from collections.abc import Callable
 
 from azure.core import MatchConditions
 from azure.core.exceptions import ResourceNotFoundError
@@ -75,6 +76,36 @@ class CosmosAuthStore:
         except (ResourceNotFoundError, CosmosAccessConditionFailedError):
             return None
         return item["data"]
+
+    def transition(
+        self,
+        kind: str,
+        key: str,
+        change: Callable[[dict], dict],
+        expires_at: int,
+    ) -> dict | None:
+        item_id = f"{kind}:{key}"
+        item = self._read(item_id)
+        if item is None or "data" not in item:
+            return None
+        before = item["data"]
+        # Replace only the version just read, so a concurrent writer, or a
+        # delete in between, makes this one lose rather than overwrite. A
+        # replace never creates, so a deleted record stays deleted.
+        try:
+            self._container.replace_item(
+                item_id,
+                {
+                    "id": item_id,
+                    "data": change(before),
+                    "ttl": max(expires_at - int(time.time()), 1),
+                },
+                etag=item["_etag"],
+                match_condition=MatchConditions.IfNotModified,
+            )
+        except (ResourceNotFoundError, CosmosAccessConditionFailedError):
+            return None
+        return before
 
     def delete(self, kind: str, key: str) -> None:
         item_id = f"{kind}:{key}"

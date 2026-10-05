@@ -30,10 +30,26 @@ class FakeContainer:
         self._version = 0
         # Lets a test slip another taker's delete in between a read and a delete.
         self.before_delete = lambda item_id: None
+        # The same, for a replace.
+        self.before_write = lambda item_id: None
 
     def upsert_item(self, body: dict) -> None:
         self._version += 1
         self.items[body["id"]] = {**body, "_etag": f'"{self._version}"'}
+
+    def replace_item(
+        self,
+        item: str,
+        body: dict,
+        etag: str | None = None,
+        match_condition: object | None = None,
+    ) -> None:
+        self.before_write(item)
+        if item not in self.items:
+            raise CosmosResourceNotFoundError(status_code=404, message="gone")
+        if etag is not None and self.items[item]["_etag"] != etag:
+            raise CosmosAccessConditionFailedError(status_code=412, message="changed")
+        self.upsert_item(body)
 
     def read_item(self, item: str, partition_key: str) -> dict:
         assert partition_key == item
@@ -171,3 +187,62 @@ def test_a_document_from_the_first_deployment_reads_as_absent(
     assert store.get("refresh", "h") is None
     assert store.take("refresh", "h") is None
     assert store.get("client", "c") is None
+
+
+def test_a_transition_changes_the_record_and_returns_what_it_was(
+    store: CosmosAuthStore,
+) -> None:
+    store.put("refresh", "h", {"spent": False}, int(time.time()) + 300)
+
+    before = store.transition(
+        "refresh", "h", lambda r: {**r, "spent": True}, int(time.time()) + 300
+    )
+
+    assert before == {"spent": False}
+    assert store.get("refresh", "h") == {"spent": True}
+
+
+def test_a_transition_that_loses_the_race_changes_nothing(
+    store: CosmosAuthStore, container: FakeContainer
+) -> None:
+    # Given a record another request rewrites between this one's read and write
+    store.put("refresh", "h", {"spent": False}, int(time.time()) + 300)
+    container.before_write = lambda item_id: store.put(
+        "refresh", "h", {"spent": False, "other": True}, int(time.time()) + 300
+    )
+
+    # When this request tries to mark it spent
+    before = store.transition(
+        "refresh", "h", lambda r: {**r, "spent": True}, int(time.time()) + 300
+    )
+
+    # Then it is told it lost, and the other writer's version stands
+    assert before is None
+    assert store.get("refresh", "h") == {"spent": False, "other": True}
+
+
+def test_a_transition_never_brings_back_a_deleted_record(
+    store: CosmosAuthStore, container: FakeContainer
+) -> None:
+    # Given a grant revoked between a refresh's read and its write
+    store.put("grant", "g", {"expires_at": 1}, int(time.time()) + 300)
+    container.before_write = lambda item_id: store.delete("grant", "g")
+
+    # When the refresh tries to extend it
+    before = store.transition(
+        "grant", "g", lambda g: {**g, "expires_at": 2}, int(time.time()) + 300
+    )
+
+    # Then it fails, and the grant stays revoked
+    assert before is None
+    assert store.get("grant", "g") is None
+
+
+def test_a_transition_on_nothing_creates_nothing(store: CosmosAuthStore) -> None:
+    assert (
+        store.transition(
+            "grant", "never", lambda g: {"made": True}, int(time.time()) + 300
+        )
+        is None
+    )
+    assert store.get("grant", "never") is None
