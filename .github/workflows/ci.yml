@@ -15,10 +15,12 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
-        # Both extras are optional, so every state is a supported state and each
+        # Every extra is optional, so every state is a supported state and each
         # gets tested: with one the daemon or the MCP server works, without
-        # either every other command still does, and with both they coexist.
-        extras: ["none", "server", "mcp", "all"]
+        # any every other command still does, and with all they coexist.
+        # `hosted` is the exact install the Dockerfile makes. `all` cannot stand
+        # in for it, because another extra could supply something hosted forgot.
+        extras: ["none", "server", "mcp", "hosted", "all"]
         include:
           - extras: "none"
             sync-args: ""
@@ -26,6 +28,8 @@ jobs:
             sync-args: "--extra server"
           - extras: "mcp"
             sync-args: "--extra mcp"
+          - extras: "hosted"
+            sync-args: "--extra hosted"
           - extras: "all"
             sync-args: "--all-extras"
     steps:
@@ -46,8 +50,14 @@ jobs:
         run: uv run python -c "import fastapi, uvicorn"
 
       - name: Verify the mcp extra installed
-        if: matrix.extras == 'mcp' || matrix.extras == 'all'
+        if: matrix.extras == 'mcp' || matrix.extras == 'hosted' || matrix.extras == 'all'
         run: uv run python -c "from mcp.server import MCPServer"
+
+      # The container's own entry point and store, imported the way it imports
+      # them, so a dependency hosted needs but does not declare fails here.
+      - name: Verify the hosted extra installed
+        if: matrix.extras == 'hosted' || matrix.extras == 'all'
+        run: uv run python -c "import uvicorn, libris.cosmos_auth; from libris.hosted import create_app_from_env"
 
       # The other half of the same guarantee: the no-extras leg exists to prove
       # the core CLI works without them, which is worthless if something quietly

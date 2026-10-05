@@ -46,6 +46,16 @@ sign-in would hand that client a code. That cookie is `SameSite=Lax`, because Go
 is a cross-site navigation and a Strict cookie would never arrive. Review caught this one. Every
 sign-in check before it had assumed the person approving and the person signing in were the same.
 
+**The app's hostname does not isolate it.** `azurecontainerapps.io` is not on the Public Suffix List,
+so every Container App in the region counts as the same site as this one. Two things follow. First,
+`SameSite=Strict` does not stop a sibling app's form, so the consent POST must carry an `Origin`
+exactly equal to Libris's own. Browsers always send one on a form POST, and a missing one is refused.
+Second, a sibling can set cookies for the shared parent domain, and the browser sends those to Libris.
+That would let an attacker plant their own approval cookie in the owner's browser. Both cookies
+therefore carry the `__Host-` prefix: a browser rejects any such cookie this exact host did not set
+itself, with no `Domain` and `Path=/`. A custom domain would remove the shared parent altogether.
+This design does not need one, but it would be one more layer.
+
 **What is kept, and where.** Access tokens are signed JWTs that last an hour. Every call checks the
 signature, issuer, audience and expiry, checks the subject against the allowed account, and checks
 that the token's grant still exists.

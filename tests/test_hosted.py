@@ -41,6 +41,8 @@ from libris.oauth import (  # noqa: E402
 PUBLIC_URL = "https://libris.test"
 RESOURCE = f"{PUBLIC_URL}/mcp"
 CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
+# What a browser sends with the consent form when it came from Libris's page.
+SAME_ORIGIN = {"Origin": PUBLIC_URL}
 SIGNING_KEY = "k" * 48
 OWNER_SUB = "112233445566778899000"
 
@@ -158,6 +160,7 @@ def consent(
     request_id = query(authorize.headers["location"])["request"]
     return client.post(
         "/oauth/consent",
+        headers=SAME_ORIGIN,
         data={"request": request_id, "decision": decision},
         follow_redirects=False,
     )
@@ -409,6 +412,7 @@ def test_another_site_cannot_approve_on_your_behalf(
     client.cookies.clear()
     response = client.post(
         "/oauth/consent",
+        headers=SAME_ORIGIN,
         data={"request": request_id, "decision": "allow"},
         follow_redirects=False,
     )
@@ -432,11 +436,10 @@ def test_a_consent_cookie_from_another_sign_in_does_not_count(
     # When a second sign-in is approved with only that first cookie
     second = start_sign_in(client, client_id, challenge)
     client.cookies.clear()
-    client.cookies.set(
-        CONSENT_COOKIE, held, domain="libris.test", path="/oauth/consent"
-    )
+    client.cookies.set(CONSENT_COOKIE, held, domain="libris.test", path="/")
     response = client.post(
         "/oauth/consent",
+        headers=SAME_ORIGIN,
         data={
             "request": query(second.headers["location"])["request"],
             "decision": "allow",
@@ -857,7 +860,9 @@ def test_the_consent_cookie_cannot_travel_cross_site(client: TestClient) -> None
     assert "samesite=strict" in cookie
     assert "secure" in cookie
     assert "httponly" in cookie
-    assert "path=/oauth/consent" in cookie
+    assert cookie.startswith("__host-")
+    assert "path=/;" in cookie or cookie.endswith("path=/")
+    assert "domain=" not in cookie
 
 
 # A client with a secret, as Claude registered -------------------------------
@@ -1218,7 +1223,9 @@ def test_the_approval_cookie_survives_googles_redirect_back(client: TestClient) 
     # never to script
     cookie = to_google.headers["set-cookie"].lower()
     assert "samesite=lax" in cookie
-    assert "path=/oauth/google/callback" in cookie
+    assert cookie.startswith("__host-libris_approved=")
+    assert "path=/;" in cookie or cookie.endswith("path=/")
+    assert "domain=" not in cookie
     assert "secure" in cookie
     assert "httponly" in cookie
 
@@ -1350,3 +1357,41 @@ def test_a_burst_of_registrations_cannot_slip_past_the_limit(
     # Then exactly two get through, and only two clients were written
     assert sorted(statuses) == [201, 201] + [429] * 8
     assert len([key for kind, key in store.records if kind == "client"]) == 2
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://attacker.salmonmushroom-205b8504.eastus2.azurecontainerapps.io",
+        "https://libris.test.attacker.example",
+        "http://libris.test",
+        None,
+    ],
+    ids=["sibling container app", "lookalike host", "plain http", "no origin"],
+)
+def test_consent_is_refused_unless_it_comes_from_libris_itself(
+    client: TestClient, google: FakeGoogle, origin: str | None
+) -> None:
+    # Given a browser holding the real consent cookie, as it would after the
+    # owner was made to load the consent page
+    client_id = register(client)
+    _, challenge = pkce()
+    authorize = start_sign_in(client, client_id, challenge)
+    client.get(authorize.headers["location"])
+    request_id = query(authorize.headers["location"])["request"]
+
+    # When the approval is submitted from anywhere but Libris's own origin.
+    # A sibling Container App is the same site, so SameSite=Strict lets the
+    # cookie ride along, and only the Origin check is left to refuse it.
+    headers = {} if origin is None else {"Origin": origin}
+    response = client.post(
+        "/oauth/consent",
+        headers=headers,
+        data={"request": request_id, "decision": "allow"},
+        follow_redirects=False,
+    )
+
+    # Then nothing is approved and Google is never reached
+    assert response.status_code == 403
+    assert "location" not in response.headers
+    assert google.verifiers == []

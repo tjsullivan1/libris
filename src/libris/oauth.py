@@ -65,10 +65,18 @@ SIGN_INS_PER_CLIENT_PER_HOUR = 10
 
 CONSENT_PATH = "/oauth/consent"
 GOOGLE_CALLBACK_PATH = "/oauth/google/callback"
-CONSENT_COOKIE = "libris_consent"
+# Both cookies carry the __Host- prefix, which makes a browser refuse any such
+# cookie that this exact host did not set itself: no Domain attribute, Path=/,
+# Secure. Without it they were not safe here. The app lives under
+# azurecontainerapps.io, which is not on the Public Suffix List, so every other
+# Container App in the region is the same site. A sibling could set a cookie for
+# the shared parent domain and the browser would send it to Libris ("cookie
+# tossing"). That let an attacker plant their own approval cookie in the
+# owner's browser.
+CONSENT_COOKIE = "__Host-libris_consent"
 # Set when consent is given, and required back at Google's callback, so the
 # browser that finishes a sign-in is the one that approved it.
-APPROVAL_COOKIE = "libris_approved"
+APPROVAL_COOKIE = "__Host-libris_approved"
 
 GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105 - a URL, not a secret
@@ -399,6 +407,8 @@ class LibrisAuthProvider:
         self.public_url = public_url.rstrip("/")
         self.resource_url = f"{self.public_url}/mcp"
         self.google_redirect_uri = f"{self.public_url}{GOOGLE_CALLBACK_PATH}"
+        parts = urlsplit(self.public_url)
+        self._origin = f"{parts.scheme}://{parts.netloc}"
         self._signing_key = signing_key
         self._allowed_sub = allowed_sub or None
         self._store = store
@@ -480,7 +490,7 @@ class LibrisAuthProvider:
             CONSENT_COOKIE,
             sign_in.consent_token,
             max_age=SIGN_IN_SECONDS,
-            path=CONSENT_PATH,
+            path="/",
             secure=True,
             httponly=True,
             samesite="strict",
@@ -489,6 +499,16 @@ class LibrisAuthProvider:
 
     async def consent_decision(self, request: Request) -> Response:
         """Act on the consent form, but only from the browser that was shown it."""
+        # The form must come from Libris's own page. SameSite=Strict on the
+        # consent cookie stops another site's form, but a sibling Container App
+        # is the same site, so its form would carry the cookie. Browsers always
+        # send Origin on a form POST, so a missing one is refused too.
+        if request.headers.get("origin") != self._origin:
+            return _page(
+                "Not allowed",
+                "<p>This approval did not come from the consent page.</p>",
+                403,
+            )
         form = await request.form()
         request_id = str(form.get("request", ""))
         sign_in = await self._sign_in(request_id)
@@ -529,7 +549,7 @@ class LibrisAuthProvider:
             APPROVAL_COOKIE,
             sign_in.consent_token,
             max_age=SIGN_IN_SECONDS,
-            path=GOOGLE_CALLBACK_PATH,
+            path="/",
             secure=True,
             httponly=True,
             samesite="lax",
