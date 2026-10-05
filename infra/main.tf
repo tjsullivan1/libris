@@ -226,9 +226,9 @@ resource "azurerm_container_app" "mcp" {
 
   template {
     min_replicas = 0
-    # Exactly one. Authorization codes and sign-ins in progress live in the
-    # process's memory (ADR 0035), so a second replica would receive callbacks
-    # for sign-ins it never started.
+    # One is plenty for one person. The app holds no sign-in state of its own
+    # (ADR 0035), so raising this is safe; only the registration limit would
+    # then count per replica.
     max_replicas = 1
 
     container {

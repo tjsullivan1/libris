@@ -39,12 +39,20 @@ names the client and the host it will be sent back to, as the MCP authorization 
 page sets a `SameSite=Strict` cookie that its own form must return, so a page on another site cannot
 submit the form for you.
 
-**What is kept, and where.** Access tokens are signed JWTs that last an hour and are checked by their
-signature alone. Registered clients and refresh tokens must survive the app scaling to zero, or every
-cold start would sign Claude and Gemini out, so they live in Cosmos. ADR 0006 brings Cosmos to the
-project anyway. Refresh tokens are stored as hashes and rotate on every use, as OAuth 2.1 requires for
-public clients. Codes and sign-ins in progress live in memory for minutes, which holds only while the
-Container App runs a single replica. That limit is stated in the Terraform, not left as an assumption.
+**What is kept, and where.** Access tokens are signed JWTs that last an hour. They are checked without
+a lookup: signature, issuer, audience and expiry, and the subject against the allowed account on every
+call, so changing that account cuts off its tokens within the hour. Everything else lives in Cosmos
+(ADR 0006 brings Cosmos to the project anyway): registered clients, refresh tokens, authorization
+codes and sign-ins in progress. A first draft kept codes and sign-ins in memory, and review caught why
+that fails. The app scales to zero, and while a person is on Google's page no request reaches Libris,
+so the sign-in it would come back to was gone. Holding no state in the process also means any
+replica can finish a sign-in another one started. Codes and refresh tokens are kept as hashes, and
+codes, refresh tokens and sign-ins are each taken once, by a delete conditioned on the version read.
+Refresh tokens rotate on every use, as OAuth 2.1 requires for public clients.
+
+**Open registration has limits.** Anyone can call `/register`, and each registration writes a
+document. A client that goes 60 days without being issued a token is forgotten, and registrations
+beyond 30 an hour are refused with a 429 before they reach Cosmos.
 
 **Entra stays, for Azure only.** Terraform and `libris sync` reach Azure as the person's Azure account,
 and the Container App reaches Cosmos and Key Vault as its managed identity (ADR 0006). None of those

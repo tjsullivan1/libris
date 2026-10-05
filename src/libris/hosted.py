@@ -14,6 +14,9 @@ Run it the way the container does:
 """
 
 import os
+import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from mcp.server import MCPServer
@@ -26,6 +29,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import installed_version
 from .oauth import (
@@ -38,6 +42,52 @@ from .oauth import (
     LibrisAuthProvider,
     MemoryAuthStore,
 )
+
+# Registration is open by design (ADR 0035), and each one writes a document.
+# Claude registers once per connection; this is far above any real use and far
+# below what would cost anything.
+REGISTRATIONS_PER_HOUR = 30
+
+
+class RegistrationLimit:
+    """Refuse registrations beyond a number per hour, before they reach the store.
+
+    In memory, so a restart forgets the count. That is fine for a limit whose
+    job is to stop a flood, not to account for every request. Answers 429
+    rather than letting the SDK report a refusal as invalid client metadata.
+    """
+
+    def __init__(
+        self, app: ASGIApp, *, per_hour: int, clock: Callable[[], float]
+    ) -> None:
+        self._app = app
+        self._per_hour = per_hour
+        self._clock = clock
+        self._recent: deque[float] = deque()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] == "http"
+            and scope["method"] == "POST"
+            and scope["path"] == "/register"
+        ):
+            now = self._clock()
+            while self._recent and self._recent[0] <= now - 3600:
+                self._recent.popleft()
+            if len(self._recent) >= self._per_hour:
+                retry_after = int(self._recent[0] + 3600 - now) + 1
+                response = JSONResponse(
+                    {
+                        "error": "temporarily_unavailable",
+                        "error_description": "Too many registrations. Try again later.",
+                    },
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after)},
+                )
+                await response(scope, receive, send)
+                return
+            self._recent.append(now)
+        await self._app(scope, receive, send)
 
 
 class HostedConfigError(Exception):
@@ -91,20 +141,26 @@ def create_app(
     *,
     store: AuthStore | None = None,
     identity: IdentityProvider | None = None,
+    registrations_per_hour: int = REGISTRATIONS_PER_HOUR,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Starlette:
     """Build the hosted ASGI app.
 
     Args:
         settings: Where the server lives and the credentials it holds.
-        store: Where clients and refresh tokens are kept. Defaults to Cosmos
-            when an endpoint is configured, and to memory otherwise.
+        store: Where the authorization server keeps its records. Defaults to
+            Cosmos when an endpoint is configured, and to memory otherwise.
         identity: Who proves the person's identity. Defaults to Google.
+        registrations_per_hour: How many clients may register in any hour.
+        clock: The time, for the registration limit.
     """
     if store is None:
         if settings.cosmos_endpoint:
             from .cosmos_auth import CosmosAuthStore
 
-            store = CosmosAuthStore(settings.cosmos_endpoint, settings.cosmos_database)
+            store = CosmosAuthStore.connect(
+                settings.cosmos_endpoint, settings.cosmos_database
+            )
         else:
             store = MemoryAuthStore()
     if identity is None:
@@ -157,7 +213,7 @@ def create_app(
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
-    return mcp.streamable_http_app(
+    app = mcp.streamable_http_app(
         # Stateless, so a restart or a scale-from-zero never strands a
         # session a client thinks it still has.
         stateless_http=True,
@@ -168,6 +224,8 @@ def create_app(
             enable_dns_rebinding_protection=False
         ),
     )
+    app.add_middleware(RegistrationLimit, per_hour=registrations_per_hour, clock=clock)
+    return app
 
 
 def create_app_from_env() -> Starlette:

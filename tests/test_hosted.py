@@ -11,6 +11,7 @@ import json
 import secrets
 import time
 from base64 import urlsafe_b64encode
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlsplit
 
@@ -18,6 +19,7 @@ import pytest
 
 pytest.importorskip("mcp")
 
+import httpx  # noqa: E402
 import jwt  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
@@ -73,17 +75,17 @@ def settings(
 
 
 @pytest.fixture
-def google():
+def google() -> FakeGoogle:
     return FakeGoogle()
 
 
 @pytest.fixture
-def store():
+def store() -> MemoryAuthStore:
     return MemoryAuthStore()
 
 
 @pytest.fixture
-def client(google, store):
+def client(google: FakeGoogle, store: MemoryAuthStore) -> Iterator[TestClient]:
     with TestClient(
         create_app(settings(), store=store, identity=google), base_url=PUBLIC_URL
     ) as test_client:
@@ -117,7 +119,7 @@ def register(client: TestClient) -> str:
 
 def start_sign_in(
     client: TestClient, client_id: str, challenge: str, resource: str = RESOURCE
-):
+) -> httpx.Response:
     """`/authorize`, as a client sends it. Returns the response, unfollowed."""
     return client.get(
         "/authorize",
@@ -141,7 +143,7 @@ def query(url: str) -> dict[str, str]:
 
 def consent(
     client: TestClient, client_id: str, challenge: str, decision: str = "allow"
-):
+) -> httpx.Response:
     """Through `/authorize` and the consent page. Returns the decision's response."""
     authorize = start_sign_in(client, client_id, challenge)
     assert authorize.status_code == 302, authorize.text
@@ -155,7 +157,7 @@ def consent(
     )
 
 
-def sign_in(client: TestClient, client_id: str, challenge: str):
+def sign_in(client: TestClient, client_id: str, challenge: str) -> httpx.Response:
     """The whole browser leg. Returns the response that sends the browser back to the client."""
     to_google = consent(client, client_id, challenge)
     assert to_google.status_code == 303
@@ -168,7 +170,9 @@ def sign_in(client: TestClient, client_id: str, challenge: str):
     )
 
 
-def exchange(client: TestClient, client_id: str, code: str, verifier: str):
+def exchange(
+    client: TestClient, client_id: str, code: str, verifier: str
+) -> httpx.Response:
     return client.post(
         "/token",
         data={
@@ -194,7 +198,7 @@ def tokens(client: TestClient) -> tuple[str, dict]:
     return client_id, response.json()
 
 
-def call_ping(client: TestClient, access_token: str | None):
+def call_ping(client: TestClient, access_token: str | None) -> httpx.Response:
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
@@ -213,7 +217,9 @@ def call_ping(client: TestClient, access_token: str | None):
 # Discovery ------------------------------------------------------------------
 
 
-def test_an_unauthenticated_call_points_the_client_at_the_metadata(client):
+def test_an_unauthenticated_call_points_the_client_at_the_metadata(
+    client: TestClient,
+) -> None:
     # When a client calls the MCP endpoint without a token
     response = call_ping(client, None)
 
@@ -230,7 +236,9 @@ def test_an_unauthenticated_call_points_the_client_at_the_metadata(client):
     ]
 
 
-def test_the_authorization_server_offers_what_claude_and_gemini_need(client):
+def test_the_authorization_server_offers_what_claude_and_gemini_need(
+    client: TestClient,
+) -> None:
     # When a client reads the authorization server's metadata
     metadata = client.get("/.well-known/oauth-authorization-server").json()
 
@@ -242,7 +250,9 @@ def test_the_authorization_server_offers_what_claude_and_gemini_need(client):
 # Signing in -----------------------------------------------------------------
 
 
-def test_the_owner_signs_in_and_the_token_reaches_the_tools(client, google):
+def test_the_owner_signs_in_and_the_token_reaches_the_tools(
+    client: TestClient, google: FakeGoogle
+) -> None:
     # Given a client that registered and signed in as the owner
     _, issued = tokens(client)
 
@@ -256,7 +266,7 @@ def test_the_owner_signs_in_and_the_token_reaches_the_tools(client, google):
     assert len(google.verifiers) == 1
 
 
-def test_the_client_gets_its_own_state_back(client):
+def test_the_client_gets_its_own_state_back(client: TestClient) -> None:
     # Given a sign-in started with a state of the client's choosing
     client_id = register(client)
     _, challenge = pkce()
@@ -269,7 +279,9 @@ def test_the_client_gets_its_own_state_back(client):
     assert query(back.headers["location"])["state"] == "client-state"
 
 
-def test_another_google_account_gets_no_code(client, google):
+def test_another_google_account_gets_no_code(
+    client: TestClient, google: FakeGoogle
+) -> None:
     # Given Google says someone other than the owner signed in
     google.signed_in = GoogleAccount(
         sub="999", email="someone@gmail.com", email_verified=True
@@ -287,7 +299,9 @@ def test_another_google_account_gets_no_code(client, google):
     assert "999" in response.text
 
 
-def test_an_unverified_email_gets_no_code_even_for_the_owners_id(client, google):
+def test_an_unverified_email_gets_no_code_even_for_the_owners_id(
+    client: TestClient, google: FakeGoogle
+) -> None:
     # Given Google says the owner's account signed in but the email is unverified
     google.signed_in = GoogleAccount(
         sub=OWNER_SUB, email="owner@gmail.com", email_verified=False
@@ -302,7 +316,9 @@ def test_an_unverified_email_gets_no_code_even_for_the_owners_id(client, google)
     assert response.status_code == 403
 
 
-def test_with_no_owner_configured_nobody_gets_in(google, store):
+def test_with_no_owner_configured_nobody_gets_in(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
     # Given a first deployment with no allowed account set yet
     app = create_app(settings(allowed_sub=None), store=store, identity=google)
     with TestClient(app, base_url=PUBLIC_URL) as client:
@@ -320,7 +336,9 @@ def test_with_no_owner_configured_nobody_gets_in(google, store):
 # The consent page -----------------------------------------------------------
 
 
-def test_the_consent_page_names_the_client_and_where_it_sends_you(client):
+def test_the_consent_page_names_the_client_and_where_it_sends_you(
+    client: TestClient,
+) -> None:
     # Given a client called Claude that registered Claude's callback
     client_id = register(client)
     _, challenge = pkce()
@@ -335,7 +353,9 @@ def test_the_consent_page_names_the_client_and_where_it_sends_you(client):
     assert page.headers["x-frame-options"] == "DENY"
 
 
-def test_another_site_cannot_approve_on_your_behalf(client, google):
+def test_another_site_cannot_approve_on_your_behalf(
+    client: TestClient, google: FakeGoogle
+) -> None:
     # Given a sign-in an attacker started with a client they registered
     client_id = register(client)
     _, challenge = pkce()
@@ -357,7 +377,9 @@ def test_another_site_cannot_approve_on_your_behalf(client, google):
     assert google.verifiers == []
 
 
-def test_a_consent_cookie_from_another_sign_in_does_not_count(client):
+def test_a_consent_cookie_from_another_sign_in_does_not_count(
+    client: TestClient,
+) -> None:
     # Given the owner loaded the consent page for one sign-in
     client_id = register(client)
     _, challenge = pkce()
@@ -384,7 +406,7 @@ def test_a_consent_cookie_from_another_sign_in_does_not_count(client):
     assert response.status_code == 403
 
 
-def test_denying_sends_the_client_an_access_denied(client):
+def test_denying_sends_the_client_an_access_denied(client: TestClient) -> None:
     # Given a sign-in at the consent page
     client_id = register(client)
     _, challenge = pkce()
@@ -400,7 +422,7 @@ def test_denying_sends_the_client_an_access_denied(client):
     }
 
 
-def test_a_sign_in_cannot_be_finished_twice(client):
+def test_a_sign_in_cannot_be_finished_twice(client: TestClient) -> None:
     # Given a sign-in Google has already returned from once
     client_id = register(client)
     _, challenge = pkce()
@@ -423,7 +445,7 @@ def test_a_sign_in_cannot_be_finished_twice(client):
     assert again.status_code == 400
 
 
-def test_a_token_for_another_resource_is_not_issued(client):
+def test_a_token_for_another_resource_is_not_issued(client: TestClient) -> None:
     # Given a client asking for a token meant for some other server
     client_id = register(client)
     _, challenge = pkce()
@@ -441,7 +463,7 @@ def test_a_token_for_another_resource_is_not_issued(client):
 # Tokens ---------------------------------------------------------------------
 
 
-def test_a_code_works_once(client):
+def test_a_code_works_once(client: TestClient) -> None:
     # Given a code that has already been exchanged
     client_id = register(client)
     verifier, challenge = pkce()
@@ -456,7 +478,7 @@ def test_a_code_works_once(client):
     assert again.json()["error"] == "invalid_grant"
 
 
-def test_a_code_needs_the_verifier_it_was_started_with(client):
+def test_a_code_needs_the_verifier_it_was_started_with(client: TestClient) -> None:
     # Given a code from a sign-in started with one PKCE challenge
     client_id = register(client)
     _, challenge = pkce()
@@ -470,11 +492,11 @@ def test_a_code_needs_the_verifier_it_was_started_with(client):
     assert response.status_code == 400
 
 
-def test_a_refresh_token_rotates(client):
+def test_a_refresh_token_rotates(client: TestClient) -> None:
     # Given a client holding a refresh token
     client_id, issued = tokens(client)
 
-    def refresh(token: str):
+    def refresh(token: str) -> httpx.Response:
         return client.post(
             "/token",
             data={
@@ -495,16 +517,26 @@ def test_a_refresh_token_rotates(client):
     assert refresh(issued["refresh_token"]).status_code == 400
 
 
-def test_refresh_tokens_are_not_stored_as_issued(client, store):
-    # Given a client holding a refresh token
-    _, issued = tokens(client)
+def test_nothing_a_client_can_present_is_stored_as_issued(
+    client: TestClient, store: MemoryAuthStore
+) -> None:
+    # Given a sign-in caught between the code being issued and exchanged, and
+    # a client that went on to hold a refresh token
+    client_id = register(client)
+    verifier, challenge = pkce()
+    code = query(sign_in(client, client_id, challenge).headers["location"])["code"]
+    held_code = str(store.records)
+    issued = exchange(client, client_id, code, verifier).json()
 
-    # Then the store holds no copy of it that could be presented
-    assert issued["refresh_token"] not in store.refresh_tokens
-    assert len(store.refresh_tokens) == 1
+    # Then no record, of any kind, holds the code or the refresh token as
+    # issued, so a copy of the store holds nothing that works
+    assert code not in held_code
+    everything = str(store.records)
+    assert issued["refresh_token"] not in everything
+    assert any(kind == "refresh" for kind, _ in store.records)
 
 
-def test_a_token_signed_with_another_key_is_refused(client):
+def test_a_token_signed_with_another_key_is_refused(client: TestClient) -> None:
     # Given a token shaped exactly like Libris's, signed with some other key
     now = int(time.time())
     forged = jwt.encode(
@@ -525,7 +557,7 @@ def test_a_token_signed_with_another_key_is_refused(client):
     assert call_ping(client, forged).status_code == 401
 
 
-def test_a_token_for_another_audience_is_refused(client):
+def test_a_token_for_another_audience_is_refused(client: TestClient) -> None:
     # Given a token signed with Libris's own key but issued for another resource
     now = int(time.time())
     elsewhere = jwt.encode(
@@ -546,7 +578,7 @@ def test_a_token_for_another_audience_is_refused(client):
     assert call_ping(client, elsewhere).status_code == 401
 
 
-def test_an_expired_token_is_refused(client):
+def test_an_expired_token_is_refused(client: TestClient) -> None:
     # Given a correctly signed token that expired a minute ago
     now = int(time.time())
     expired = jwt.encode(
@@ -567,7 +599,9 @@ def test_an_expired_token_is_refused(client):
     assert call_ping(client, expired).status_code == 401
 
 
-def test_changing_the_owner_cuts_off_tokens_already_issued(google, store):
+def test_changing_the_owner_cuts_off_tokens_already_issued(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
     # Given a token issued to the owner
     with TestClient(
         create_app(settings(), store=store, identity=google), base_url=PUBLIC_URL
@@ -590,7 +624,9 @@ def test_changing_the_owner_cuts_off_tokens_already_issued(google, store):
         assert refreshed.status_code == 400
 
 
-def test_clients_and_refresh_tokens_survive_a_restart(google, store):
+def test_clients_and_refresh_tokens_survive_a_restart(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
     # Given a client that signed in before the server restarted
     with TestClient(
         create_app(settings(), store=store, identity=google), base_url=PUBLIC_URL
@@ -617,7 +653,7 @@ def test_clients_and_refresh_tokens_survive_a_restart(google, store):
 # Reading Google's answer ----------------------------------------------------
 
 
-def id_token(**claims) -> str:
+def id_token(**claims: object) -> str:
     base = {
         "iss": "https://accounts.google.com",
         "aud": "google-client",
@@ -631,7 +667,7 @@ def id_token(**claims) -> str:
     )
 
 
-def test_an_id_token_from_google_names_the_account():
+def test_an_id_token_from_google_names_the_account() -> None:
     account = account_from_id_token(id_token(), client_id="google-client")
     assert account == GoogleAccount(
         sub=OWNER_SUB, email="owner@gmail.com", email_verified=True
@@ -648,7 +684,7 @@ def test_an_id_token_from_google_names_the_account():
     ],
     ids=["another audience", "another issuer", "expired", "no account"],
 )
-def test_an_id_token_that_is_not_for_libris_is_refused(claims):
+def test_an_id_token_that_is_not_for_libris_is_refused(claims: dict) -> None:
     with pytest.raises(SignInFailed):
         account_from_id_token(id_token(**claims), client_id="google-client")
 
@@ -656,7 +692,7 @@ def test_an_id_token_that_is_not_for_libris_is_refused(claims):
 # Configuration --------------------------------------------------------------
 
 
-def test_missing_settings_are_named_together():
+def test_missing_settings_are_named_together() -> None:
     with pytest.raises(HostedConfigError) as error:
         HostedSettings.from_env({"LIBRIS_PUBLIC_URL": PUBLIC_URL})
     message = str(error.value)
@@ -668,6 +704,128 @@ def test_missing_settings_are_named_together():
         assert name in message
 
 
-def test_a_short_signing_key_is_refused(google, store):
+def test_a_short_signing_key_is_refused(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
     with pytest.raises(ValueError):
         create_app(settings(signing_key="short"), store=store, identity=google)
+
+
+# Scaling to zero -------------------------------------------------------------
+
+
+def test_a_sign_in_survives_a_restart_while_the_person_is_at_google(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a sign-in that reached Google, and then the app scaled to zero
+    # while the person was on Google's page, so nothing reached Libris
+    app = create_app(settings(), store=store, identity=google)
+    with TestClient(app, base_url=PUBLIC_URL) as before:
+        client_id = register(before)
+        verifier, challenge = pkce()
+        to_google = consent(before, client_id, challenge)
+    state = query(to_google.headers["location"])["state"]
+
+    # When Google sends them back to a freshly started instance
+    app = create_app(settings(), store=store, identity=google)
+    with TestClient(app, base_url=PUBLIC_URL) as after:
+        back = after.get(
+            "/oauth/google/callback",
+            params={"state": state, "code": "google-code"},
+            follow_redirects=False,
+        )
+        code = query(back.headers["location"])["code"]
+
+        # Then the sign-in finishes, and its code works on yet another start
+    app = create_app(settings(), store=store, identity=google)
+    with TestClient(app, base_url=PUBLIC_URL) as later:
+        assert exchange(later, client_id, code, verifier).status_code == 200
+
+
+# Open registration -----------------------------------------------------------
+
+
+def test_registrations_beyond_the_hourly_limit_are_refused(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a limit of two registrations an hour
+    now = [1000.0]
+    app = create_app(
+        settings(),
+        store=store,
+        identity=google,
+        registrations_per_hour=2,
+        clock=lambda: now[0],
+    )
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        register(client)
+        register(client)
+        stored = len(store.records)
+
+        # When a third arrives within the hour
+        refused = client.post("/register", json={"redirect_uris": [CLAUDE_CALLBACK]})
+
+        # Then it is refused as too many, says when to retry, and stores nothing
+        assert refused.status_code == 429
+        assert int(refused.headers["retry-after"]) > 0
+        assert len(store.records) == stored
+
+        # And once the hour has passed, registration works again
+        now[0] += 3601
+        register(client)
+
+
+def test_a_client_nobody_uses_is_forgotten(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a client that registered and never signed in
+    with TestClient(
+        create_app(settings(), store=store, identity=google), base_url=PUBLIC_URL
+    ) as client:
+        client_id = register(client)
+        _, challenge = pkce()
+
+        # When the store reads it back after its idle time has passed
+        record = store.get("client", client_id)
+        record["expires_at"] = int(time.time()) - 1
+        store.put("client", client_id, record, record["expires_at"])
+
+        # Then it is treated as never having registered
+        response = start_sign_in(client, client_id, challenge)
+        assert response.status_code == 400
+
+
+def test_issuing_a_token_keeps_a_client_from_expiring(
+    client: TestClient, store: MemoryAuthStore
+) -> None:
+    # Given a client close to its idle expiry
+    client_id = register(client)
+    record = store.get("client", client_id)
+    record["expires_at"] = int(time.time()) + 60
+    store.put("client", client_id, record, record["expires_at"])
+
+    # When it signs in and is issued tokens
+    verifier, challenge = pkce()
+    code = query(sign_in(client, client_id, challenge).headers["location"])["code"]
+    assert exchange(client, client_id, code, verifier).status_code == 200
+
+    # Then its expiry has moved out to a full idle period again
+    assert store.get("client", client_id)["expires_at"] > time.time() + 30 * 24 * 3600
+
+
+# The consent cookie ----------------------------------------------------------
+
+
+def test_the_consent_cookie_cannot_travel_cross_site(client: TestClient) -> None:
+    # Given the consent page as a browser receives it
+    client_id = register(client)
+    _, challenge = pkce()
+    page = client.get(start_sign_in(client, client_id, challenge).headers["location"])
+
+    # Then the cookie is one a browser never sends with another site's form,
+    # never sends over http, never shows to script, and sends only to the form
+    cookie = page.headers["set-cookie"].lower()
+    assert "samesite=strict" in cookie
+    assert "secure" in cookie
+    assert "httponly" in cookie
+    assert "path=/oauth/consent" in cookie

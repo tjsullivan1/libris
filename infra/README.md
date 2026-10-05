@@ -110,7 +110,8 @@ LIBRIS_GOOGLE_CLIENT_SECRET=x LIBRIS_TOKEN_SIGNING_KEY=$(python -c "print('k'*48
 uv run --no-sync --extra hosted uvicorn --factory libris.hosted:create_app_from_env
 ```
 
-Without `LIBRIS_COSMOS_ENDPOINT`, clients and tokens are kept in memory and lost on restart.
+Without `LIBRIS_COSMOS_ENDPOINT`, clients, tokens and sign-ins are kept in memory and lost on
+restart.
 
 ## Troubleshooting
 
@@ -125,7 +126,8 @@ repeat the write afterwards; let Terraform create the resource. See
 
 ## Things that are deliberate
 
-- **One replica, at most.** Sign-ins in progress live in memory (ADR 0035).
+- **One replica.** Enough for one person. Sign-ins are kept in Cosmos, not in memory, so this is a
+  cost choice rather than a correctness one (ADR 0035).
 - **Scale to zero.** The first call after an idle period waits for a cold start. #179 measures it.
 - **Local Terraform state.** The state holds the signing key and the Google secret. #175 moves it
   to a storage account.

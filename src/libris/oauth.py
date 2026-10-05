@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import secrets
 import time
 from base64 import urlsafe_b64encode
@@ -51,6 +52,9 @@ ACCESS_TOKEN_SECONDS = 60 * 60
 REFRESH_TOKEN_SECONDS = 30 * 24 * 60 * 60
 CODE_SECONDS = 5 * 60
 SIGN_IN_SECONDS = 10 * 60
+# A client unused for this long is forgotten. Registration is open (ADR 0035),
+# so clients nobody uses must go away by themselves.
+CLIENT_IDLE_SECONDS = 60 * 24 * 60 * 60
 
 CONSENT_PATH = "/oauth/consent"
 GOOGLE_CALLBACK_PATH = "/oauth/google/callback"
@@ -183,64 +187,60 @@ def account_from_id_token(
     )
 
 
-@dataclass(frozen=True)
-class StoredRefreshToken:
-    """A refresh token as kept: everything except the token itself."""
-
-    client_id: str
-    subject: str
-    scopes: list[str]
-    expires_at: int
-
-
 class AuthStore(Protocol):
-    """What has to survive a restart: registered clients and refresh tokens.
+    """Everything the authorization server must not forget, as expiring records.
 
-    Refresh tokens are keyed by a hash, so a copy of the store holds nothing a
-    client could present.
+    Clients, sign-ins in progress, authorization codes and refresh tokens are
+    all kept here rather than in memory. The Container App scales to zero, and
+    a person can be on Google's page while it does: nothing reaches Libris then,
+    so a sign-in held in memory would be gone when Google sends them back.
+
+    Each record has a kind, a key and an expiry. Records are removed once they
+    expire, but readers check `expires_at` themselves because removal can lag.
+    Anything a client could present (a code, a refresh token) is keyed by its
+    hash, so a copy of the store holds nothing that works.
     """
 
-    def get_client(self, client_id: str) -> OAuthClientInformationFull | None: ...
-
-    def save_client(self, client: OAuthClientInformationFull) -> None: ...
-
-    def save_refresh_token(
-        self, token_hash: str, record: StoredRefreshToken
-    ) -> None: ...
-
-    def get_refresh_token(self, token_hash: str) -> StoredRefreshToken | None: ...
-
-    def take_refresh_token(self, token_hash: str) -> StoredRefreshToken | None:
-        """Remove and return a refresh token, so only one caller can ever use it."""
+    def put(self, kind: str, key: str, data: dict, expires_at: int) -> None:
+        """Create or replace a record."""
         ...
 
-    def delete_refresh_token(self, token_hash: str) -> None: ...
+    def get(self, kind: str, key: str) -> dict | None:
+        """Read a record, or None if there is none."""
+        ...
+
+    def take(self, kind: str, key: str) -> dict | None:
+        """Remove and return a record, so that only one caller ever gets it."""
+        ...
+
+    def delete(self, kind: str, key: str) -> None:
+        """Remove a record if it exists."""
+        ...
 
 
 class MemoryAuthStore:
-    """An `AuthStore` that forgets everything on restart: for tests and local runs."""
+    """An `AuthStore` that forgets everything on restart: for tests and local runs.
+
+    Records go through JSON on the way in and out, as they do in Cosmos, so a
+    value that only survives in memory fails here first.
+    """
 
     def __init__(self) -> None:
-        self.clients: dict[str, OAuthClientInformationFull] = {}
-        self.refresh_tokens: dict[str, StoredRefreshToken] = {}
+        self.records: dict[tuple[str, str], str] = {}
 
-    def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self.clients.get(client_id)
+    def put(self, kind: str, key: str, data: dict, expires_at: int) -> None:
+        self.records[(kind, key)] = json.dumps(data)
 
-    def save_client(self, client: OAuthClientInformationFull) -> None:
-        self.clients[client.client_id or ""] = client
+    def get(self, kind: str, key: str) -> dict | None:
+        raw = self.records.get((kind, key))
+        return None if raw is None else json.loads(raw)
 
-    def save_refresh_token(self, token_hash: str, record: StoredRefreshToken) -> None:
-        self.refresh_tokens[token_hash] = record
+    def take(self, kind: str, key: str) -> dict | None:
+        raw = self.records.pop((kind, key), None)
+        return None if raw is None else json.loads(raw)
 
-    def get_refresh_token(self, token_hash: str) -> StoredRefreshToken | None:
-        return self.refresh_tokens.get(token_hash)
-
-    def take_refresh_token(self, token_hash: str) -> StoredRefreshToken | None:
-        return self.refresh_tokens.pop(token_hash, None)
-
-    def delete_refresh_token(self, token_hash: str) -> None:
-        self.refresh_tokens.pop(token_hash, None)
+    def delete(self, kind: str, key: str) -> None:
+        self.records.pop((kind, key), None)
 
 
 @dataclass
@@ -252,8 +252,25 @@ class _SignIn:
     params: AuthorizationParams
     consent_token: str
     google_verifier: str
-    expires_at: float
+    expires_at: int
     sent_to_google: bool = False
+
+    def record(self) -> dict:
+        return {
+            "client_id": self.client_id,
+            "client_name": self.client_name,
+            "params": self.params.model_dump(mode="json"),
+            "consent_token": self.consent_token,
+            "google_verifier": self.google_verifier,
+            "expires_at": self.expires_at,
+            "sent_to_google": self.sent_to_google,
+        }
+
+    @classmethod
+    def of(cls, record: dict) -> "_SignIn":
+        return cls(
+            **{**record, "params": AuthorizationParams.model_validate(record["params"])}
+        )
 
 
 def _hash(token: str) -> str:
@@ -277,12 +294,18 @@ def _page(title: str, body: str, status_code: int = 200) -> HTMLResponse:
     return HTMLResponse(document, status_code=status_code, headers=_PAGE_HEADERS)
 
 
+_EXPIRED = (
+    "Sign-in expired",
+    "<p>Start again from the app you were connecting.</p>",
+    400,
+)
+
+
 class LibrisAuthProvider:
     """The decisions behind the SDK's OAuth endpoints (ADR 0035).
 
-    Codes and sign-ins in progress live in memory, which is correct only while
-    one replica serves every request. The Terraform pins the Container App to a
-    single replica for that reason.
+    Holds no state of its own: everything lives in the `AuthStore`, so any
+    instance can finish a sign-in another one started.
     """
 
     def __init__(
@@ -305,16 +328,31 @@ class LibrisAuthProvider:
         self._store = store
         self._identity = identity
         self._clock = clock
-        self._sign_ins: dict[str, _SignIn] = {}
-        self._codes: dict[str, AuthorizationCode] = {}
 
     # Clients ------------------------------------------------------------
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return await anyio.to_thread.run_sync(self._store.get_client, client_id)
+        record = await self._get("client", client_id)
+        return (
+            None
+            if record is None
+            else OAuthClientInformationFull.model_validate(record["client"])
+        )
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        await anyio.to_thread.run_sync(self._store.save_client, client_info)
+        await self._keep_client(client_info)
+
+    async def _keep_client(self, client: OAuthClientInformationFull) -> None:
+        # Registration is open, so a client nobody uses has to go away by
+        # itself. Each token issued to a client renews this, so one in use
+        # never expires.
+        expires_at = self._now() + CLIENT_IDLE_SECONDS
+        await self._put(
+            "client",
+            client.client_id or "",
+            {"client": client.model_dump(mode="json"), "expires_at": expires_at},
+            expires_at,
+        )
 
     # Authorization ------------------------------------------------------
 
@@ -328,28 +366,24 @@ class LibrisAuthProvider:
             raise AuthorizeError(
                 "invalid_target", "Libris issues tokens for its own MCP endpoint only"
             )
-        self._forget_expired()
         request_id = secrets.token_urlsafe(32)
-        self._sign_ins[request_id] = _SignIn(
+        sign_in = _SignIn(
             client_id=client.client_id or "",
             client_name=client.client_name or "An unnamed application",
             params=params,
             consent_token=secrets.token_urlsafe(32),
             google_verifier=secrets.token_urlsafe(48),
-            expires_at=self._clock() + SIGN_IN_SECONDS,
+            expires_at=self._now() + SIGN_IN_SECONDS,
         )
+        await self._put("sign_in", request_id, sign_in.record(), sign_in.expires_at)
         return f"{self.public_url}{CONSENT_PATH}?{urlencode({'request': request_id})}"
 
     async def consent_page(self, request: Request) -> Response:
         """Show who is asking and where they will be sent, before any sign-in."""
         request_id = request.query_params.get("request", "")
-        sign_in = self._live_sign_in(request_id)
+        sign_in = await self._sign_in(request_id)
         if sign_in is None or sign_in.sent_to_google:
-            return _page(
-                "Sign-in expired",
-                "<p>Start again from the app you were connecting.</p>",
-                400,
-            )
+            return _page(*_EXPIRED)
 
         host = urlsplit(str(sign_in.params.redirect_uri)).hostname or "an unknown host"
         body = (
@@ -377,14 +411,10 @@ class LibrisAuthProvider:
         """Act on the consent form, but only from the browser that was shown it."""
         form = await request.form()
         request_id = str(form.get("request", ""))
-        sign_in = self._live_sign_in(request_id)
+        sign_in = await self._sign_in(request_id)
         cookie = request.cookies.get(CONSENT_COOKIE, "")
         if sign_in is None or sign_in.sent_to_google:
-            return _page(
-                "Sign-in expired",
-                "<p>Start again from the app you were connecting.</p>",
-                400,
-            )
+            return _page(*_EXPIRED)
         if not secrets.compare_digest(cookie, sign_in.consent_token):
             return _page(
                 "Not allowed",
@@ -393,12 +423,13 @@ class LibrisAuthProvider:
             )
 
         if form.get("decision") != "allow":
-            del self._sign_ins[request_id]
+            await self._delete("sign_in", request_id)
             return RedirectResponse(
                 self._back_to_client(sign_in, error="access_denied"), status_code=303
             )
 
         sign_in.sent_to_google = True
+        await self._put("sign_in", request_id, sign_in.record(), sign_in.expires_at)
         return RedirectResponse(
             self._identity.authorization_url(
                 state=request_id,
@@ -410,16 +441,16 @@ class LibrisAuthProvider:
 
     async def google_callback(self, request: Request) -> Response:
         """Finish a sign-in: issue a code only for the one allowed account."""
-        request_id = request.query_params.get("state", "")
-        sign_in = self._live_sign_in(request_id)
-        if sign_in is None or not sign_in.sent_to_google:
-            return _page(
-                "Sign-in expired",
-                "<p>Start again from the app you were connecting.</p>",
-                400,
-            )
-        # One use only, whatever happens next.
-        del self._sign_ins[request_id]
+        # Taken, not read: one use only, whatever happens next, and a second
+        # callback racing this one finds nothing.
+        record = await self._take("sign_in", request.query_params.get("state", ""))
+        sign_in = None if record is None else _SignIn.of(record)
+        if (
+            sign_in is None
+            or not sign_in.sent_to_google
+            or sign_in.expires_at <= self._clock()
+        ):
+            return _page(*_EXPIRED)
 
         code = request.query_params.get("code")
         if not code:
@@ -446,16 +477,23 @@ class LibrisAuthProvider:
             )
 
         authorization_code = secrets.token_urlsafe(32)
-        self._codes[authorization_code] = AuthorizationCode(
-            code=authorization_code,
+        expires_at = self._now() + CODE_SECONDS
+        stored = AuthorizationCode(
+            code="",  # kept only as its hash, the key
             scopes=sign_in.params.scopes or [SCOPE],
-            expires_at=self._clock() + CODE_SECONDS,
+            expires_at=expires_at,
             client_id=sign_in.client_id,
             code_challenge=sign_in.params.code_challenge,
             redirect_uri=sign_in.params.redirect_uri,
             redirect_uri_provided_explicitly=sign_in.params.redirect_uri_provided_explicitly,
             resource=sign_in.params.resource,
             subject=account.sub,
+        )
+        await self._put(
+            "code",
+            _hash(authorization_code),
+            stored.model_dump(mode="json"),
+            expires_at,
         )
         return RedirectResponse(
             self._back_to_client(sign_in, code=authorization_code), status_code=303
@@ -466,44 +504,39 @@ class LibrisAuthProvider:
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> AuthorizationCode | None:
-        code = self._codes.get(authorization_code)
-        if (
-            code is None
-            or code.client_id != client.client_id
-            or code.expires_at <= self._clock()
-        ):
+        record = await self._get("code", _hash(authorization_code))
+        if record is None:
+            return None
+        code = AuthorizationCode.model_validate({**record, "code": authorization_code})
+        if code.client_id != client.client_id or code.expires_at <= self._clock():
             return None
         return code
 
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
-        if self._codes.pop(authorization_code.code, None) is None:
+        if await self._take("code", _hash(authorization_code.code)) is None:
             raise TokenError("invalid_grant", "The authorization code was already used")
         return await self._issue(
-            client.client_id or "",
-            authorization_code.subject or "",
-            authorization_code.scopes,
+            client, authorization_code.subject or "", authorization_code.scopes
         )
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> RefreshToken | None:
-        record = await anyio.to_thread.run_sync(
-            self._store.get_refresh_token, _hash(refresh_token)
-        )
+        record = await self._get("refresh", _hash(refresh_token))
         if (
             record is None
-            or record.client_id != client.client_id
-            or record.expires_at <= self._clock()
+            or record["client_id"] != client.client_id
+            or record["expires_at"] <= self._clock()
         ):
             return None
         return RefreshToken(
             token=refresh_token,
-            client_id=record.client_id,
-            scopes=record.scopes,
-            expires_at=record.expires_at,
-            subject=record.subject,
+            client_id=record["client_id"],
+            scopes=record["scopes"],
+            expires_at=record["expires_at"],
+            subject=record["subject"],
         )
 
     async def exchange_refresh_token(
@@ -514,18 +547,14 @@ class LibrisAuthProvider:
     ) -> OAuthToken:
         # Taking the token is the rotation: whoever takes it first gets the new
         # pair, and anyone presenting it afterwards gets nothing.
-        record = await anyio.to_thread.run_sync(
-            self._store.take_refresh_token, _hash(refresh_token.token)
-        )
+        record = await self._take("refresh", _hash(refresh_token.token))
         if record is None:
             raise TokenError("invalid_grant", "The refresh token was already used")
-        if not self._is_allowed(record.subject):
+        if not self._is_allowed(record["subject"]):
             raise TokenError(
                 "invalid_grant", "This account can no longer use this Library"
             )
-        return await self._issue(
-            client.client_id or "", record.subject, scopes or record.scopes
-        )
+        return await self._issue(client, record["subject"], scopes or record["scopes"])
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         try:
@@ -556,16 +585,15 @@ class LibrisAuthProvider:
         # Access tokens are stateless and expire within the hour; a refresh
         # token is what keeps a client signed in, so that is what goes.
         if isinstance(token, RefreshToken):
-            await anyio.to_thread.run_sync(
-                self._store.delete_refresh_token, _hash(token.token)
-            )
+            await self._delete("refresh", _hash(token.token))
 
     # Internals ----------------------------------------------------------
 
     async def _issue(
-        self, client_id: str, subject: str, scopes: list[str]
+        self, client: OAuthClientInformationFull, subject: str, scopes: list[str]
     ) -> OAuthToken:
-        now = int(self._clock())
+        now = self._now()
+        client_id = client.client_id or ""
         access_token = jwt.encode(
             {
                 "iss": self.public_url,
@@ -581,15 +609,19 @@ class LibrisAuthProvider:
             algorithm="HS256",
         )
         refresh_token = secrets.token_urlsafe(32)
-        record = StoredRefreshToken(
-            client_id=client_id,
-            subject=subject,
-            scopes=scopes,
-            expires_at=now + REFRESH_TOKEN_SECONDS,
+        expires_at = now + REFRESH_TOKEN_SECONDS
+        await self._put(
+            "refresh",
+            _hash(refresh_token),
+            {
+                "client_id": client_id,
+                "subject": subject,
+                "scopes": scopes,
+                "expires_at": expires_at,
+            },
+            expires_at,
         )
-        await anyio.to_thread.run_sync(
-            self._store.save_refresh_token, _hash(refresh_token), record
-        )
+        await self._keep_client(client)
         return OAuthToken(
             access_token=access_token,
             token_type="Bearer",  # noqa: S106 - the OAuth token type, not a secret
@@ -598,25 +630,40 @@ class LibrisAuthProvider:
             refresh_token=refresh_token,
         )
 
+    async def _sign_in(self, request_id: str) -> _SignIn | None:
+        record = await self._get("sign_in", request_id)
+        if record is None:
+            return None
+        sign_in = _SignIn.of(record)
+        return None if sign_in.expires_at <= self._clock() else sign_in
+
     def _is_allowed(self, sub: str) -> bool:
         return self._allowed_sub is not None and secrets.compare_digest(
             sub, self._allowed_sub
         )
-
-    def _live_sign_in(self, request_id: str) -> _SignIn | None:
-        sign_in = self._sign_ins.get(request_id)
-        if sign_in is None or sign_in.expires_at <= self._clock():
-            return None
-        return sign_in
 
     def _back_to_client(self, sign_in: _SignIn, **params: str) -> str:
         return construct_redirect_uri(
             str(sign_in.params.redirect_uri), state=sign_in.params.state, **params
         )
 
-    def _forget_expired(self) -> None:
-        now = self._clock()
-        for key in [k for k, v in self._sign_ins.items() if v.expires_at <= now]:
-            del self._sign_ins[key]
-        for key in [k for k, v in self._codes.items() if v.expires_at <= now]:
-            del self._codes[key]
+    def _now(self) -> int:
+        return int(self._clock())
+
+    # The store is synchronous (the Cosmos client is), so its calls run in a
+    # worker thread rather than blocking the event loop.
+
+    async def _put(self, kind: str, key: str, data: dict, expires_at: int) -> None:
+        await anyio.to_thread.run_sync(self._store.put, kind, key, data, expires_at)
+
+    async def _get(self, kind: str, key: str) -> dict | None:
+        record = await anyio.to_thread.run_sync(self._store.get, kind, key)
+        if record is None or record.get("expires_at", 0) <= self._clock():
+            return None
+        return record
+
+    async def _take(self, kind: str, key: str) -> dict | None:
+        return await anyio.to_thread.run_sync(self._store.take, kind, key)
+
+    async def _delete(self, kind: str, key: str) -> None:
+        await anyio.to_thread.run_sync(self._store.delete, kind, key)
