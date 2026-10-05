@@ -18,6 +18,8 @@ pytest.importorskip("mcp")
 
 import anyio  # noqa: E402
 from mcp import Client  # noqa: E402
+from mcp.server import MCPServer  # noqa: E402
+from mcp.types import CallToolResult  # noqa: E402
 
 from libris import config, shelf  # noqa: E402
 from libris.api import UNKNOWN_AUTHOR, BookCandidate, GoogleBooksClient  # noqa: E402
@@ -52,7 +54,9 @@ def shelved(tmp_path, monkeypatch):
     return tmp_path
 
 
-def call(tool: str, arguments: dict | None = None, server=None):
+def call(
+    tool: str, arguments: dict | None = None, server: MCPServer | None = None
+) -> CallToolResult:
     """Run one tool through a real client, and hand back the result."""
 
     async def _run():
@@ -420,7 +424,7 @@ def test_an_add_with_no_author_writes_and_says_it_could_not_check(shelved, monke
 # --- the same tools, somewhere without a Shelf (ADR 0020) ---
 
 
-def remote(replica: ReplicaStore):
+def remote(replica: ReplicaStore) -> MCPServer:
     """The server as the Container App would build it: a replica, no Shelf."""
     return create_server(store=lambda: replica, shelf=None)
 
@@ -430,7 +434,9 @@ def remote(replica: ReplicaStore):
     [{"query": "sanderson"}, {"query": "dune"}, {"status": "Read"}, {}],
     ids=["by author", "by title", "by status alone", "everything"],
 )
-def test_a_search_answers_the_same_from_the_replica(shelved, arguments):
+def test_a_search_answers_the_same_from_the_replica(
+    shelved: Path, arguments: dict
+) -> None:
     # Given a replica built from the Shelf, as sync would build it
     replica = ReplicaStore.from_shelf(shelved)
 
@@ -443,7 +449,7 @@ def test_a_search_answers_the_same_from_the_replica(shelved, arguments):
     assert here["total"] > 0
 
 
-def test_a_remote_search_reads_the_replica_not_the_shelf(shelved):
+def test_a_remote_search_reads_the_replica_not_the_shelf(shelved: Path) -> None:
     # Given a replica taken before a book reached the Shelf
     replica = ReplicaStore.from_shelf(shelved)
     create_book_note(
@@ -461,9 +467,11 @@ def test_a_remote_search_reads_the_replica_not_the_shelf(shelved):
     assert there["total"] == 0
 
 
-def test_without_a_shelf_an_add_writes_nothing_and_says_why(shelved, monkeypatch):
+def test_without_a_shelf_an_add_writes_nothing_and_says_why(
+    shelved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Given a server with no Shelf, and a Google Books that must not be asked
-    def no_google():
+    def no_google() -> None:
         raise AssertionError("Google Books was asked for a write that cannot happen")
 
     monkeypatch.setattr("libris.mcp_server.GoogleBooksClient", no_google)
@@ -482,7 +490,7 @@ def test_without_a_shelf_an_add_writes_nothing_and_says_why(shelved, monkeypatch
     assert sorted(Path(shelved).glob("*.md")) == before
 
 
-def test_without_a_shelf_an_update_writes_nothing_and_says_why(shelved):
+def test_without_a_shelf_an_update_writes_nothing_and_says_why(shelved: Path) -> None:
     # Given a book the replica knows about
     replica = ReplicaStore.from_shelf(shelved)
     dune = payload(call("search_library", {"query": "dune"}))["books"][0]
@@ -502,9 +510,11 @@ def test_without_a_shelf_an_update_writes_nothing_and_says_why(shelved):
     assert note.read_bytes() == before
 
 
-def test_a_remote_server_offers_the_same_tools_with_the_same_schemas(shelved):
+def test_a_remote_server_offers_the_same_tools_with_the_same_schemas(
+    shelved: Path,
+) -> None:
     # Given the server built for each location
-    async def tools(server):
+    async def tools(server: MCPServer) -> dict[str, dict]:
         async with Client(server) as client:
             return {t.name: t.input_schema for t in (await client.list_tools()).tools}
 
