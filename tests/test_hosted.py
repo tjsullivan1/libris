@@ -1312,3 +1312,41 @@ def test_the_sign_in_link_asks_google_only_for_identity_with_pkce() -> None:
         "code_challenge_method": "S256",
         "prompt": "select_account",
     }
+
+
+def test_a_burst_of_registrations_cannot_slip_past_the_limit(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a limit of two registrations an hour
+    app = create_app(settings(), store=store, identity=google, registrations_per_hour=2)
+
+    async def burst() -> list[int]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url=PUBLIC_URL) as http:
+
+            async def one() -> int:
+                response = await http.post(
+                    "/register",
+                    json={
+                        "redirect_uris": [CLAUDE_CALLBACK],
+                        "token_endpoint_auth_method": "none",
+                    },
+                )
+                return response.status_code
+
+            statuses: list[int] = []
+
+            async def record() -> None:
+                statuses.append(await one())
+
+            async with anyio.create_task_group() as group:
+                for _ in range(10):
+                    group.start_soon(record)
+            return statuses
+
+    # When ten arrive at once, each waiting on the store while the others run
+    statuses = anyio.run(burst)
+
+    # Then exactly two get through, and only two clients were written
+    assert sorted(statuses) == [201, 201] + [429] * 8
+    assert len([key for kind, key in store.records if kind == "client"]) == 2

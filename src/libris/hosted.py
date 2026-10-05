@@ -91,12 +91,24 @@ class RegistrationLimit:
             await response(scope, receive, send)
             return
 
-        async def counting_send(message: dict) -> None:
-            if message["type"] == "http.response.start" and message["status"] == 201:
-                self._recent.append(self._clock())
+        # Reserve the slot now, with no await between the check above and this,
+        # so concurrent registrations each see the others. Counting only once
+        # the 201 went out let a burst all pass the check before any counted.
+        # A registration that fails gives its slot back.
+        self._recent.append(now)
+        succeeded = False
+
+        async def watching_send(message: dict) -> None:
+            nonlocal succeeded
+            if message["type"] == "http.response.start":
+                succeeded = message["status"] == 201
             await send(message)
 
-        await self._app(scope, receive, counting_send)
+        try:
+            await self._app(scope, receive, watching_send)
+        finally:
+            if not succeeded:
+                self._recent.remove(now)
 
 
 class HostedConfigError(Exception):

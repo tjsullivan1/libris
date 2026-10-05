@@ -69,12 +69,16 @@ and that write never creates one. Writing the grant outright would have brought 
 revocation deleted mid-refresh, and with it every token the revocation was meant to end.
 
 **All of it lives in Cosmos** (ADR 0006 brings Cosmos to the project anyway): grants, registered
-clients, refresh tokens, authorization codes and sign-ins in progress. A first draft kept codes and sign-ins in memory, and review caught why
-that fails. The app scales to zero, and while a person is on Google's page no request reaches Libris,
-so the sign-in it would come back to was gone. Holding no state in the process also means any
-replica can finish a sign-in another one started. Codes and refresh tokens are kept as hashes, and
-codes, refresh tokens and sign-ins are each taken once, by a delete conditioned on the version read.
-Refresh tokens rotate on every use, as OAuth 2.1 requires for public clients.
+clients, refresh tokens, authorization codes and sign-ins in progress. A first draft kept codes and
+sign-ins in memory, and review caught why that fails. The app scales to zero, and while a person is
+on Google's page no request reaches Libris, so the sign-in it would come back to was gone. Holding no
+state in the process also means any replica can finish a sign-in another one started. Codes and
+refresh tokens are kept as hashes.
+
+Single use is enforced two ways. A code or a sign-in is taken: deleted, conditioned on the version
+just read, so a second taker gets nothing. A refresh token is not deleted. It is marked spent by a
+write conditioned the same way, and kept as a marker until it expires, so a replay is recognised (see
+above). Refresh tokens rotate on every use, as OAuth 2.1 requires for public clients.
 
 **The open endpoints have limits.** Two endpoints write a document for any caller: `/register`
 writes a client, and `/authorize` writes a sign-in for any registered client. Every other write

@@ -1,11 +1,14 @@
 """The Cosmos store's own logic, against a container that behaves like Cosmos.
 
 The authorization tests run on `MemoryAuthStore`, so nothing there exercises
-how `CosmosAuthStore` reads Cosmos's answers. The one that matters most is the
-lost race in `take`: a refresh token, code or sign-in is single use only
-because the etag-conditioned delete refuses a second taker, and Cosmos reports
-that refusal as its own exception, not the azure-core one a reader would guess.
-The first version caught the wrong one, so these tests raise the real types.
+how `CosmosAuthStore` reads Cosmos's answers. What matters most is the two
+operations concurrent requests decide things by. `take` makes a code or a
+sign-in single use: an etag-conditioned delete refuses a second taker.
+`transition` marks a refresh token spent, keeping it as a marker, and extends
+a grant without ever recreating one: an etag-conditioned replace refuses a
+writer that lost the race. Cosmos reports both refusals as its own exception,
+not the azure-core one a reader would guess. The first version caught the
+wrong one, so these tests raise the real types.
 """
 
 import time
