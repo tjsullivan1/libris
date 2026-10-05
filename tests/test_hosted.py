@@ -160,10 +160,22 @@ def consent(
     request_id = query(authorize.headers["location"])["request"]
     return client.post(
         "/oauth/consent",
-        headers=SAME_ORIGIN,
+        headers={"Origin": origin_a_browser_sends(page)},
         data={"request": request_id, "decision": decision},
         follow_redirects=False,
     )
+
+
+def origin_a_browser_sends(page: httpx.Response) -> str:
+    """The Origin a browser puts on a form POST from this page back to itself.
+
+    Fetch's "append a request Origin header" decides it from the page's
+    Referrer-Policy: `no-referrer` sends `null` even to the page's own origin.
+    The consent tests once sent the right Origin by hand, so a page header that
+    made every real browser send `null` passed them all and locked the owner out.
+    """
+    policy = page.headers.get("referrer-policy", "strict-origin-when-cross-origin")
+    return "null" if policy.strip().lower() == "no-referrer" else PUBLIC_URL
 
 
 def sign_in(client: TestClient, client_id: str, challenge: str) -> httpx.Response:
