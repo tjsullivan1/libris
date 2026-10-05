@@ -63,9 +63,12 @@ replica can finish a sign-in another one started. Codes and refresh tokens are k
 codes, refresh tokens and sign-ins are each taken once, by a delete conditioned on the version read.
 Refresh tokens rotate on every use, as OAuth 2.1 requires for public clients.
 
-**Open registration has limits.** Anyone can call `/register`, and each registration writes a
-document. A client that goes 60 days without being issued a token is forgotten, and registrations
-beyond 30 an hour are refused with a 429 before they reach Cosmos.
+**The open endpoints have limits.** Two endpoints write a document for any caller: `/register`
+writes a client, and `/authorize` writes a sign-in for any registered client. Every other write
+either changes a record that already exists or needs a code only the allowed account can get. Each
+of the two is capped per hour (30 registrations, 60 sign-ins), and a call beyond the cap is refused
+with a 429 before it reaches Cosmos. A client that goes 60 days without being issued a token is
+forgotten. Sign-ins expire after ten minutes anyway.
 
 **Entra stays, for Azure only.** Terraform and `libris sync` reach Azure as the person's Azure account,
 and the Container App reaches Cosmos and Key Vault as its managed identity (ADR 0006). None of those

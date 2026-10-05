@@ -987,3 +987,36 @@ def test_a_replay_ends_only_its_own_sign_in(client: TestClient) -> None:
 
     # Then the other sign-in is untouched
     assert call_ping(client, second["access_token"]).status_code == 200
+
+
+def test_sign_ins_beyond_the_hourly_limit_are_refused(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a limit of two sign-ins an hour, and a registered client
+    now = [1000.0]
+    app = create_app(
+        settings(),
+        store=store,
+        identity=google,
+        sign_ins_per_hour=2,
+        clock=lambda: now[0],
+    )
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        client_id = register(client)
+        _, challenge = pkce()
+        start_sign_in(client, client_id, challenge)
+        start_sign_in(client, client_id, challenge)
+        stored = len(store.records)
+
+        # When a third sign-in starts within the hour
+        refused = start_sign_in(client, client_id, challenge)
+
+        # Then it is refused before anything is written, and registering is
+        # still allowed, because each endpoint counts on its own
+        assert refused.status_code == 429
+        assert len(store.records) == stored
+        register(client)
+
+        # And once the hour has passed, sign-ins work again
+        now[0] += 3601
+        assert start_sign_in(client, client_id, challenge).status_code == 302

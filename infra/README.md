@@ -106,10 +106,16 @@ A new tag every time. Reusing a tag leaves the running revision on the old image
 ## Running it locally
 
 ```bash
+uv sync --all-extras    # once: the hosted extra brings uvicorn and the Azure SDKs
 LIBRIS_PUBLIC_URL=http://localhost:8000 LIBRIS_GOOGLE_CLIENT_ID=x \
 LIBRIS_GOOGLE_CLIENT_SECRET=x LIBRIS_TOKEN_SIGNING_KEY=$(python -c "print('k'*48)") \
-uv run --no-sync --extra hosted uvicorn --factory libris.hosted:create_app_from_env
+uv run --no-sync uvicorn --factory libris.hosted:create_app_from_env
 ```
+
+`--all-extras` rather than `--extra hosted`, because `uv sync` removes any extra it isn't asked
+for, and the `server` extra would go. `--no-sync` on the run is the AGENTS.md habit: without it, uv
+reinstalls the project, which fails while a libris MCP server holds `libris.exe` open. That also
+applies to the `uv sync`. If it fails that way, stop the MCP server and run it again.
 
 Without `LIBRIS_COSMOS_ENDPOINT`, clients, tokens and sign-ins are kept in memory and lost on
 restart.

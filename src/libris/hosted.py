@@ -43,50 +43,52 @@ from .oauth import (
     MemoryAuthStore,
 )
 
-# Registration is open by design (ADR 0035), and each one writes a document.
-# Claude registers once per connection; this is far above any real use and far
-# below what would cost anything.
+# The two public endpoints that create a document for any caller (ADR 0035):
+# /register writes a client, and /authorize writes a sign-in for any registered
+# one. Everything else either changes a record that already exists or needs a
+# code only the allowed account can get. Claude registers and authorizes once
+# per connection, so these are far above real use and far below any cost.
 REGISTRATIONS_PER_HOUR = 30
+SIGN_INS_PER_HOUR = 60
 
 
-class RegistrationLimit:
-    """Refuse registrations beyond a number per hour, before they reach the store.
+class WriteLimit:
+    """Refuse calls to the public writing endpoints beyond a number per hour.
 
-    In memory, so a restart forgets the count. That is fine for a limit whose
-    job is to stop a flood, not to account for every request. Answers 429
-    rather than letting the SDK report a refusal as invalid client metadata.
+    Each limited path counts separately, before the request reaches the SDK or
+    the store. In memory, so a restart forgets the counts; that is fine for a
+    limit whose job is to stop a flood, not to account for every request.
+    Answers 429 rather than letting the SDK report a refusal as a bad request.
     """
 
     def __init__(
-        self, app: ASGIApp, *, per_hour: int, clock: Callable[[], float]
+        self, app: ASGIApp, *, per_hour: dict[str, int], clock: Callable[[], float]
     ) -> None:
         self._app = app
         self._per_hour = per_hour
         self._clock = clock
-        self._recent: deque[float] = deque()
+        self._recent: dict[str, deque[float]] = {path: deque() for path in per_hour}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (
-            scope["type"] == "http"
-            and scope["method"] == "POST"
-            and scope["path"] == "/register"
-        ):
+        path = scope.get("path", "")
+        if scope["type"] == "http" and path in self._per_hour:
+            recent = self._recent[path]
             now = self._clock()
-            while self._recent and self._recent[0] <= now - 3600:
-                self._recent.popleft()
-            if len(self._recent) >= self._per_hour:
-                retry_after = int(self._recent[0] + 3600 - now) + 1
+            while recent and recent[0] <= now - 3600:
+                recent.popleft()
+            if len(recent) >= self._per_hour[path]:
+                retry_after = int(recent[0] + 3600 - now) + 1
                 response = JSONResponse(
                     {
                         "error": "temporarily_unavailable",
-                        "error_description": "Too many registrations. Try again later.",
+                        "error_description": "Too many requests. Try again later.",
                     },
                     status_code=429,
                     headers={"Retry-After": str(retry_after)},
                 )
                 await response(scope, receive, send)
                 return
-            self._recent.append(now)
+            recent.append(now)
         await self._app(scope, receive, send)
 
 
@@ -142,6 +144,7 @@ def create_app(
     store: AuthStore | None = None,
     identity: IdentityProvider | None = None,
     registrations_per_hour: int = REGISTRATIONS_PER_HOUR,
+    sign_ins_per_hour: int = SIGN_INS_PER_HOUR,
     clock: Callable[[], float] = time.monotonic,
 ) -> Starlette:
     """Build the hosted ASGI app.
@@ -152,7 +155,8 @@ def create_app(
             Cosmos when an endpoint is configured, and to memory otherwise.
         identity: Who proves the person's identity. Defaults to Google.
         registrations_per_hour: How many clients may register in any hour.
-        clock: The time, for the registration limit.
+        sign_ins_per_hour: How many sign-ins may start in any hour.
+        clock: The time, for the write limits.
     """
     if store is None:
         if settings.cosmos_endpoint:
@@ -224,7 +228,11 @@ def create_app(
             enable_dns_rebinding_protection=False
         ),
     )
-    app.add_middleware(RegistrationLimit, per_hour=registrations_per_hour, clock=clock)
+    app.add_middleware(
+        WriteLimit,
+        per_hour={"/register": registrations_per_hour, "/authorize": sign_ins_per_hour},
+        clock=clock,
+    )
     return app
 
 
