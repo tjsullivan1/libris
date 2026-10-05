@@ -10,6 +10,7 @@ Note's body holds a reader's own writing and stays in Obsidian (ADR 0023), so
 there is no tool that reads one and none that writes one.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -28,7 +29,7 @@ from .note_format import (
     InvalidFieldValue,
     read_formats,
 )
-from .store import ShelfStore
+from .store import LibraryStore, ShelfStore
 
 # The vocabularies as the model sees them. Generated from note_format rather
 # than restated, so the Library still defines its own values (ADR 0022): a tool
@@ -210,13 +211,49 @@ class WriteAnswer(BaseModel):
     )
 
 
-def create_server(name: str = "libris") -> "MCPServer":
+REMOTE_WRITES_UNAVAILABLE = (
+    "This Library is a copy, kept up to date from the computer that holds the "
+    "Shelf, and changing it from here is not built yet. Nothing was written. "
+    "Make the change on that computer instead."
+)
+
+
+def _shelf_store() -> LibraryStore:
+    return ShelfStore(_shelf())
+
+
+def create_server(
+    name: str = "libris",
+    *,
+    store: Callable[[], LibraryStore] = _shelf_store,
+    shelf: Callable[[], Path] | None = _shelf,
+) -> "MCPServer":
     """Build the MCP server and its tools.
 
     A factory rather than a module-level server, for the reason `create_app` is
     one: configuration is read at start rather than at import, and a test can
     build a server per configuration.
+
+    The tools are the same wherever they run (ADR 0020). What changes is where
+    they read and whether they can write, so the location is passed in rather
+    than the tools being written twice.
+
+    Args:
+        name: The server's name as clients see it.
+        store: Called per read, returning the store that answers it: the Shelf
+            on this computer, the replica on the Container App (ADR 0032).
+            Called each time rather than once, so an unconfigured Shelf is
+            reported by the tool that needed it, not at startup.
+        shelf: Called per write, returning the Shelf to write to. None where
+            there is no Shelf, and then the writing tools say so and write
+            nothing.
     """
+
+    def writable_shelf() -> Path:
+        if shelf is None:
+            raise ToolError(REMOTE_WRITES_UNAVAILABLE)
+        return shelf()
+
     mcp = MCPServer(
         name=name,
         version=installed_version(),
@@ -249,7 +286,7 @@ def create_server(name: str = "libris") -> "MCPServer":
         """
         try:
             found = service.search_library(
-                ShelfStore(_shelf()), query=query, status=status, limit=limit
+                store(), query=query, status=status, limit=limit
             )
         except InvalidFieldValue as exc:
             raise ToolError(str(exc)) from None
@@ -314,7 +351,7 @@ def create_server(name: str = "libris") -> "MCPServer":
         book, because a duplicate found afterwards is a cleanup task rather than
         a question. Show them to the person, then call again with confirm.
         """
-        shelf = _shelf()
+        vault = writable_shelf()
         try:
             candidate = GoogleBooksClient().get_volume(google_books_id)
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
@@ -345,7 +382,7 @@ def create_server(name: str = "libris") -> "MCPServer":
 
         try:
             result = service.add_book(
-                shelf,
+                vault,
                 candidate,
                 overrides=overrides or None,
                 stop_on_near_match=not confirm,
@@ -357,7 +394,7 @@ def create_server(name: str = "libris") -> "MCPServer":
 
         return WriteAnswer(
             outcome=result.outcome.value,
-            book=_written(shelf, result),
+            book=_written(vault, result),
             near_matches=[Book.of(n) for n in result.near_matches],
             near_match_check=(
                 result.near_match_check.value if result.near_match_check else None
@@ -399,7 +436,7 @@ def create_server(name: str = "libris") -> "MCPServer":
             raise ToolError("No fields were given, so there is nothing to change.")
 
         try:
-            result = service.update_book(_shelf(), libris_id, fields)
+            result = service.update_book(writable_shelf(), libris_id, fields)
         except (service.BookNotFound, service.ShelfUnreadable) as exc:
             raise ToolError(str(exc)) from None
         except ValueError as exc:
