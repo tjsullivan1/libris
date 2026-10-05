@@ -212,8 +212,8 @@ class WriteAnswer(BaseModel):
 
 
 REMOTE_WRITES_UNAVAILABLE = (
-    "This Library is a copy, kept up to date from the computer that holds the "
-    "Shelf, and changing it from here is not built yet. Nothing was written. "
+    "This Library is a read-only copy, kept up to date from the computer that "
+    "holds the Shelf. Changes can't be made from here yet. Nothing was written. "
     "Make the change on that computer instead."
 )
 
@@ -225,8 +225,8 @@ def _shelf_store() -> LibraryStore:
 def create_server(
     name: str = "libris",
     *,
-    store: Callable[[], LibraryStore] = _shelf_store,
-    shelf: Callable[[], Path] | None = _shelf,
+    store_provider: Callable[[], LibraryStore] = _shelf_store,
+    shelf_provider: Callable[[], Path] | None = _shelf,
 ) -> "MCPServer":
     """Build the MCP server and its tools.
 
@@ -240,19 +240,19 @@ def create_server(
 
     Args:
         name: The server's name as clients see it.
-        store: Called per read, returning the store that answers it: the Shelf
+        store_provider: Called per read, returning the store that answers it: the Shelf
             on this computer, the replica on the Container App (ADR 0032).
             Called each time rather than once, so an unconfigured Shelf is
             reported by the tool that needed it, not at startup.
-        shelf: Called per write, returning the Shelf to write to. None where
+        shelf_provider: Called per write, returning the Shelf to write to. None where
             there is no Shelf, and then the writing tools say so and write
             nothing.
     """
 
     def writable_shelf() -> Path:
-        if shelf is None:
+        if shelf_provider is None:
             raise ToolError(REMOTE_WRITES_UNAVAILABLE)
-        return shelf()
+        return shelf_provider()
 
     mcp = MCPServer(
         name=name,
@@ -286,7 +286,7 @@ def create_server(
         """
         try:
             found = service.search_library(
-                store(), query=query, status=status, limit=limit
+                store_provider(), query=query, status=status, limit=limit
             )
         except InvalidFieldValue as exc:
             raise ToolError(str(exc)) from None

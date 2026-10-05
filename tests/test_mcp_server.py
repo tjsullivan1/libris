@@ -426,7 +426,7 @@ def test_an_add_with_no_author_writes_and_says_it_could_not_check(shelved, monke
 
 def remote(replica: ReplicaStore) -> MCPServer:
     """The server as the Container App would build it: a replica, no Shelf."""
-    return create_server(store=lambda: replica, shelf=None)
+    return create_server(store_provider=lambda: replica, shelf_provider=None)
 
 
 @pytest.mark.parametrize(
