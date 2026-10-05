@@ -61,3 +61,21 @@ are the sign-in a client presents.
   refusal page shows the `sub` it saw, which is also how the first deployment finds the right value.
 - Should multi-user access ever happen (ADR 0004), the allowlist and the consent page are where it
   starts, not the token format.
+
+## What the spike showed (#171, 2026-10-02)
+
+Claude connected and called a tool on the first deployment, on the Container App's own hostname. It
+registered through DCR as a confidential `web` client with `claude.ai`'s callback, went through the
+consent page and Google, exchanged its code, and called `ping`. No custom domain and no hand-entered
+client were needed, which is the case this ADR was written for.
+
+Claude's dialog offers three ways to identify itself. Only "Register automatically" works here:
+Libris advertises DCR but not a Client ID Metadata Document.
+
+The first attempt failed silently. Claude registered and then never sent the browser to `/authorize`.
+That registration was the request that woke the app from zero, and Claude allows 10 seconds for it,
+so a cold start is the likely cause. It is not proven, because the attempt that succeeded reached an
+instance that was already running. #179 owns the measurement and the `min_replicas` decision.
+
+Gemini was not tested. The design does not depend on it, but whether Gemini's custom apps accept this
+server is still open.
