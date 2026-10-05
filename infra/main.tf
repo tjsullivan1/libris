@@ -288,4 +288,16 @@ resource "azurerm_container_app" "mcp" {
   }
 
   depends_on = [time_sleep.secrets_role_propagates]
+
+  # The app can't sign anyone in without Google's credentials. An apply from a
+  # shell that lacked TF_VAR_google_client_id once deployed the "unset"
+  # placeholders, and every sign-in then died at Google with invalid_client.
+  # Checked only when this resource is planned, so the first deployment's
+  # targeted apply, before the Google client exists, still works.
+  lifecycle {
+    precondition {
+      condition     = var.google_client_id != "" && var.google_client_secret != ""
+      error_message = "Set google_client_id and google_client_secret (in terraform.tfvars, or TF_VAR_google_client_id and TF_VAR_google_client_secret) before deploying the app. Without them nobody can sign in."
+    }
+  }
 }
