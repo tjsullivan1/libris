@@ -1395,3 +1395,114 @@ def test_consent_is_refused_unless_it_comes_from_libris_itself(
     assert response.status_code == 403
     assert "location" not in response.headers
     assert google.verifiers == []
+
+
+# Client secrets at rest -------------------------------------------------------
+
+
+def test_a_client_secret_is_never_stored_readable(
+    client: TestClient, store: MemoryAuthStore
+) -> None:
+    # Given a client registered with a secret, as Claude registers
+    client_id, secret = register_confidential(client)
+
+    # Then the store holds no copy of it, only a sealed one
+    assert secret not in str(store.records)
+    assert "sealed_secret" in store.get("client", client_id)
+
+    # And the secret still authenticates the client
+    verifier, challenge = pkce()
+    code = query(sign_in(client, client_id, challenge).headers["location"])["code"]
+    assert exchange(client, client_id, code, verifier, secret).status_code == 200
+
+
+def test_a_sealed_secret_opens_only_under_the_key_that_sealed_it(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given a confidential client registered under one signing key
+    with TestClient(
+        create_app(settings(), store=store, identity=google), base_url=PUBLIC_URL
+    ) as before:
+        client_id, secret = register_confidential(before)
+
+    # When the server restarts with a different key
+    other = settings(signing_key="z" * 48)
+    with TestClient(
+        create_app(other, store=store, identity=google), base_url=PUBLIC_URL
+    ) as after:
+        _, challenge = pkce()
+        # Then the client is unknown, and has to register again
+        assert start_sign_in(after, client_id, challenge).status_code == 400
+
+
+def test_a_sealed_secret_moved_to_another_client_does_not_open(
+    client: TestClient, store: MemoryAuthStore
+) -> None:
+    # Given two confidential clients, and one's sealed secret copied onto the
+    # other's record, as someone with write access to the store might try
+    first_id, _ = register_confidential(client)
+    second_id, _ = register_confidential(client)
+    first = store.get("client", first_id)
+    second = store.get("client", second_id)
+    second["sealed_secret"] = first["sealed_secret"]
+    store.put("client", second_id, second, second["expires_at"])
+
+    # Then the moved secret does not open, and that client is unknown
+    _, challenge = pkce()
+    assert start_sign_in(client, second_id, challenge).status_code == 400
+
+
+# Google failing mid-sign-in ---------------------------------------------------
+
+
+def unreachable_google() -> GoogleIdentity:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to Google", request=request)
+
+    return GoogleIdentity(
+        "google-client",
+        "google-secret",  # noqa: S106 - a test value
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_an_unreachable_google_fails_the_exchange_cleanly() -> None:
+    with pytest.raises(SignInFailed):
+        anyio.run(
+            lambda: unreachable_google().account(
+                code="c", code_verifier="v", redirect_uri=GOOGLE_REDIRECT
+            )
+        )
+
+
+def test_an_unreadable_answer_from_google_fails_the_exchange_cleanly() -> None:
+    identity = google_answering(httpx.Response(200, text="<html>proxy</html>"), [])
+    with pytest.raises(SignInFailed):
+        anyio.run(
+            lambda: identity.account(
+                code="c", code_verifier="v", redirect_uri=GOOGLE_REDIRECT
+            )
+        )
+
+
+def test_an_unreachable_google_ends_the_sign_in_with_a_page(
+    store: MemoryAuthStore,
+) -> None:
+    # Given the real Google identity, with Google unreachable
+    app = create_app(settings(), store=store, identity=unreachable_google())
+    with TestClient(app, base_url=PUBLIC_URL, raise_server_exceptions=False) as client:
+        client_id = register(client)
+        _, challenge = pkce()
+        to_google = consent(client, client_id, challenge)
+        state = query(to_google.headers["location"])["state"]
+
+        # When Google sends the person back and Libris cannot reach it
+        back = client.get(
+            "/oauth/google/callback",
+            params={"state": state, "code": "google-code"},
+            follow_redirects=False,
+        )
+
+    # Then they see a sign-in failure, not a server error
+    assert back.status_code == 502
+    assert "Sign-in failed" in back.text

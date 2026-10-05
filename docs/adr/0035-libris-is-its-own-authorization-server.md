@@ -83,7 +83,12 @@ clients, refresh tokens, authorization codes and sign-ins in progress. A first d
 sign-ins in memory, and review caught why that fails. The app scales to zero, and while a person is
 on Google's page no request reaches Libris, so the sign-in it would come back to was gone. Holding no
 state in the process also means any replica can finish a sign-in another one started. Codes and
-refresh tokens are kept as hashes.
+refresh tokens are kept as hashes. A client secret cannot be: the SDK authenticates a client by
+comparing its secret in plain text. So it is sealed with AES-GCM, under a key derived from the token
+signing key, which lives in Key Vault and not in Cosmos, with the client id bound in. A copy of the
+store alone then holds no live credential, and a sealed secret moved onto another client's record will
+not open. Rotating the signing key leaves sealed secrets unopenable, so clients register again. A
+rotation does that to every token anyway.
 
 Single use is enforced two ways. A code or a sign-in is taken: deleted, conditioned on the version
 just read, so a second taker gets nothing. A refresh token is not deleted. It is marked spent by a

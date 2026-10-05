@@ -26,7 +26,7 @@ import json
 import secrets
 import threading
 import time
-from base64 import urlsafe_b64encode
+from base64 import b64decode, b64encode, urlsafe_b64encode
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -36,6 +36,8 @@ from urllib.parse import urlencode, urlsplit
 import anyio
 import httpx
 import jwt
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
@@ -159,21 +161,33 @@ class GoogleIdentity:
         Libris's client secret, so its signature is not checked again: OIDC
         Core 3.1.3.7 allows exactly that. Issuer, audience and expiry are.
         """
-        async with httpx.AsyncClient(timeout=10, transport=self.transport) as client:
-            response = await client.post(
-                GOOGLE_TOKEN_URL,
-                data={
-                    "code": code,
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "redirect_uri": redirect_uri,
-                    "grant_type": "authorization_code",
-                    "code_verifier": code_verifier,
-                },
-            )
+        # Every way the exchange can fail becomes SignInFailed, which the
+        # callback turns into a page. Anything else escaped as a 500 after the
+        # sign-in had already been used up: a DNS failure, a timeout, or a
+        # proxy answering 200 with HTML.
+        try:
+            async with httpx.AsyncClient(
+                timeout=10, transport=self.transport
+            ) as client:
+                response = await client.post(
+                    GOOGLE_TOKEN_URL,
+                    data={
+                        "code": code,
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret,
+                        "redirect_uri": redirect_uri,
+                        "grant_type": "authorization_code",
+                        "code_verifier": code_verifier,
+                    },
+                )
+        except httpx.HTTPError as exc:
+            raise SignInFailed("Google could not be reached. Try again.") from exc
         if response.status_code != 200:
             raise SignInFailed(f"Google refused the code ({response.status_code})")
-        id_token = response.json().get("id_token")
+        try:
+            id_token = response.json().get("id_token")
+        except (ValueError, AttributeError) as exc:
+            raise SignInFailed("Google's answer could not be read") from exc
         if not id_token:
             raise SignInFailed("Google answered without an ID token")
         return account_from_id_token(id_token, client_id=self.client_id)
@@ -410,6 +424,9 @@ class LibrisAuthProvider:
         parts = urlsplit(self.public_url)
         self._origin = f"{parts.scheme}://{parts.netloc}"
         self._signing_key = signing_key
+        self._secret_box = AESGCM(
+            hashlib.sha256(b"libris client secrets:" + signing_key.encode()).digest()
+        )
         self._allowed_sub = allowed_sub or None
         self._store = store
         self._identity = identity
@@ -422,11 +439,24 @@ class LibrisAuthProvider:
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         record = await self._get("client", client_id)
-        return (
-            None
-            if record is None
-            else OAuthClientInformationFull.model_validate(record["client"])
-        )
+        if record is None:
+            return None
+        client = OAuthClientInformationFull.model_validate(record["client"])
+        sealed = record.get("sealed_secret")
+        if sealed:
+            try:
+                secret = self._secret_box.decrypt(
+                    b64decode(sealed["nonce"]),
+                    b64decode(sealed["ciphertext"]),
+                    client_id.encode(),
+                )
+            except InvalidTag:
+                # Sealed under another signing key, or tampered with. Either
+                # way it cannot authenticate, so the client has to register
+                # again, as it would after any other loss of its record.
+                return None
+            client = client.model_copy(update={"client_secret": secret.decode()})
+        return client
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         await self._keep_client(client_info)
@@ -436,12 +466,30 @@ class LibrisAuthProvider:
         # itself. Each token issued to a client renews this, so one in use
         # never expires.
         expires_at = self._now() + CLIENT_IDLE_SECONDS
-        await self._put(
-            "client",
-            client.client_id or "",
-            {"client": client.model_dump(mode="json"), "expires_at": expires_at},
-            expires_at,
-        )
+        record: dict = {
+            "client": client.model_dump(mode="json", exclude={"client_secret"}),
+            "expires_at": expires_at,
+        }
+        if client.client_secret:
+            # A client secret is a live credential, and the SDK authenticates a
+            # client by comparing it in plain text, so it cannot be kept as a
+            # hash the way codes and refresh tokens are. It is sealed instead,
+            # under a key derived from the signing key, which lives in Key
+            # Vault and not here. A copy of the store alone then holds no
+            # secret. The client id is the associated data, so a sealed secret
+            # moved onto another client's record will not open.
+            nonce = secrets.token_bytes(12)
+            record["sealed_secret"] = {
+                "nonce": b64encode(nonce).decode(),
+                "ciphertext": b64encode(
+                    self._secret_box.encrypt(
+                        nonce,
+                        client.client_secret.encode(),
+                        (client.client_id or "").encode(),
+                    )
+                ).decode(),
+            }
+        await self._put("client", client.client_id or "", record, expires_at)
 
     # Authorization ------------------------------------------------------
 

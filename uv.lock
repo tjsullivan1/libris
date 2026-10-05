@@ -694,6 +694,7 @@ dependencies = [
 hosted = [
     { name = "azure-cosmos" },
     { name = "azure-identity" },
+    { name = "cryptography" },
     { name = "mcp" },
     { name = "uvicorn" },
 ]
@@ -724,6 +725,7 @@ test = [
 requires-dist = [
     { name = "azure-cosmos", marker = "extra == 'hosted'", specifier = ">=4.9" },
     { name = "azure-identity", marker = "extra == 'hosted'", specifier = ">=1.19" },
+    { name = "cryptography", marker = "extra == 'hosted'", specifier = ">=43" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "libris", extras = ["mcp"], marker = "extra == 'hosted'" },

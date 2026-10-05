@@ -36,6 +36,9 @@ hosted = [
     "uvicorn>=0.30",
     "azure-cosmos>=4.9",
     "azure-identity>=1.19",
+    # Seals client secrets at rest (ADR 0035). Also arrives through pyjwt[crypto],
+    # but oauth.py imports it directly, so it is declared rather than inherited.
+    "cryptography>=43",
 ]
 
 [dependency-groups]
