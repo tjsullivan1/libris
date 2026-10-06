@@ -12,6 +12,7 @@ from cosmos_fake import FakeContainer
 
 from libris.cosmos_store import (
     CosmosStore,
+    CountsMissing,
     CountsNotRebuilt,
     SyncRefused,
     push_shelf,
@@ -164,3 +165,74 @@ def test_a_note_that_cannot_be_reread_is_reported_not_raised(tmp_path, lock_note
     assert list(books.items) == ["01D"]
     assert [path.name for path in report.unreadable] == ["emma.md"]
     assert not report.complete
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "body", "reason"),
+    [
+        pytest.param(
+            "title: Dune\nlibris_id: " + "X" * 1024 + "\n",
+            "",
+            "1023 bytes",
+            id="an-id-longer-than-cosmos-allows",
+        ),
+        pytest.param(
+            "title: Dune\nlibris_id: 01D\n",
+            "x" * (2 * 1024 * 1024),
+            "2 MB",
+            id="a-note-larger-than-one-item",
+        ),
+    ],
+)
+def test_a_note_past_a_cosmos_limit_is_reported_before_any_write(
+    tmp_path, frontmatter, body, reason
+):
+    # Given a note Cosmos would refuse to write, beside one it would accept
+    _write(tmp_path, "big.md", frontmatter, body=body)
+    _write(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+
+    # When the Shelf is pushed
+    report, books, _ = _push(tmp_path)
+
+    # Then the push finishes, naming the note and why, instead of failing on it
+    assert list(books.items) == ["01E"]
+    ((path, why),) = report.not_storable
+    assert path.name == "big.md"
+    assert reason in why
+
+
+def test_an_id_shared_only_by_the_time_of_the_reread_still_stops_the_push(
+    tmp_path, monkeypatch
+):
+    # Given two notes sharing an ID, which the first check did not see - as when
+    # a note is edited between that check and the push reading it again
+    _write(tmp_path, "dune.md", "title: Dune\nlibris_id: 01SAME\n")
+    _write(tmp_path, "emma.md", "title: Emma\nlibris_id: 01SAME\n")
+    monkeypatch.setattr("libris.cosmos_store.find_id_collisions", lambda vault: [])
+    books, counts = FakeContainer(), FakeContainer()
+
+    # When the Shelf is pushed
+    with pytest.raises(SyncRefused) as refused:
+        push_shelf(tmp_path, books, counts)
+
+    # Then it refuses on the notes it actually read, and nothing went up
+    (collision,) = refused.value.collisions
+    assert [n.path.name for n in collision.notes] == ["dune.md", "emma.md"]
+    assert books.items == {}
+
+
+def test_a_remote_no_sync_finished_on_says_so_rather_than_answering_empty(tmp_path):
+    # Given books pushed by a sync whose counts rebuild failed
+    _write(tmp_path, "dune.md", "title: Dune\nstatus: Read\nlibris_id: 01D\n")
+    books, counts = FakeContainer(), FakeContainer()
+    counts.fail_writes = OSError("throttled")
+    with pytest.raises(CountsNotRebuilt):
+        push_shelf(tmp_path, books, counts)
+    store = CosmosStore(books, counts)
+
+    # When it is asked for a listing or for the word counts
+    # Then it says no sync has finished, rather than a total of none
+    with pytest.raises(CountsMissing):
+        store.listing("Read", limit=10)
+    with pytest.raises(CountsMissing):
+        store.word_counts(None)

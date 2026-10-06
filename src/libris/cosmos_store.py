@@ -19,6 +19,7 @@ This push is a full one. Change detection and deletions are #174.
 """
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -41,8 +42,12 @@ WORD_COUNTS = "word_counts"
 # `books`, so no book query has to filter it out.
 _COUNTS_ID = "word-counts"
 
-# Cosmos refuses these in a document id, and a Libris ID is a document's id.
+# Cosmos's limits on one item. A Libris ID is a document's id, so it must keep
+# to the id's rules; and a note past either limit would fail its write and stop
+# the whole push, naming nothing, rather than be reported (#185 review).
 _FORBIDDEN_IN_ID = set("/\\?#")
+_MAX_ID_BYTES = 1023
+_MAX_ITEM_BYTES = 2 * 1024 * 1024
 
 
 class Container(Protocol):
@@ -76,6 +81,17 @@ class CountsNotRebuilt(Exception):
     The remote then ranks against counts for a Shelf that no longer exists, so
     the sync has failed. The next one rebuilds them whether or not it pushes a
     note (ADR 0033).
+    """
+
+
+class CountsMissing(Exception):
+    """The remote has no word counts, so it cannot weigh a search or total a listing.
+
+    Not the same as an empty Library (ADR 0029). A sync that pushes nothing
+    still writes counts, with no buckets, so their absence means no sync has
+    finished - though one may have pushed books before its rebuild failed
+    (#185 review). Answering zero would rank those books with no weights and
+    report a total of none.
     """
 
 
@@ -116,13 +132,16 @@ def book_document(note: BookNote) -> dict[str, Any]:
 
     Raises:
         NotStorable: If the note has no Libris ID, one Cosmos refuses as an id,
-            or frontmatter that would not come back from JSON as it went in.
+            frontmatter that would not come back from JSON as it went in, or
+            more than Cosmos holds in one item.
     """
     keys = stored_keys(note)
     if keys.libris_id is None:
         raise NotStorable("it has no Libris ID")
     if _FORBIDDEN_IN_ID & set(keys.libris_id):
         raise NotStorable(f"its Libris ID {keys.libris_id!r} holds / \\ ? or #")
+    if len(keys.libris_id.encode("utf-8")) > _MAX_ID_BYTES:
+        raise NotStorable(f"its Libris ID is longer than {_MAX_ID_BYTES} bytes")
 
     document = {
         "id": keys.libris_id,
@@ -145,11 +164,13 @@ def book_document(note: BookNote) -> dict[str, Any]:
     # cannot - a number as a key, which JSON turns into text - and a note that
     # would come back different is reported rather than quietly changed.
     try:
-        returned = json.loads(json.dumps(document, allow_nan=False))
+        text = json.dumps(document, allow_nan=False)
     except (TypeError, ValueError) as error:
         raise NotStorable(f"its frontmatter is not JSON: {error}") from None
-    if returned != document:
+    if json.loads(text) != document:
         raise NotStorable("its frontmatter would not come back from JSON unchanged")
+    if len(text.encode("utf-8")) > _MAX_ITEM_BYTES:
+        raise NotStorable("it is larger than the 2 MB Cosmos holds in one item")
     return document
 
 
@@ -186,9 +207,14 @@ def push_shelf(vault_path: Path, books: Container, counts: Container) -> PushRep
     if collisions:
         raise SyncRefused(collisions)
 
+    # Every note is read before any is written. The check above read the Shelf
+    # once and this reads it again, so a note edited in between could arrive
+    # holding another's ID and overwrite it. Checking the documents actually
+    # about to go up closes that, and only an all-clear writes anything
+    # (#185 review).
     index = index_for(vault_path)
     report = PushReport()
-    pushed: list[StoredKeys] = []
+    documents: list[tuple[BookNote, dict[str, Any]]] = []
     for listed in index.notes():
         # The index read every note, but one can be locked, denied or removed
         # since. That is the same race `ShelfIndex` reports rather than raises,
@@ -204,17 +230,23 @@ def push_shelf(vault_path: Path, books: Container, counts: Container) -> PushRep
             report.without_id.append(note.path)
             continue
         try:
-            document = book_document(note)
+            documents.append((note, book_document(note)))
         except NotStorable as error:
             report.not_storable.append((note.path, str(error)))
-            continue
-        books.upsert_item(document)
-        pushed.append(stored_keys(note))
-        report.pushed += 1
     # The index can still answer for a note it could not re-read, from an
     # earlier parse, so one path can be named by both.
     unreadable = set(report.unreadable) | set(index.unreadable)
     report.unreadable = sorted(unreadable, key=lambda path: path.name)
+
+    collisions = _shared_ids(note for note, _ in documents)
+    if collisions:
+        raise SyncRefused(collisions)
+
+    pushed: list[StoredKeys] = []
+    for note, document in documents:
+        books.upsert_item(document)
+        pushed.append(stored_keys(note))
+        report.pushed += 1
 
     # Over the notes pushed, not the Shelf: the counts describe what the remote
     # holds, and a note that could not go up is not there to be weighed.
@@ -223,6 +255,19 @@ def push_shelf(vault_path: Path, books: Container, counts: Container) -> PushRep
     except Exception as error:
         raise CountsNotRebuilt(str(error)) from error
     return report
+
+
+def _shared_ids(notes: Iterable[BookNote]) -> list[IdCollision]:
+    """The Libris IDs more than one of these notes holds, named as `find_id_collisions` names them."""
+    by_id: dict[str, list[BookNote]] = {}
+    for note in notes:
+        if note.libris_id is not None:
+            by_id.setdefault(note.libris_id, []).append(note)
+    return [
+        IdCollision(libris_id=libris_id, notes=sorted(held, key=lambda n: n.path.name))
+        for libris_id, held in sorted(by_id.items())
+        if len(held) > 1
+    ]
 
 
 def _note(document: dict[str, Any]) -> BookNote:
@@ -323,8 +368,10 @@ class CosmosStore:
             )
         )
         if not found:
-            # Nothing has been synced: an empty Library, not an error.
-            return WordCounts(total=0)
+            raise CountsMissing(
+                "the remote Library has no word counts: no sync has finished. "
+                "Run `libris sync`."
+            )
         total = 0
         counts: dict[str, int] = {}
         for bucket in found[0]["buckets"]:
