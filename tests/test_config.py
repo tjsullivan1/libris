@@ -64,8 +64,8 @@ def test_is_vault_configured_reports_the_absence_without_raising(tmp_path):
 
 
 def test_the_api_key_comes_from_the_environment_where_there_is_no_config(
-    monkeypatch,
-):
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Given a key in the environment, as the Container App sets it from Key
     # Vault, and none in a config file
     monkeypatch.setenv("LIBRIS_GOOGLE_BOOKS_API_KEY", "from-key-vault")
@@ -75,7 +75,9 @@ def test_the_api_key_comes_from_the_environment_where_there_is_no_config(
     assert get_api_key() == "from-key-vault"
 
 
-def test_the_environment_key_wins_over_the_config_file(monkeypatch):
+def test_the_environment_key_wins_over_the_config_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Given a key in the config file and another in the environment
     set_config("google_books_api_key", "from-config")
     monkeypatch.setenv("LIBRIS_GOOGLE_BOOKS_API_KEY", "from-environment")
@@ -85,7 +87,9 @@ def test_the_environment_key_wins_over_the_config_file(monkeypatch):
     assert get_api_key() == "from-environment"
 
 
-def test_the_config_files_key_is_used_when_the_environment_has_none(monkeypatch):
+def test_the_config_files_key_is_used_when_the_environment_has_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Given a key in the config file, and an empty variable in the environment
     set_config("google_books_api_key", "from-config")
     monkeypatch.setenv("LIBRIS_GOOGLE_BOOKS_API_KEY", "")

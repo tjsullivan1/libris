@@ -14,6 +14,7 @@ import time
 from base64 import urlsafe_b64encode
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -1543,7 +1544,7 @@ def test_an_unreachable_google_ends_the_sign_in_with_a_page(
 
 
 @pytest.fixture
-def library(tmp_path) -> CosmosStore:
+def library(tmp_path: Path) -> CosmosStore:
     """Cosmos as `libris sync` leaves it: Mistborn read, Dune being read."""
     shelf_dir = tmp_path / "shelf"
     shelf_dir.mkdir()
@@ -1620,7 +1621,7 @@ def test_find_book_reaches_google_books_from_the_hosted_server(
     # Given Google Books knows one edition of Mistborn
     asked: list[dict] = []
 
-    def lookup(**kwargs) -> list[BookCandidate]:
+    def lookup(**kwargs: object) -> list[BookCandidate]:
         asked.append(kwargs)
         return [
             BookCandidate(
