@@ -36,6 +36,13 @@ variable "google_client_secret" {
   sensitive   = true
 }
 
+variable "google_books_api_key" {
+  description = "A Google Books API key, for find_book's quota. Optional: empty runs keyless, at Google's lower anonymous limits. Written to Key Vault; never set it in a committed file."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "allowed_google_sub" {
   description = "The one Google account allowed in. Empty on the first deployment: the refused sign-in shows the value to put here."
   type        = string

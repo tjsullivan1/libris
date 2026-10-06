@@ -16,11 +16,14 @@ from typing import Annotated, Literal
 
 import httpx
 from mcp.server import MCPServer
+from mcp.server.auth.provider import OAuthAuthorizationServerProvider
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from . import config, installed_version, service
 from .api import GoogleBooksClient
+from .cosmos_store import CountsMissing
 from .markdown import BookNote, NoteWriteFailed
 from .note_format import (
     FORMAT_VALUES,
@@ -227,6 +230,8 @@ def create_server(
     *,
     store_provider: Callable[[], LibraryStore] = _shelf_store,
     shelf_provider: Callable[[], Path] | None = _shelf,
+    auth_server_provider: "OAuthAuthorizationServerProvider | None" = None,
+    auth: AuthSettings | None = None,
 ) -> "MCPServer":
     """Build the MCP server and its tools.
 
@@ -247,6 +252,10 @@ def create_server(
         shelf_provider: Called per write, returning the Shelf to write to. None where
             there is no Shelf, and then the writing tools say so and write
             nothing.
+        auth_server_provider: Who signs clients in, on the hosted server
+            (ADR 0035). None over stdio, where the client is the person.
+        auth: How the hosted server's sign-in is advertised. Given with
+            `auth_server_provider`.
     """
 
     def writable_shelf() -> Path:
@@ -258,6 +267,8 @@ def create_server(
         name=name,
         version=installed_version(),
         instructions=INSTRUCTIONS,
+        auth_server_provider=auth_server_provider,
+        auth=auth,
     )
 
     @mcp.tool()
@@ -290,6 +301,10 @@ def create_server(
             )
         except InvalidFieldValue as exc:
             raise ToolError(str(exc)) from None
+        except CountsMissing as exc:
+            # A remote nobody has synced to yet. Its message ends with the fix.
+            message = str(exc)
+            raise ToolError(message[:1].upper() + message[1:]) from None
         return SearchAnswer(total=found.total, books=[Book.of(n) for n in found.books])
 
     @mcp.tool()

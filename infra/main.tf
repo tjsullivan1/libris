@@ -107,6 +107,17 @@ resource "azurerm_key_vault_secret" "google_client_secret" {
   depends_on   = [time_sleep.secrets_role_propagates]
 }
 
+# Optional, unlike the secrets above: Google Books answers without a key, and a
+# placeholder would be sent as one and refused. So with no key there is no
+# secret, and the app runs keyless (#175).
+resource "azurerm_key_vault_secret" "google_books_api_key" {
+  count        = var.google_books_api_key == "" ? 0 : 1
+  name         = "google-books-api-key"
+  value        = var.google_books_api_key
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [time_sleep.secrets_role_propagates]
+}
+
 # Cosmos --------------------------------------------------------------------
 
 resource "azurerm_cosmosdb_account" "main" {
@@ -285,6 +296,15 @@ resource "azurerm_container_app" "mcp" {
     key_vault_secret_id = azurerm_key_vault_secret.google_client_secret.versionless_id
   }
 
+  dynamic "secret" {
+    for_each = azurerm_key_vault_secret.google_books_api_key
+    content {
+      name                = "google-books-api-key"
+      identity            = azurerm_user_assigned_identity.app.id
+      key_vault_secret_id = secret.value.versionless_id
+    }
+  }
+
   ingress {
     external_enabled = true
     target_port      = 8000
@@ -330,6 +350,13 @@ resource "azurerm_container_app" "mcp" {
         content {
           name  = "LIBRIS_ALLOWED_GOOGLE_SUB"
           value = env.value
+        }
+      }
+      dynamic "env" {
+        for_each = azurerm_key_vault_secret.google_books_api_key
+        content {
+          name        = "LIBRIS_GOOGLE_BOOKS_API_KEY"
+          secret_name = "google-books-api-key"
         }
       }
       env {

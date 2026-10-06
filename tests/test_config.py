@@ -5,10 +5,12 @@ import yaml
 
 from libris.config import (
     VaultNotConfigured,
+    get_api_key,
     get_config_file,
     get_vault_path,
     is_vault_configured,
     set_book_vault_path,
+    set_config,
 )
 
 
@@ -59,3 +61,35 @@ def test_is_vault_configured_reports_the_absence_without_raising(tmp_path):
     shelf.mkdir()
     set_book_vault_path(shelf)
     assert is_vault_configured() is True
+
+
+def test_the_api_key_comes_from_the_environment_where_there_is_no_config(
+    monkeypatch,
+):
+    # Given a key in the environment, as the Container App sets it from Key
+    # Vault, and none in a config file
+    monkeypatch.setenv("LIBRIS_GOOGLE_BOOKS_API_KEY", "from-key-vault")
+
+    # When Google Books asks for the key
+    # Then it gets the one the environment holds
+    assert get_api_key() == "from-key-vault"
+
+
+def test_the_environment_key_wins_over_the_config_file(monkeypatch):
+    # Given a key in the config file and another in the environment
+    set_config("google_books_api_key", "from-config")
+    monkeypatch.setenv("LIBRIS_GOOGLE_BOOKS_API_KEY", "from-environment")
+
+    # When Google Books asks for the key
+    # Then the environment's is used, as a setting closer to the process
+    assert get_api_key() == "from-environment"
+
+
+def test_the_config_files_key_is_used_when_the_environment_has_none(monkeypatch):
+    # Given a key in the config file, and an empty variable in the environment
+    set_config("google_books_api_key", "from-config")
+    monkeypatch.setenv("LIBRIS_GOOGLE_BOOKS_API_KEY", "")
+
+    # When Google Books asks for the key
+    # Then the config file's is used: an empty variable is not a key
+    assert get_api_key() == "from-config"

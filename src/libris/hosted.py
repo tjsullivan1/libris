@@ -1,8 +1,8 @@
 """The hosted MCP server: Streamable HTTP behind Libris's own OAuth (ADR 0035).
 
-This is the auth spike for #171. Its one tool, `ping`, proves a client got all
-the way through sign-in. The Library's real tools arrive with #175, once the
-remote store exists to answer them.
+It serves the same tools as `libris mcp` (ADR 0007, ADR 0020), answered from
+what `libris sync` pushed to Cosmos. There is no Shelf here, so the tools that
+write say so and write nothing, until remote writes arrive as Intents.
 
 Configured from environment variables rather than `config.yaml`, because it
 runs in a container whose settings come from the Container App (and its secrets
@@ -19,19 +19,19 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from mcp.server import MCPServer
 from mcp.server.auth.settings import (
     AuthSettings,
     ClientRegistrationOptions,
     RevocationOptions,
 )
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import installed_version
+from .mcp_server import create_server
 from .oauth import (
     CONSENT_PATH,
     GOOGLE_CALLBACK_PATH,
@@ -43,6 +43,7 @@ from .oauth import (
     LibrisAuthProvider,
     MemoryAuthStore,
 )
+from .store import LibraryStore
 
 # Registration is open by design (ADR 0035), and each one writes a document.
 # Claude registers once per connection; this is far above any real use. Only
@@ -165,6 +166,7 @@ def create_app(
     registrations_per_hour: int = REGISTRATIONS_PER_HOUR,
     sign_ins_per_client_per_hour: int = SIGN_INS_PER_CLIENT_PER_HOUR,
     clock: Callable[[], float] = time.monotonic,
+    library: LibraryStore | None = None,
 ) -> Starlette:
     """Build the hosted ASGI app.
 
@@ -177,6 +179,8 @@ def create_app(
         sign_ins_per_client_per_hour: How many sign-ins one client may start in
             any hour.
         clock: The time, for the write limits.
+        library: What the tools answer from. Defaults to the books `libris
+            sync` pushed to Cosmos, when an endpoint is configured.
     """
     if store is None:
         if settings.cosmos_endpoint:
@@ -202,10 +206,26 @@ def create_app(
         sign_ins_per_client_per_hour=sign_ins_per_client_per_hour,
         limit_clock=clock,
     )
-    mcp = MCPServer(
-        name="libris",
-        instructions="Libris tracks which books someone has read, is reading, or means to read.",
-        version=installed_version(),
+    if library is None and settings.cosmos_endpoint:
+        from .cosmos_store import CosmosStore, connect_containers
+
+        library = CosmosStore(
+            *connect_containers(settings.cosmos_endpoint, settings.cosmos_database)
+        )
+
+    def library_store() -> LibraryStore:
+        if library is None:
+            # Said by the tool rather than refused at startup, so the sign-in
+            # can still be tried out locally without a Cosmos account.
+            raise ToolError(
+                "This server has no Library to answer from: "
+                "LIBRIS_COSMOS_ENDPOINT is not set."
+            )
+        return library
+
+    mcp = create_server(
+        store_provider=library_store,
+        shelf_provider=None,
         auth_server_provider=provider,
         auth=AuthSettings(
             issuer_url=public_url,
@@ -217,11 +237,6 @@ def create_app(
             revocation_options=RevocationOptions(enabled=True),
         ),
     )
-
-    @mcp.tool()
-    def ping() -> str:
-        """Check that this connection reaches the Library and is signed in."""
-        return f"pong from libris {installed_version()}"
 
     @mcp.custom_route(CONSENT_PATH, methods=["GET"])
     async def consent_page(request: Request) -> Response:

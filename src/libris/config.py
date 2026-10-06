@@ -14,6 +14,7 @@ BOOK_VAULT_KEY = "book_vault"
 SERVER_TOKEN_KEY = "server_token"  # noqa: S105
 EXTENSION_ORIGINS_KEY = "extension_origins"
 COSMOS_ENDPOINT_KEY = "cosmos_endpoint"
+API_KEY_ENV = "LIBRIS_GOOGLE_BOOKS_API_KEY"
 
 
 def get_config_dir() -> Path:
@@ -97,9 +98,14 @@ def is_vault_configured() -> bool:
     return bool(config.get(BOOK_VAULT_KEY) or config.get(LEGACY_VAULT_KEY))
 
 
-def get_api_key() -> Optional[str]:
-    config = get_config()
-    return config.get("google_books_api_key")
+def get_api_key() -> str | None:
+    """Get the Google Books API key, from the environment first.
+
+    The hosted server has no config directory: the Container App sets
+    `LIBRIS_GOOGLE_BOOKS_API_KEY` from Key Vault (#175). An empty variable is
+    treated as unset, so it cannot hide a key in the config file.
+    """
+    return os.environ.get(API_KEY_ENV) or get_config().get("google_books_api_key")
 
 
 def get_obsidian_vault_root() -> Optional[Path]:

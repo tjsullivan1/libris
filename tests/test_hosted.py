@@ -23,11 +23,15 @@ pytest.importorskip("mcp")
 import anyio  # noqa: E402
 import httpx  # noqa: E402
 import jwt  # noqa: E402
+from cosmos_fake import FakeContainer  # noqa: E402
 from mcp.server.auth.provider import TokenError  # noqa: E402
 from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
+from libris.api import BookCandidate  # noqa: E402
+from libris.cosmos_store import CosmosStore, push_shelf  # noqa: E402
 from libris.hosted import HostedConfigError, HostedSettings, create_app  # noqa: E402
+from libris.markdown import create_book_note  # noqa: E402
 from libris.oauth import (  # noqa: E402
     CONSENT_COOKIE,
     GoogleAccount,
@@ -255,20 +259,34 @@ def tokens(client: TestClient) -> tuple[str, dict]:
     return client_id, response.json()
 
 
-def call_ping(client: TestClient, access_token: str | None) -> httpx.Response:
+def rpc(
+    client: TestClient, access_token: str | None, method: str, params: dict
+) -> httpx.Response:
+    """One MCP request, as a client sends it over Streamable HTTP."""
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
     }
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
-    body = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": "ping", "arguments": {}},
-    }
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     return client.post("/mcp", content=json.dumps(body), headers=headers)
+
+
+def list_tools(client: TestClient, access_token: str | None) -> httpx.Response:
+    """Ask for the tools: the cheapest call that still needs a valid token."""
+    return rpc(client, access_token, "tools/list", {})
+
+
+def call_tool(
+    client: TestClient, access_token: str, name: str, arguments: dict
+) -> dict:
+    """Call a tool and hand back its JSON-RPC result, failing on a transport error."""
+    response = rpc(
+        client, access_token, "tools/call", {"name": name, "arguments": arguments}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["result"]
 
 
 # Discovery ------------------------------------------------------------------
@@ -278,7 +296,7 @@ def test_an_unauthenticated_call_points_the_client_at_the_metadata(
     client: TestClient,
 ) -> None:
     # When a client calls the MCP endpoint without a token
-    response = call_ping(client, None)
+    response = list_tools(client, None)
 
     # Then it is refused with a pointer to where sign-in is described,
     # which is the only way Claude finds the authorization server
@@ -313,12 +331,13 @@ def test_the_owner_signs_in_and_the_token_reaches_the_tools(
     # Given a client that registered and signed in as the owner
     _, issued = tokens(client)
 
-    # When it calls a tool with the token it was given
-    response = call_ping(client, issued["access_token"])
+    # When it asks for the tools with the token it was given
+    response = list_tools(client, issued["access_token"])
 
-    # Then the tool answers
+    # Then it is offered the Library's tools
     assert response.status_code == 200, response.text
-    assert "pong from libris" in response.text
+    offered = {tool["name"] for tool in response.json()["result"]["tools"]}
+    assert offered == {"search_library", "find_book", "add_book", "update_book"}
     # And Google was asked with the verifier for the challenge Libris sent it
     assert len(google.verifiers) == 1
 
@@ -569,7 +588,7 @@ def test_a_refresh_token_rotates(client: TestClient) -> None:
     # Then it gets a new pair that works
     assert renewed.status_code == 200, renewed.text
     assert renewed.json()["refresh_token"] != issued["refresh_token"]
-    assert call_ping(client, renewed.json()["access_token"]).status_code == 200
+    assert list_tools(client, renewed.json()["access_token"]).status_code == 200
     # And the old refresh token is spent
     assert refresh(issued["refresh_token"]).status_code == 400
 
@@ -603,7 +622,7 @@ def reissued(client: TestClient, key: str = SIGNING_KEY, **changes: object) -> s
     """
     _, issued = tokens(client)
     claims = jwt.decode(issued["access_token"], options={"verify_signature": False})
-    assert call_ping(client, issued["access_token"]).status_code == 200
+    assert list_tools(client, issued["access_token"]).status_code == 200
     return jwt.encode({**claims, **changes}, key, algorithm="HS256")
 
 
@@ -612,7 +631,7 @@ def test_a_token_signed_with_another_key_is_refused(client: TestClient) -> None:
     forged = reissued(client, key="f" * 48)
 
     # Then it reaches no tool
-    assert call_ping(client, forged).status_code == 401
+    assert list_tools(client, forged).status_code == 401
 
 
 def test_a_token_for_another_audience_is_refused(client: TestClient) -> None:
@@ -620,7 +639,7 @@ def test_a_token_for_another_audience_is_refused(client: TestClient) -> None:
     elsewhere = reissued(client, aud="https://elsewhere.test/mcp")
 
     # Then it reaches no tool
-    assert call_ping(client, elsewhere).status_code == 401
+    assert list_tools(client, elsewhere).status_code == 401
 
 
 def test_a_token_from_another_issuer_is_refused(client: TestClient) -> None:
@@ -628,7 +647,7 @@ def test_a_token_from_another_issuer_is_refused(client: TestClient) -> None:
     impostor = reissued(client, iss="https://elsewhere.test")
 
     # Then it reaches no tool
-    assert call_ping(client, impostor).status_code == 401
+    assert list_tools(client, impostor).status_code == 401
 
 
 def test_an_expired_token_is_refused(client: TestClient) -> None:
@@ -637,7 +656,7 @@ def test_an_expired_token_is_refused(client: TestClient) -> None:
     expired = reissued(client, iat=now - 3600, exp=now - 60)
 
     # Then it reaches no tool
-    assert call_ping(client, expired).status_code == 401
+    assert list_tools(client, expired).status_code == 401
 
 
 def test_changing_the_owner_cuts_off_tokens_already_issued(
@@ -653,7 +672,7 @@ def test_changing_the_owner_cuts_off_tokens_already_issued(
     app = create_app(settings(allowed_sub="someone-else"), store=store, identity=google)
     with TestClient(app, base_url=PUBLIC_URL) as client:
         # Then the old token reaches no tool, and cannot be refreshed either
-        assert call_ping(client, issued["access_token"]).status_code == 401
+        assert list_tools(client, issued["access_token"]).status_code == 401
         refreshed = client.post(
             "/token",
             data={
@@ -903,7 +922,7 @@ def test_a_confidential_client_signs_in_and_refreshes_across_restarts(
         # Then the secret survived the store and the restart, and the new
         # token reaches the tools
         assert renewed.status_code == 200, renewed.text
-        assert call_ping(after, renewed.json()["access_token"]).status_code == 200
+        assert list_tools(after, renewed.json()["access_token"]).status_code == 200
 
 
 def test_a_confidential_client_without_its_secret_gets_nothing(
@@ -945,7 +964,7 @@ def test_revoking_the_access_token_ends_the_whole_sign_in(client: TestClient) ->
 
     # Then the access token stops working now, not in an hour, and the
     # refresh token from the same sign-in cannot replace it
-    assert call_ping(client, issued["access_token"]).status_code == 401
+    assert list_tools(client, issued["access_token"]).status_code == 401
     assert refresh(client, client_id, issued["refresh_token"]).status_code == 400
 
 
@@ -957,7 +976,7 @@ def test_revoking_the_refresh_token_ends_the_whole_sign_in(client: TestClient) -
     assert revoke(client, client_id, issued["refresh_token"]).status_code == 200
 
     # Then the access token issued alongside it stops working too
-    assert call_ping(client, issued["access_token"]).status_code == 401
+    assert list_tools(client, issued["access_token"]).status_code == 401
     assert refresh(client, client_id, issued["refresh_token"]).status_code == 400
 
 
@@ -970,7 +989,7 @@ def test_revoking_after_a_refresh_still_ends_the_sign_in(client: TestClient) -> 
     assert revoke(client, client_id, renewed["access_token"]).status_code == 200
 
     # Then every token from that sign-in is dead, old and new
-    assert call_ping(client, renewed["access_token"]).status_code == 401
+    assert list_tools(client, renewed["access_token"]).status_code == 401
     assert refresh(client, client_id, renewed["refresh_token"]).status_code == 400
 
 
@@ -983,7 +1002,7 @@ def test_revoking_one_sign_in_leaves_another_alone(client: TestClient) -> None:
     revoke(client, first_id, first["access_token"])
 
     # Then the second still works
-    assert call_ping(client, second["access_token"]).status_code == 200
+    assert list_tools(client, second["access_token"]).status_code == 200
 
 
 def test_a_replayed_refresh_token_ends_the_thiefs_sign_in_too(
@@ -992,7 +1011,7 @@ def test_a_replayed_refresh_token_ends_the_thiefs_sign_in_too(
     # Given a refresh token that a thief redeemed before its owner did
     client_id, issued = tokens(client)
     stolen = refresh(client, client_id, issued["refresh_token"]).json()
-    assert call_ping(client, stolen["access_token"]).status_code == 200
+    assert list_tools(client, stolen["access_token"]).status_code == 200
 
     # When the owner presents the same token, now spent
     replayed = refresh(client, client_id, issued["refresh_token"])
@@ -1000,7 +1019,7 @@ def test_a_replayed_refresh_token_ends_the_thiefs_sign_in_too(
     # Then the owner is refused, and the thief's tokens stop working too:
     # refusing the replay alone would leave the thief holding a live sign-in
     assert replayed.status_code == 400
-    assert call_ping(client, stolen["access_token"]).status_code == 401
+    assert list_tools(client, stolen["access_token"]).status_code == 401
     assert refresh(client, client_id, stolen["refresh_token"]).status_code == 400
 
 
@@ -1012,7 +1031,7 @@ def test_a_replay_ends_only_its_own_sign_in(client: TestClient) -> None:
     refresh(client, first_id, first["refresh_token"])
 
     # Then the other sign-in is untouched
-    assert call_ping(client, second["access_token"]).status_code == 200
+    assert list_tools(client, second["access_token"]).status_code == 200
 
 
 def test_sign_ins_beyond_a_clients_hourly_limit_are_refused(
@@ -1518,3 +1537,142 @@ def test_an_unreachable_google_ends_the_sign_in_with_a_page(
     # Then they see a sign-in failure, not a server error
     assert back.status_code == 502
     assert "Sign-in failed" in back.text
+
+
+# The Library, answered from what sync pushed (#175) -------------------------
+
+
+@pytest.fixture
+def library(tmp_path) -> CosmosStore:
+    """Cosmos as `libris sync` leaves it: Mistborn read, Dune being read."""
+    shelf_dir = tmp_path / "shelf"
+    shelf_dir.mkdir()
+    create_book_note(
+        BookCandidate(title="Mistborn", authors=["Brandon Sanderson"]),
+        shelf_dir,
+        overrides={"status": "Read"},
+    )
+    create_book_note(
+        BookCandidate(title="Dune", authors=["Frank Herbert"]),
+        shelf_dir,
+        overrides={"status": "Reading"},
+    )
+    books, counts = FakeContainer(), FakeContainer()
+    push_shelf(shelf_dir, books, counts)
+    return CosmosStore(books, counts)
+
+
+@pytest.fixture
+def library_client(
+    google: FakeGoogle, store: MemoryAuthStore, library: CosmosStore
+) -> Iterator[TestClient]:
+    app = create_app(settings(), store=store, identity=google, library=library)
+    with TestClient(app, base_url=PUBLIC_URL) as test_client:
+        yield test_client
+
+
+def test_have_i_read_mistborn_is_answered_from_the_synced_library(
+    library_client: TestClient,
+) -> None:
+    # Given a signed-in client
+    _, issued = tokens(library_client)
+
+    # When it asks the Library about Mistborn
+    result = call_tool(
+        library_client, issued["access_token"], "search_library", {"query": "mistborn"}
+    )
+
+    # Then the answer comes from what sync pushed, status and all
+    assert not result["isError"], result
+    found = result["structuredContent"]
+    assert found["total"] == 1
+    assert found["books"][0]["title"] == "Mistborn"
+    assert found["books"][0]["status"] == "Read"
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("add_book", {"google_books_id": "v1"}),
+        ("update_book", {"libris_id": "01D", "status": "Read"}),
+    ],
+    ids=["add", "update"],
+)
+def test_a_hosted_write_is_declined_and_says_so(
+    library_client: TestClient, tool: str, arguments: dict
+) -> None:
+    # Given a signed-in client
+    _, issued = tokens(library_client)
+
+    # When it tries to change the Library from here
+    result = call_tool(library_client, issued["access_token"], tool, arguments)
+
+    # Then it is told remote writes are not available, and nothing was written
+    assert result["isError"]
+    message = result["content"][0]["text"]
+    assert "Changes can't be made from here yet" in message
+    assert "Nothing was written" in message
+
+
+def test_find_book_reaches_google_books_from_the_hosted_server(
+    library_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given Google Books knows one edition of Mistborn
+    asked: list[dict] = []
+
+    def lookup(**kwargs) -> list[BookCandidate]:
+        asked.append(kwargs)
+        return [
+            BookCandidate(
+                title="Mistborn",
+                authors=["Brandon Sanderson"],
+                google_books_id="mist-1",
+            )
+        ]
+
+    monkeypatch.setattr("libris.service.lookup_candidates", lookup)
+    _, issued = tokens(library_client)
+
+    # When a signed-in client looks it up
+    result = call_tool(
+        library_client, issued["access_token"], "find_book", {"title": "Mistborn"}
+    )
+
+    # Then the candidate comes back for the person to choose
+    assert not result["isError"], result
+    assert asked and asked[0]["title"] == "Mistborn"
+    (candidate,) = result["structuredContent"]["result"]
+    assert candidate["google_books_id"] == "mist-1"
+
+
+def test_a_library_no_sync_has_finished_says_to_run_one(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given Cosmos with nothing pushed to it
+    empty = CosmosStore(FakeContainer(), FakeContainer())
+    app = create_app(settings(), store=store, identity=google, library=empty)
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        _, issued = tokens(client)
+
+        # When a client searches it
+        result = call_tool(
+            client, issued["access_token"], "search_library", {"query": "mistborn"}
+        )
+
+    # Then it is told why there is no answer and what fixes it
+    assert result["isError"]
+    assert "libris sync" in result["content"][0]["text"]
+
+
+def test_with_no_cosmos_configured_a_search_says_what_is_missing(
+    client: TestClient,
+) -> None:
+    # Given a hosted server started without LIBRIS_COSMOS_ENDPOINT
+    _, issued = tokens(client)
+
+    # When a client searches the Library
+    result = call_tool(client, issued["access_token"], "search_library", {})
+
+    # Then the tool names the setting, rather than failing as a server error
+    assert result["isError"]
+    assert "LIBRIS_COSMOS_ENDPOINT" in result["content"][0]["text"]

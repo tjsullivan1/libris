@@ -11,6 +11,7 @@ A simple CLI tool to track your reading list in Obsidian. The name comes from th
 - Clip books from a book page with the [browser extension](#browser-extension).
 - Search and update your Library [from an assistant](#talking-to-libris-from-an-agent) over MCP.
 - Push the Shelf to a [remote Library](#14-push-the-shelf-to-the-remote-library) in Azure for the hosted server.
+- Ask Claude or Gemini about your Library through the [hosted server](#15-ask-claude-or-gemini-about-the-library).
 
 ## Installation
 Ensure you have `uv` installed.
@@ -253,6 +254,17 @@ libris sync
 ```
 
 Sync refuses to push anything while two notes share a Libris ID, and names them, because the remote would keep only one. A note it cannot push - one with no Libris ID, say, which `libris migrate` gives - is named, and the command exits non-zero while every other note still goes up.
+
+### 15. Ask Claude or Gemini about the Library
+
+The hosted Libris server lets Claude and Gemini answer from the remote Library: "have I read Mistborn?", "what am I reading?", or "look up Piranesi". It answers from what the last `libris sync` pushed, so sync first. It is read-only for now: asked to add a book or change one, the assistant is told that changes can't be made remotely yet, and nothing is written. Make the change with `libris` on the computer that holds the Shelf, then sync.
+
+Get the server's URL from `terraform -chdir=infra output -raw mcp_url`, then add it as a custom connector:
+
+- **Claude**: **Customize → Connectors → Add custom connector** on Free, Pro or Max. On Team or Enterprise, an Owner adds it under **Organization settings → Connectors**. When asked about the OAuth client, choose **Register automatically**, and leave the client ID and secret empty.
+- **Gemini** (untested, #180): **Settings → Connected apps → Add a custom app** at gemini.google.com, with the same URL.
+
+Either one sends you to sign in with Google, and only the account the server was deployed for gets in. Deploying the server, and finding that account's ID, is covered in [infra/README.md](infra/README.md#first-deployment).
 
 ## Browser extension
 
