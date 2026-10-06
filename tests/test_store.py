@@ -412,3 +412,17 @@ def test_a_query_of_only_filler_is_taken_at_face_value(tmp_path):
 
         # Then "The Road" is found rather than nothing
         assert "road.md" in names
+
+
+def test_a_listing_orders_titles_past_u_ffff_by_code_point_everywhere(tmp_path):
+    # Given two titles that code point order and UTF-16 order disagree on:
+    # U+F900 comes first by code point, U+10428 first by UTF-16 code unit, whose
+    # surrogate pair begins at U+D801
+    _note(tmp_path, "cjk.md", "豈", status="Read", libris_id="01B")
+    _note(tmp_path, "deseret.md", "\U00010428", status="Read", libris_id="01A")
+
+    # When the first title in Read is listed from each store
+    answers = [_answer(store, None, "Read", 1) for store in _stores(tmp_path)]
+
+    # Then every store cuts the page at the same book, the one first by code point
+    assert answers == [(2, ["cjk.md"])] * 3

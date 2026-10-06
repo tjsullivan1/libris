@@ -5,11 +5,14 @@ against this. It evaluates the handful of clause shapes the store writes, and
 fails on any other: a fake that guessed at a query it did not understand would
 let a wrong one pass.
 
-Two things it does as Cosmos does, because the store would be wrong without
+Three things it does as Cosmos does, because the store would be wrong without
 them. Every document goes through JSON on the way in, so a note that only
-survived as a Python object would not pass. And queries return documents newest
+survived as a Python object would not pass. Queries return documents newest
 first, not in the order they were pushed, so an answer that relied on push
-order to break a tie would not agree with the Shelf.
+order to break a tie would not agree with the Shelf. And strings are ordered by
+UTF-16 code unit, not by code point as Python orders them - assumed rather than
+confirmed, because it is the assumption that would catch a store relying on
+Python's order.
 """
 
 import json
@@ -69,7 +72,7 @@ class FakeContainer:
                 key = _ORDER_KEY.match(text)
                 assert key, f"the fake does not understand the ordering {text!r}"
                 keys.append(key[1])
-            found.sort(key=lambda item: tuple(item[k] for k in keys))
+            found.sort(key=lambda item: tuple(_cosmos_order(item[k]) for k in keys))
             found = found[: values[shape["limit"]]]
         return found
 
@@ -86,6 +89,14 @@ def _clause(text: str, values: dict[str, Any]):
         name, wanted = match[1], values[match[2]]
         return lambda item: any(word in wanted for word in item.get(name, []))
     raise AssertionError(f"the fake does not understand the clause {text!r}")
+
+
+def _cosmos_order(value: Any) -> Any:
+    # Strings by UTF-16 code unit rather than by code point as Python does. The
+    # two disagree past U+FFFF. Whether Cosmos orders this way is not confirmed
+    # (#185 review says it does), so the fake assumes the order that differs
+    # from Python's: a fake sorting the Python way would hide the difference.
+    return value.encode("utf-16-be") if isinstance(value, str) else value
 
 
 def _same(held: Any, value: Any) -> bool:

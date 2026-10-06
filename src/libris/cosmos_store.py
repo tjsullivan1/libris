@@ -155,6 +155,7 @@ def book_document(note: BookNote) -> dict[str, Any]:
         "isbn": keys.isbn,
         "google_books_id": keys.google_books_id,
         "title_key": keys.title_key,
+        "title_order": _code_point_order(keys.title_key),
         "author_key": keys.author_key,
         "titled": keys.title_key is not None,
         "words": sorted(keys.words),
@@ -179,6 +180,21 @@ def book_document(note: BookNote) -> dict[str, Any]:
     if len(wire) > _MAX_ITEM_BYTES:
         raise NotStorable("it is larger than the 2 MB Cosmos holds in one item")
     return document
+
+
+def _code_point_order(title_key: str | None) -> str | None:
+    """A title key spelled so any string ordering sorts it by code point.
+
+    The local stores sort titles in Python, by code point. Cosmos orders strings
+    by its own rules - by UTF-16 code unit, per #185 review, which would put a
+    character past U+FFFF before U+F900 - so ordering on the title itself could
+    cut a limited listing at a different book. Each code point as six hex digits is
+    ASCII of fixed width, which every ordering sorts the same, and sorts in the
+    order Python gives the title.
+    """
+    if title_key is None:
+        return None
+    return "".join(f"{ord(character):06x}" for character in title_key)
 
 
 def counts_document(buckets: dict[str | None, WordCounts]) -> dict[str, Any]:
@@ -399,7 +415,7 @@ class CosmosStore:
         documents = self._query(
             where,
             parameters,
-            order=" ORDER BY c.title_key ASC, c.libris_id ASC OFFSET 0 LIMIT @limit",
+            order=" ORDER BY c.title_order ASC, c.libris_id ASC OFFSET 0 LIMIT @limit",
         )
         return Listing(
             total=self.word_counts(status).total,

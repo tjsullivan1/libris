@@ -150,6 +150,6 @@ def get_extension_origins() -> list[str]:
     return list(origins)
 
 
-def get_cosmos_endpoint() -> Optional[str]:
+def get_cosmos_endpoint() -> str | None:
     """The Cosmos account `libris sync` pushes to, or None if none is set."""
     return get_config().get(COSMOS_ENDPOINT_KEY) or None

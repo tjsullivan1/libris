@@ -174,10 +174,12 @@ resource "azurerm_cosmosdb_sql_container" "books" {
     }
 
     # A listing orders by title and breaks ties on the Libris ID (ADR 0033).
-    # Cosmos refuses an ORDER BY on two paths without an index over both.
+    # Cosmos refuses an ORDER BY on two paths without an index over both. The
+    # title is ordered through `title_order`, an ASCII spelling of it, so the
+    # order does not depend on how Cosmos compares Unicode strings.
     composite_index {
       index {
-        path  = "/title_key"
+        path  = "/title_order"
         order = "Ascending"
       }
       index {
