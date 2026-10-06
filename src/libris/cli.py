@@ -582,14 +582,16 @@ def add(
 
 @app.command()
 def config(
-    vault_path: str = typer.Option(None, "--vault", help="Set the vault path"),
-    obsidian_vault: str = typer.Option(
+    vault_path: str | None = typer.Option(None, "--vault", help="Set the vault path"),
+    obsidian_vault: str | None = typer.Option(
         None,
         "--obsidian-vault",
         help="Set the Obsidian vault root path (for wikilink updates)",
     ),
-    api_key: str = typer.Option(None, "--api-key", help="Set the Google Books API key"),
-    cosmos_endpoint: str = typer.Option(
+    api_key: str | None = typer.Option(
+        None, "--api-key", help="Set the Google Books API key"
+    ),
+    cosmos_endpoint: str | None = typer.Option(
         None,
         "--cosmos-endpoint",
         help="Set the Cosmos account `libris sync` pushes to",
@@ -2992,7 +2994,7 @@ def _report_left_out(report: PushReport) -> None:
 
 @app.command()
 def sync(
-    endpoint: str = typer.Option(
+    endpoint: str | None = typer.Option(
         None,
         "--endpoint",
         envvar="LIBRIS_COSMOS_ENDPOINT",
