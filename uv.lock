@@ -679,7 +679,7 @@ wheels = [
 
 [[package]]
 name = "libris"
-version = "0.14.1"
+version = "0.15.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -705,6 +705,10 @@ server = [
     { name = "fastapi" },
     { name = "uvicorn" },
 ]
+sync = [
+    { name = "azure-cosmos" },
+    { name = "azure-identity" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -723,12 +727,13 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "azure-cosmos", marker = "extra == 'hosted'", specifier = ">=4.9" },
-    { name = "azure-identity", marker = "extra == 'hosted'", specifier = ">=1.19" },
+    { name = "azure-cosmos", marker = "extra == 'sync'", specifier = ">=4.9" },
+    { name = "azure-identity", marker = "extra == 'sync'", specifier = ">=1.19" },
     { name = "cryptography", marker = "extra == 'hosted'", specifier = ">=43" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "libris", extras = ["mcp"], marker = "extra == 'hosted'" },
+    { name = "libris", extras = ["sync"], marker = "extra == 'hosted'" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.1.1" },
     { name = "python-ulid", specifier = ">=4.0.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
@@ -738,7 +743,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'hosted'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.30" },
 ]
-provides-extras = ["server", "mcp", "hosted"]
+provides-extras = ["server", "mcp", "sync", "hosted"]
 
 [package.metadata.requires-dev]
 dev = [

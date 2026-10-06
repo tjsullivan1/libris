@@ -251,8 +251,12 @@ class ShelfStore:
 
 
 @dataclass(frozen=True)
-class _Document:
-    """One note as the remote replica stores it: the note and the keys sync computed."""
+class StoredKeys:
+    """One note as the remote replica stores it: the note and the keys sync computed.
+
+    Built by `stored_keys` alone, for the replica and for Cosmos alike, so the
+    two cannot compute a key differently (ADR 0032, ADR 0033).
+    """
 
     note: BookNote
     libris_id: str | None
@@ -263,6 +267,36 @@ class _Document:
     author_key: str | None
     words: frozenset[str]
     status: str | None
+
+
+def stored_keys(note: BookNote) -> StoredKeys:
+    """Compute the keys sync stores with a note, which the remote is queried on."""
+    return StoredKeys(
+        note=note,
+        libris_id=note.libris_id,
+        superseded_ids=tuple(note.superseded_ids),
+        isbn=note.isbn,
+        google_books_id=note.frontmatter.get("google_books_id"),
+        title_key=normalize_for_match(note.title) if note.title else None,
+        author_key=(
+            normalize_for_match(note.first_author) if note.first_author else None
+        ),
+        words=note_words(note) if note.title else frozenset(),
+        status=status_of(note),
+    )
+
+
+def count_by_status(documents: Iterable[StoredKeys]) -> dict[str | None, WordCounts]:
+    """The word counts sync stores, one bucket per Status found (ADR 0033).
+
+    Covers the titled notes only, and every Status value they carry, including
+    none, so the buckets split the searchable notes exactly.
+    """
+    titled = [d for d in documents if d.title_key is not None]
+    return {
+        status: _count(d.note for d in titled if d.status == status)
+        for status in {d.status for d in titled}
+    }
 
 
 @dataclass
@@ -278,47 +312,21 @@ class ReplicaStore:
     would not pass for it.
     """
 
-    documents: list[_Document]
+    documents: list[StoredKeys]
     buckets: dict[str | None, WordCounts]
 
     @classmethod
     def from_notes(cls, notes: Iterable[BookNote]) -> "ReplicaStore":
         """Build the replica sync would push for these notes."""
-        documents = []
-        for note in notes:
-            documents.append(
-                _Document(
-                    note=note,
-                    libris_id=note.libris_id,
-                    superseded_ids=tuple(note.superseded_ids),
-                    isbn=note.isbn,
-                    google_books_id=note.frontmatter.get("google_books_id"),
-                    title_key=normalize_for_match(note.title) if note.title else None,
-                    author_key=(
-                        normalize_for_match(note.first_author)
-                        if note.first_author
-                        else None
-                    ),
-                    words=note_words(note) if note.title else frozenset(),
-                    status=status_of(note),
-                )
-            )
-
-        buckets: dict[str | None, WordCounts] = {}
-        for status in {d.status for d in documents if d.title_key is not None}:
-            buckets[status] = _count(
-                d.note
-                for d in documents
-                if d.title_key is not None and d.status == status
-            )
-        return cls(documents=documents, buckets=buckets)
+        documents = [stored_keys(note) for note in notes]
+        return cls(documents=documents, buckets=count_by_status(documents))
 
     @classmethod
     def from_shelf(cls, vault_path: Path) -> "ReplicaStore":
         """Build the replica sync would push from the Shelf as it stands now."""
         return cls.from_notes(index_for(vault_path).notes())
 
-    def _titled(self, status: str | None) -> list[_Document]:
+    def _titled(self, status: str | None) -> list[StoredKeys]:
         return [
             d
             for d in self.documents

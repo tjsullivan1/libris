@@ -103,6 +103,24 @@ terraform -chdir=infra apply -var image_tag=<tag>
 
 A new tag every time. Reusing a tag leaves the running revision on the old image.
 
+## Pushing the Shelf
+
+`libris sync` copies every Book Note into the `books` container, then rebuilds the word counts
+that remote searches are weighed by (ADR 0033). It runs on the PC that holds the Shelf, signed in
+as you through `az login`. Terraform gives your sign-in the data role for this, and no key is
+involved.
+
+```bash
+uv sync --all-extras    # once: the sync extra brings the Azure SDKs
+uv run --no-sync libris config --cosmos-endpoint "$(terraform -chdir=infra output -raw cosmos_endpoint)"
+uv run --no-sync libris sync
+```
+
+It refuses to push anything while two notes share a Libris ID, and names them: the remote would
+keep one and the Shelf two. A note it cannot push, such as one with no Libris ID, is named and
+the sync exits non-zero, while the rest still go up. Every sync pushes every note. Pushing only
+what changed, and removing what left the Shelf, is #174.
+
 ## Running it locally
 
 ```bash

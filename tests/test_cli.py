@@ -3142,3 +3142,126 @@ def test_merge_keeps_both_notes_when_the_primary_is_edited_mid_merge(
         "Typed in Obsidian." in path.read_text(encoding="utf-8")
         for path in vault.glob("*.md")
     )
+
+
+# --- libris sync (#173) ---
+
+
+def _stopped_cleanly(result) -> bool:
+    """Whether a command exited 1 on purpose, rather than crashing with exit 1."""
+    return result.exit_code == 1 and type(result.exception) is SystemExit
+
+
+def _sync_to_fakes(monkeypatch, tmp_path):
+    """Point `libris sync` at fake containers and a Shelf; return the containers."""
+    pytest.importorskip("azure.core")
+    from cosmos_fake import FakeContainer
+
+    books, counts = FakeContainer(), FakeContainer()
+    reached = []
+
+    def _connect(endpoint, database):
+        reached.append((endpoint, database))
+        return books, counts
+
+    monkeypatch.setattr("libris.cli.connect_containers", _connect)
+    config.set_book_vault_path(tmp_path)
+    config.set_config(config.COSMOS_ENDPOINT_KEY, "https://cosmos.example")
+    return books, counts, reached
+
+
+def _shelved(vault, name, frontmatter):
+    (vault / name).write_text(f"---\n{frontmatter}---\n", encoding="utf-8")
+
+
+def test_sync_pushes_the_shelf_to_the_configured_account(monkeypatch, tmp_path):
+    # Given a Shelf of two notes and a configured Cosmos endpoint
+    books, counts, reached = _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then both notes and the word counts go to that account
+    assert result.exit_code == 0, result.output
+    assert reached == [("https://cosmos.example", "libris")]
+    assert sorted(books.items) == ["01D", "01E"]
+    assert "word-counts" in counts.items
+    assert "Pushed 2 note(s)" in result.output
+
+
+def test_sync_refuses_two_notes_sharing_an_id_and_names_them(monkeypatch, tmp_path):
+    # Given two notes claiming one Libris ID
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01SAME\n")
+    _shelved(tmp_path, "dune-copy.md", "title: Dune\nlibris_id: 01SAME\n")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then it fails, naming the ID and both notes, and pushes nothing
+    assert _stopped_cleanly(result)
+    assert "01SAME" in result.output
+    assert "dune.md" in result.output
+    assert "dune-copy.md" in result.output
+    assert "Nothing was pushed" in result.output
+    assert books.items == {}
+
+
+def test_sync_fails_when_the_word_counts_are_not_rebuilt(monkeypatch, tmp_path):
+    # Given a word-counts container that refuses writes
+    _, counts, _ = _sync_to_fakes(monkeypatch, tmp_path)
+    counts.fail_writes = OSError("throttled")
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then it exits non-zero and says the counts are stale
+    assert _stopped_cleanly(result)
+    assert "word counts were not" in result.output
+    assert "throttled" in result.output
+
+
+def test_sync_names_a_note_it_could_not_push_and_fails(monkeypatch, tmp_path):
+    # Given a note with no Libris ID beside one with
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(tmp_path, "nameless.md", "title: Emma\n")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the rest go up, the missing one is named, and the exit says so
+    assert list(books.items) == ["01D"]
+    assert "nameless.md" in result.output
+    assert "libris migrate" in result.output
+    assert _stopped_cleanly(result)
+
+
+def test_sync_without_an_endpoint_says_how_to_set_one(monkeypatch, tmp_path):
+    # Given no Cosmos endpoint anywhere
+    pytest.importorskip("azure.core")
+    monkeypatch.delenv("LIBRIS_COSMOS_ENDPOINT", raising=False)
+    config.set_book_vault_path(tmp_path)
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then it stops and says how to configure one
+    assert _stopped_cleanly(result)
+    assert "libris config --cosmos-endpoint" in result.output
+
+
+def test_sync_reports_a_missing_sync_extra_clearly(monkeypatch):
+    # Given libris installed without the sync extra
+    monkeypatch.setitem(sys.modules, "azure.core.exceptions", None)
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then it says what to install rather than raising an ImportError
+    assert _stopped_cleanly(result)
+    assert "--extra sync" in result.output
+    assert "Traceback" not in result.output

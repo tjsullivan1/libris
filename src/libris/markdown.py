@@ -117,6 +117,40 @@ class BookNote:
             return None
         return cls(path=path, frontmatter=frontmatter)
 
+    @classmethod
+    def read_whole(cls, path: Path) -> "BookNote | None":
+        """Read a Book Note from disk with its body, in one read.
+
+        `read` leaves the body out, because no Library question looks at it.
+        Sync pushes the whole note (ADR 0006), and reading the body separately
+        would be a second chance for the note to change in between.
+
+        Args:
+            path: Path to the Markdown file.
+
+        Returns:
+            The Book Note, or None if the file is not UTF-8 or has no
+            parseable frontmatter - the notes `read` also returns None for.
+        """
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Not UTF-8, so not a note this can parse - the same answer as
+            # broken YAML. Raised, it escaped every Shelf query: one such file
+            # on the Shelf made `search_library` fail for every book (#127
+            # review).
+            return None
+        split = split_frontmatter(content)
+        if split is None:
+            return None
+        try:
+            data = parse_frontmatter_yaml(split[0])
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return cls(path=path, frontmatter=data, body=split[1])
+
     @property
     def libris_id(self) -> str | None:
         """The note's stable identity, or None until the vault is migrated."""
@@ -1284,21 +1318,8 @@ def find_duplicates(
 
 def read_frontmatter(file_path: Path) -> Optional[Dict[str, Any]]:
     """Read and return the frontmatter dict from a markdown file, or None."""
-    try:
-        content = file_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        # Not UTF-8, so not a note this can parse - the same answer as broken
-        # YAML. Raised, it escaped every Shelf query: one such file on the Shelf
-        # made `search_library` fail for every book (#127 review).
-        return None
-    split = split_frontmatter(content)
-    if split is None:
-        return None
-    try:
-        data = parse_frontmatter_yaml(split[0])
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+    note = BookNote.read_whole(file_path)
+    return None if note is None else note.frontmatter
 
 
 def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
