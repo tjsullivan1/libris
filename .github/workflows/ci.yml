@@ -20,7 +20,7 @@ jobs:
         # any every other command still does, and with all they coexist.
         # `hosted` is the exact install the Dockerfile makes. `all` cannot stand
         # in for it, because another extra could supply something hosted forgot.
-        extras: ["none", "server", "mcp", "hosted", "all"]
+        extras: ["none", "server", "mcp", "sync", "hosted", "all"]
         include:
           - extras: "none"
             sync-args: ""
@@ -28,6 +28,8 @@ jobs:
             sync-args: "--extra server"
           - extras: "mcp"
             sync-args: "--extra mcp"
+          - extras: "sync"
+            sync-args: "--extra sync"
           - extras: "hosted"
             sync-args: "--extra hosted"
           - extras: "all"
@@ -53,6 +55,11 @@ jobs:
         if: matrix.extras == 'mcp' || matrix.extras == 'hosted' || matrix.extras == 'all'
         run: uv run python -c "from mcp.server import MCPServer"
 
+      # `libris sync` on a PC: the Cosmos SDK and the credential it signs in with.
+      - name: Verify the sync extra installed
+        if: matrix.extras == 'sync' || matrix.extras == 'hosted' || matrix.extras == 'all'
+        run: uv run python -c "import azure.core.exceptions, azure.cosmos, azure.identity"
+
       # The container's own entry point and store, imported the way it imports
       # them, so a dependency hosted needs but does not declare fails here.
       - name: Verify the hosted extra installed
@@ -67,7 +74,7 @@ jobs:
         run: |
           uv run python - <<'PY'
           import importlib.util, sys
-          leaked = [m for m in ("fastapi", "mcp") if importlib.util.find_spec(m)]
+          leaked = [m for m in ("fastapi", "mcp", "azure") if importlib.util.find_spec(m)]
           if leaked:
               sys.exit(f"The no-extras leg installed: {', '.join(leaked)}")
           PY

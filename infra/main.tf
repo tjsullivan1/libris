@@ -149,6 +149,69 @@ resource "azurerm_cosmosdb_sql_container" "auth" {
   default_ttl         = -1
 }
 
+# One document per Book Note, keyed and partitioned by Libris ID (ADR 0006),
+# written by `libris sync` (#173). Only the keys a store is queried on are
+# indexed: the frontmatter and the body are carried, never searched, and
+# indexing them would bill every push for paths no query reads.
+resource "azurerm_cosmosdb_sql_container" "books" {
+  name                = "books"
+  resource_group_name = azurerm_resource_group.main.name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.libris.name
+  partition_key_paths = ["/id"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/*"
+    }
+    excluded_path {
+      path = "/frontmatter/*"
+    }
+    excluded_path {
+      path = "/body/?"
+    }
+
+    # A listing orders by title and breaks ties on the Libris ID (ADR 0033).
+    # Cosmos refuses an ORDER BY on two paths without an index over both. The
+    # title is ordered through `title_order`, an ASCII spelling of it, so the
+    # order does not depend on how Cosmos compares Unicode strings.
+    composite_index {
+      index {
+        path  = "/title_order"
+        order = "Ascending"
+      }
+      index {
+        path  = "/libris_id"
+        order = "Ascending"
+      }
+    }
+  }
+}
+
+# The word counts per Status, one document rebuilt at every sync (ADR 0033).
+# Read by id only, so the counts themselves - about 8,000 words a bucket - are
+# left out of the index.
+resource "azurerm_cosmosdb_sql_container" "word_counts" {
+  name                = "word_counts"
+  resource_group_name = azurerm_resource_group.main.name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.libris.name
+  partition_key_paths = ["/id"]
+
+  indexing_policy {
+    indexing_mode = "consistent"
+
+    included_path {
+      path = "/*"
+    }
+    excluded_path {
+      path = "/buckets/*"
+    }
+  }
+}
+
 locals {
   cosmos_data_contributor = "${azurerm_cosmosdb_account.main.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
 }

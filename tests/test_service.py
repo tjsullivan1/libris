@@ -249,9 +249,10 @@ def test_a_live_libris_id_resolves(tmp_path, open_store):
     # When it is looked up by its identity
     found = find_by_libris_id(open_store(tmp_path), note.libris_id)
 
-    # Then it is found
+    # Then it is found. By filename: the remote store holds no Shelf to put a
+    # path in, and a filename is unique within one
     assert found is not None
-    assert found.path == path
+    assert found.path.name == path.name
 
 
 def test_a_superseded_id_resolves_to_the_survivor(tmp_path, open_store):
@@ -268,7 +269,7 @@ def test_a_superseded_id_resolves_to_the_survivor(tmp_path, open_store):
     # Then it resolves to the surviving note rather than missing, so the Intent
     # applies instead of being rejected for a note Libris itself destroyed
     assert found is not None
-    assert found.path == path
+    assert found.path.name == path.name
 
 
 def test_an_unknown_libris_id_does_not_resolve(tmp_path, open_store):
@@ -297,7 +298,7 @@ def test_a_live_id_wins_over_a_superseded_one(tmp_path, open_store):
     found = find_by_libris_id(open_store(tmp_path), live_id)
 
     # Then the note that actually holds the identity wins
-    assert found.path == live
+    assert found.path.name == live.name
 
 
 def test_a_blank_libris_id_does_not_resolve(tmp_path, open_store):

@@ -6,7 +6,10 @@ remote one: it holds what sync would push, and answers from the stored keys,
 words and per-Status word counts rather than from the notes themselves.
 """
 
+from pathlib import Path
+
 import pytest
+from conftest import pushed_to_cosmos
 
 from libris.service import search_library
 from libris.shelf import index_for
@@ -14,7 +17,13 @@ from libris.store import ReplicaStore, ShelfStore, search_tokens
 
 
 def _note(vault, name, title=None, authors=("An Author",), **fields):
-    """Write a Book Note with exactly the frontmatter given."""
+    """Write a Book Note with the frontmatter given, and a Libris ID.
+
+    The ID is made from the filename unless one is given. Every note on the real
+    Shelf carries one, and the remote cannot hold a note without one (ADR 0033),
+    so a note lacking one would test a Shelf sync refuses to mirror.
+    """
+    fields.setdefault("libris_id", "01" + Path(name).stem.upper())
     lines = []
     if title is not None:
         lines.append(f"title: {title}")
@@ -288,14 +297,17 @@ def _shelf(vault):
 
 
 def _stores(vault):
-    """The Shelf, and a replica built from its notes in the opposite order.
+    """The Shelf; a replica built from its notes in the opposite order; and Cosmos.
 
     Reversed because the remote returns documents in its own order, not the
     Shelf's directory order. A replica built in the same order would agree with
-    the Shelf on every tie whether or not anything broke the tie.
+    the Shelf on every tie whether or not anything broke the tie. The fake Cosmos
+    container returns the newest push first for the same reason.
     """
-    return ShelfStore(vault), ReplicaStore.from_notes(
-        reversed(index_for(vault).notes())
+    return (
+        ShelfStore(vault),
+        ReplicaStore.from_notes(reversed(index_for(vault).notes())),
+        pushed_to_cosmos(vault),
     )
 
 
@@ -320,18 +332,18 @@ def _answer(store, query, status, limit):
         pytest.param(None, "To Read", 2, id="listed-ties-cut-by-the-limit"),
     ],
 )
-def test_a_query_answers_the_same_from_the_shelf_and_the_replica(
+def test_a_query_answers_the_same_from_the_shelf_and_the_remote(
     tmp_path, query, status, limit
 ):
-    # Given a Shelf, and the replica sync would push from it
+    # Given a Shelf, the replica sync would push from it, and Cosmos after a push
     _shelf(tmp_path)
-    shelf, replica = _stores(tmp_path)
+    shelf, replica, cosmos = _stores(tmp_path)
 
-    # When the same search is asked of both
-    # Then both return the same books, in the same order, with the same total
-    assert _answer(replica, query, status, limit) == _answer(
-        shelf, query, status, limit
-    )
+    # When the same search is asked of all three
+    # Then all return the same books, in the same order, with the same total
+    expected = _answer(shelf, query, status, limit)
+    assert _answer(replica, query, status, limit) == expected
+    assert _answer(cosmos, query, status, limit) == expected
 
 
 # The parity above would hold if both stores went wrong the same way. These pin
@@ -400,3 +412,17 @@ def test_a_query_of_only_filler_is_taken_at_face_value(tmp_path):
 
         # Then "The Road" is found rather than nothing
         assert "road.md" in names
+
+
+def test_a_listing_orders_titles_past_u_ffff_by_code_point_everywhere(tmp_path):
+    # Given two titles that code point order and UTF-16 order disagree on:
+    # U+F900 comes first by code point, U+10428 first by UTF-16 code unit, whose
+    # surrogate pair begins at U+D801
+    _note(tmp_path, "cjk.md", "豈", status="Read", libris_id="01B")
+    _note(tmp_path, "deseret.md", "\U00010428", status="Read", libris_id="01A")
+
+    # When the first title in Read is listed from each store
+    answers = [_answer(store, None, "Read", 1) for store in _stores(tmp_path)]
+
+    # Then every store cuts the page at the same book, the one first by code point
+    assert answers == [(2, ["cjk.md"])] * 3

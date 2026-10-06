@@ -10,13 +10,22 @@ import typer
 from . import installed_version
 from .api import GoogleBooksClient
 from .config import (
+    COSMOS_ENDPOINT_KEY,
     VaultNotConfigured,
     ensure_server_token,
+    get_cosmos_endpoint,
     get_obsidian_vault_root,
     get_vault_path,
     is_vault_configured,
     set_book_vault_path,
     set_config,
+)
+from .cosmos_store import (
+    CountsNotRebuilt,
+    PushReport,
+    SyncRefused,
+    connect_containers,
+    push_shelf,
 )
 from .importer import SUPPORTED_FORMATS, run_import
 from .markdown import (
@@ -573,14 +582,21 @@ def add(
 
 @app.command()
 def config(
-    vault_path: str = typer.Option(None, "--vault", help="Set the vault path"),
-    obsidian_vault: str = typer.Option(
+    vault_path: str | None = typer.Option(None, "--vault", help="Set the vault path"),
+    obsidian_vault: str | None = typer.Option(
         None,
         "--obsidian-vault",
         help="Set the Obsidian vault root path (for wikilink updates)",
     ),
-    api_key: str = typer.Option(None, "--api-key", help="Set the Google Books API key"),
-):
+    api_key: str | None = typer.Option(
+        None, "--api-key", help="Set the Google Books API key"
+    ),
+    cosmos_endpoint: str | None = typer.Option(
+        None,
+        "--cosmos-endpoint",
+        help="Set the Cosmos account `libris sync` pushes to",
+    ),
+) -> None:
     """Configure libris settings."""
     if vault_path:
         p = Path(vault_path).expanduser().resolve()
@@ -605,7 +621,11 @@ def config(
         set_config("google_books_api_key", api_key)
         typer.echo("API key set successfully.")
 
-    if not vault_path and not api_key and not obsidian_vault:
+    if cosmos_endpoint:
+        set_config(COSMOS_ENDPOINT_KEY, cosmos_endpoint)
+        typer.echo(f"Cosmos endpoint set to: {cosmos_endpoint}")
+
+    if not vault_path and not api_key and not obsidian_vault and not cosmos_endpoint:
         from .config import get_api_key
 
         # `libris config` with no arguments is how a person finds out what is
@@ -622,6 +642,7 @@ def config(
             typer.echo(f"API key: {'*' * (len(key) - 4)}{key[-4:]}")
         else:
             typer.echo("API key: Not set")
+        typer.echo(f"Cosmos endpoint: {get_cosmos_endpoint() or 'Not set'}")
 
 
 @app.command()
@@ -2915,7 +2936,7 @@ def serve(
     allow_remote: bool = typer.Option(
         False, "--allow-remote", help="Allow binding an interface other than loopback."
     ),
-):
+) -> None:
     """Run the local daemon that the browser extension talks to."""
     if show_token:
         typer.echo(ensure_server_token())
@@ -2935,7 +2956,7 @@ def serve(
     except ImportError:
         typer.echo("The server extra is not installed, so `libris serve` cannot run.")
         typer.echo("Install it with: uv sync --extra server")
-        typer.echo("or, outside this repo: pip install 'libris[server]'")
+        typer.echo("or, outside this repo: uv tool install 'libris[server]'")
         raise typer.Exit(1) from None
 
     if not is_vault_configured():
@@ -2952,8 +2973,87 @@ def serve(
     server.run(host=host, port=port, reload=reload)
 
 
+def _report_left_out(report: PushReport) -> None:
+    """Name every note a push could not send, so none is missed in silence."""
+    if report.without_id:
+        typer.echo(f"\n{len(report.without_id)} note(s) have no Libris ID:")
+        for path in report.without_id:
+            typer.echo(f"  {path.name}")
+        typer.echo("  `libris migrate` gives each one.")
+    if report.unreadable:
+        typer.echo(f"\n{len(report.unreadable)} note(s) could not be read:")
+        for path in report.unreadable:
+            typer.echo(f"  {path.name}")
+    if report.not_storable:
+        typer.echo(
+            f"\n{len(report.not_storable)} note(s) Cosmos cannot hold as written:"
+        )
+        for path, reason in report.not_storable:
+            typer.echo(f"  {path.name}: {reason}")
+
+
 @app.command()
-def mcp():
+def sync(
+    endpoint: str | None = typer.Option(
+        None,
+        "--endpoint",
+        envvar="LIBRIS_COSMOS_ENDPOINT",
+        help="The Cosmos account to push to. Defaults to `libris config`'s.",
+    ),
+    database: str = typer.Option(
+        "libris", "--database", envvar="LIBRIS_COSMOS_DATABASE"
+    ),
+) -> None:
+    """Push the Shelf to the remote Library in Cosmos.
+
+    Pushes every Book Note, then rebuilds the word counts searches are weighed
+    by. Signs in as whoever `DefaultAzureCredential` finds - `az login` on a PC.
+    Exits non-zero if anything was left out, so an unattended run is noticed.
+    """
+    try:
+        from azure.core.exceptions import AzureError
+    except ImportError:
+        typer.echo("The sync extra is not installed, so `libris sync` cannot run.")
+        typer.echo("Install it with: uv sync --extra sync")
+        typer.echo("or, outside this repo: uv tool install 'libris[sync]'")
+        raise typer.Exit(1) from None
+
+    endpoint = endpoint or get_cosmos_endpoint()
+    if not endpoint:
+        typer.echo("No Cosmos endpoint is set. Set one with:")
+        typer.echo(
+            "  libris config --cosmos-endpoint https://<account>.documents.azure.com"
+        )
+        raise typer.Exit(1)
+    vault_path = _require_vault_path()
+
+    try:
+        books, counts = connect_containers(endpoint, database)
+        report = push_shelf(vault_path, books, counts)
+    except SyncRefused as refused:
+        _report_id_collisions(refused.collisions)
+        typer.echo(
+            "\nNothing was pushed. The remote would keep one note per Libris ID, "
+            "so it would hold fewer books than the Shelf (ADR 0033)."
+        )
+        raise typer.Exit(1) from None
+    except CountsNotRebuilt as error:
+        typer.echo(f"The notes were pushed, but the word counts were not: {error}")
+        typer.echo("Remote searches rank against the old counts until a sync succeeds.")
+        raise typer.Exit(1) from None
+    except AzureError as error:
+        typer.echo(f"Cosmos refused the sync: {error}")
+        raise typer.Exit(1) from None
+
+    typer.echo(f"Pushed {report.pushed} note(s) to Cosmos.")
+    if not report.complete:
+        _report_left_out(report)
+        typer.echo("\nThe remote Library cannot find these until they are pushed.")
+        raise typer.Exit(1)
+
+
+@app.command()
+def mcp() -> None:
     """Run the MCP server an agent drives, over stdio.
 
     Speaks JSON-RPC on stdin and stdout, so it is started by an MCP client
@@ -2974,7 +3074,7 @@ def mcp():
             "The mcp extra is not installed, so `libris mcp` cannot run.", err=True
         )
         typer.echo("Install it with: uv sync --extra mcp", err=True)
-        typer.echo("or, outside this repo: pip install 'libris[mcp]'", err=True)
+        typer.echo("or, outside this repo: uv tool install 'libris[mcp]'", err=True)
         raise typer.Exit(1) from None
 
     if not is_vault_configured():

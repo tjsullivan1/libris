@@ -10,6 +10,7 @@ A simple CLI tool to track your reading list in Obsidian. The name comes from th
 - Interactive search and selection.
 - Clip books from a book page with the [browser extension](#browser-extension).
 - Search and update your Library [from an assistant](#talking-to-libris-from-an-agent) over MCP.
+- Push the Shelf to a [remote Library](#14-push-the-shelf-to-the-remote-library) in Azure for the hosted server.
 
 ## Installation
 Ensure you have `uv` installed.
@@ -240,6 +241,19 @@ Renamed 1 note(s); left 0 alone.
 
 The name comes from the frontmatter rather than from another question, so the file ends up saying exactly what the note says. Two things follow from that, and both are why it asks per note rather than sweeping: where a filename carries more than its note does - an author's dates, a pen name, an alternative spelling - that text is not carried across; and a note whose frontmatter is still damaged is refused, because the name it would be given would carry the lost character too.
 
+### 14. Push the Shelf to the remote Library
+
+`libris sync` copies every Book Note to the remote Library in Azure Cosmos DB, which the hosted Libris server reads from. The Shelf stays the source of truth: the remote changes only when you sync. Deploying the remote Library itself is covered in [infra/README.md](infra/README.md).
+
+```bash
+uv tool install 'libris[sync]'     # anywhere else; in this repo, uv sync --all-extras
+az login                            # sync signs in as you; no key is involved
+libris config --cosmos-endpoint https://<account>.documents.azure.com
+libris sync
+```
+
+Sync refuses to push anything while two notes share a Libris ID, and names them, because the remote would keep only one. A note it cannot push - one with no Libris ID, say, which `libris migrate` gives - is named, and the command exits non-zero while every other note still goes up.
+
 ## Browser extension
 
 Clip the book on an Amazon or Goodreads page straight into your Library. The extension talks to a
@@ -430,7 +444,7 @@ value for "leave this alone" would otherwise erase a field nobody mentioned.
 | No Shelf is configured | The server is running but has no vault. Run `libris config --vault <path>`. |
 | Google Books has no volume '…' | The id was not one `find_book` returned. Ask it again rather than composing an id. |
 | Google Books could not be reached | The lookup failed upstream, and nothing was written. It also answers this for a badly-shaped id, because that is what the API returns. |
-| The mcp extra is not installed | `uv sync --extra mcp`, or `pip install 'libris[mcp]'`. |
+| The mcp extra is not installed | `uv sync --extra mcp`, or `uv tool install 'libris[mcp]'` outside this repo. |
 | The server never connects | Check the command runs on its own: `uv run --directory /path/to/libris libris mcp` should sit there waiting for input rather than exiting. |
 
 ## Schema

@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import pytest
+from cosmos_fake import FakeContainer
 
+from libris.cosmos_store import CosmosStore, push_shelf
 from libris.store import ReplicaStore, ShelfStore
 
 _WRITE_MODES = set("wax+")
@@ -16,20 +18,29 @@ def mock_config_dir(tmp_path, monkeypatch):
     return config_dir
 
 
-@pytest.fixture(params=["shelf", "replica"])
-def open_store(request):
-    """Open a store over a Shelf directory, as the Shelf or as its replica.
+def pushed_to_cosmos(vault: Path) -> CosmosStore:
+    """Push a Shelf to fake Cosmos containers, and open the store over them."""
+    books, counts = FakeContainer(), FakeContainer()
+    push_shelf(vault, books, counts)
+    return CosmosStore(books, counts)
 
-    A test taking this runs twice, so every question it asks is answered once by
-    the live Shelf and once by a replica built from the same notes, as sync
-    would build the remote one (ADR 0020, ADR 0033). The replica is built when
-    the test opens it, so open it after the notes are written.
+
+@pytest.fixture(params=["shelf", "replica", "cosmos"])
+def open_store(request):
+    """Open a store over a Shelf directory: as the Shelf, its replica, or Cosmos.
+
+    A test taking this runs three times, so every question it asks is answered
+    by the live Shelf, by a replica built from the same notes, and by Cosmos
+    after a push of them (ADR 0020, ADR 0033). The other two are built when the
+    test opens them, so open it after the notes are written.
     """
 
     def _open(vault):
         if request.param == "shelf":
             return ShelfStore(vault)
-        return ReplicaStore.from_shelf(vault)
+        if request.param == "replica":
+            return ReplicaStore.from_shelf(vault)
+        return pushed_to_cosmos(vault)
 
     return _open
 

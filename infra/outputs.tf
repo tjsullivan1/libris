@@ -21,3 +21,8 @@ output "suffix" {
   description = "The suffix every resource name ends in. Set it as `suffix` to pin it."
   value       = local.suffix
 }
+
+output "cosmos_endpoint" {
+  description = "Where `libris sync` pushes the Shelf. Set it with `libris config --cosmos-endpoint`."
+  value       = azurerm_cosmosdb_account.main.endpoint
+}
