@@ -417,7 +417,11 @@ def test_serve_reports_a_missing_server_extra_clearly(monkeypatch):
 
 
 def test_mcp_reports_a_missing_mcp_extra_clearly(monkeypatch):
-    # Given libris installed without the mcp extra, cleared as for `serve` above
+    # Given libris installed without the mcp extra, cleared as for `serve` above.
+    # Every mcp module, not just the package: `from mcp.server import ...` is
+    # answered from a cached `mcp.server` once another test has imported it.
+    for name in [m for m in sys.modules if m == "mcp" or m.startswith("mcp.")]:
+        monkeypatch.setitem(sys.modules, name, None)
     monkeypatch.setitem(sys.modules, "mcp", None)
     monkeypatch.delitem(sys.modules, "libris.mcp_server", raising=False)
     monkeypatch.delattr(libris, "mcp_server", raising=False)
