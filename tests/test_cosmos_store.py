@@ -7,6 +7,8 @@ sharing an identity stop the push, and the word counts are rebuilt every time
 (ADR 0006, ADR 0033).
 """
 
+import json
+
 import pytest
 from cosmos_fake import FakeContainer
 
@@ -236,3 +238,26 @@ def test_a_remote_no_sync_finished_on_says_so_rather_than_answering_empty(tmp_pa
         store.listing("Read", limit=10)
     with pytest.raises(CountsMissing):
         store.word_counts(None)
+
+
+def test_a_note_is_measured_as_cosmos_counts_it(tmp_path):
+    # Given a note just under 2 MB as compact JSON, which the spaces a default
+    # `json.dumps` puts after every comma in its 4,000-item list would push over
+    items = "".join(f"  - t{n}\n" for n in range(4000))
+    _write(tmp_path, "dune.md", f"title: Dune\nlibris_id: 01D\ntags:\n{items}")
+    room = 2 * 1024 * 1024 - len(
+        json.dumps(_push(tmp_path)[1].items["01D"], separators=(",", ":")).encode()
+    )
+    _write(
+        tmp_path,
+        "dune.md",
+        f"title: Dune\nlibris_id: 01D\ntags:\n{items}",
+        body="\nMy notes.\n" + "x" * (room - 2000),
+    )
+
+    # When the Shelf is pushed
+    report, books, _ = _push(tmp_path)
+
+    # Then it goes up, since the SDK sends it compact
+    assert report.not_storable == []
+    assert list(books.items) == ["01D"]

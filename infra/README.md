@@ -116,6 +116,10 @@ uv run --no-sync libris config --cosmos-endpoint "$(terraform -chdir=infra outpu
 uv run --no-sync libris sync
 ```
 
+In this repo, `--all-extras` rather than `--extra sync`. As with running the app locally, `uv sync`
+removes any extra it isn't asked for, and the libris MCP server on the same PC needs `mcp`. Outside
+the repo, install only what sync needs: `uv tool install 'libris[sync]'`.
+
 It refuses to push anything while two notes share a Libris ID, and names them: the remote would
 keep one and the Shelf two. A note it cannot push, such as one with no Libris ID, is named and
 the sync exits non-zero, while the rest still go up. Every sync pushes every note. Pushing only
