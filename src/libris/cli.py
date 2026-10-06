@@ -594,7 +594,7 @@ def config(
         "--cosmos-endpoint",
         help="Set the Cosmos account `libris sync` pushes to",
     ),
-):
+) -> None:
     """Configure libris settings."""
     if vault_path:
         p = Path(vault_path).expanduser().resolve()
@@ -2934,7 +2934,7 @@ def serve(
     allow_remote: bool = typer.Option(
         False, "--allow-remote", help="Allow binding an interface other than loopback."
     ),
-):
+) -> None:
     """Run the local daemon that the browser extension talks to."""
     if show_token:
         typer.echo(ensure_server_token())
@@ -3001,7 +3001,7 @@ def sync(
     database: str = typer.Option(
         "libris", "--database", envvar="LIBRIS_COSMOS_DATABASE"
     ),
-):
+) -> None:
     """Push the Shelf to the remote Library in Cosmos.
 
     Pushes every Book Note, then rebuilds the word counts searches are weighed
@@ -3051,7 +3051,7 @@ def sync(
 
 
 @app.command()
-def mcp():
+def mcp() -> None:
     """Run the MCP server an agent drives, over stdio.
 
     Speaks JSON-RPC on stdin and stdout, so it is started by an MCP client

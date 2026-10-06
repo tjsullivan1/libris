@@ -169,11 +169,14 @@ def book_document(note: BookNote) -> dict[str, Any]:
         raise NotStorable(f"its frontmatter is not JSON: {error}") from None
     if json.loads(text) != document:
         raise NotStorable("its frontmatter would not come back from JSON unchanged")
-    # Measured as it goes over the wire: the SDK writes compact JSON, without the
-    # spaces `json.dumps` adds by default, and Cosmos counts UTF-8 bytes. Counting
-    # the spaces rejected notes Cosmos would hold (#185 review).
-    wire = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
-    if len(wire.encode("utf-8")) > _MAX_ITEM_BYTES:
+    # Measured exactly as the SDK sends it: compact, without the spaces
+    # `json.dumps` adds by default, and with non-ASCII escaped, as every write
+    # is unless the client opts into `enable_compact_utf8_item_writes`, which
+    # `connect_containers` does not. Counting the spaces refused notes Cosmos
+    # would hold; counting "é" as two UTF-8 bytes rather than the six of "é"
+    # let through notes it would refuse (#185 review).
+    wire = json.dumps(document, separators=(",", ":"))
+    if len(wire) > _MAX_ITEM_BYTES:
         raise NotStorable("it is larger than the 2 MB Cosmos holds in one item")
     return document
 

@@ -261,3 +261,19 @@ def test_a_note_is_measured_as_cosmos_counts_it(tmp_path):
     # Then it goes up, since the SDK sends it compact
     assert report.not_storable == []
     assert list(books.items) == ["01D"]
+
+
+def test_a_note_of_non_ascii_text_is_measured_as_the_sdk_escapes_it(tmp_path):
+    # Given a note of 400,000 accented letters: 0.8 MB as UTF-8, but 2.4 MB as
+    # the escaped JSON the SDK sends unless compact UTF-8 writes are enabled
+    _write(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n", body="é" * 400_000)
+    _write(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+
+    # When the Shelf is pushed
+    report, books, _ = _push(tmp_path)
+
+    # Then it is reported, rather than sent to fail and stop the push
+    assert list(books.items) == ["01E"]
+    ((path, why),) = report.not_storable
+    assert path.name == "dune.md"
+    assert "2 MB" in why
