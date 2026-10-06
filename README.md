@@ -430,7 +430,7 @@ value for "leave this alone" would otherwise erase a field nobody mentioned.
 | No Shelf is configured | The server is running but has no vault. Run `libris config --vault <path>`. |
 | Google Books has no volume '…' | The id was not one `find_book` returned. Ask it again rather than composing an id. |
 | Google Books could not be reached | The lookup failed upstream, and nothing was written. It also answers this for a badly-shaped id, because that is what the API returns. |
-| The mcp extra is not installed | `uv sync --extra mcp`, or `pip install 'libris[mcp]'`. |
+| The mcp extra is not installed | `uv sync --extra mcp`, or `uv tool install 'libris[mcp]'` outside this repo. |
 | The server never connects | Check the command runs on its own: `uv run --directory /path/to/libris libris mcp` should sit there waiting for input rather than exiting. |
 
 ## Schema

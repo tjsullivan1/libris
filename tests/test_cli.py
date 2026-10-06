@@ -409,7 +409,26 @@ def test_serve_reports_a_missing_server_extra_clearly(monkeypatch):
 
     # Then it says what to install rather than raising an ImportError at the user
     assert result.exit_code != 0
-    assert "libris[server]" in result.output
+    # Both for a checkout and for the `uv tool` install the README documents;
+    # `pip install` would land outside a uv tool's environment and change nothing
+    assert "uv sync --extra server" in result.output
+    assert "uv tool install 'libris[server]'" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_mcp_reports_a_missing_mcp_extra_clearly(monkeypatch):
+    # Given libris installed without the mcp extra, cleared as for `serve` above
+    monkeypatch.setitem(sys.modules, "mcp", None)
+    monkeypatch.delitem(sys.modules, "libris.mcp_server", raising=False)
+    monkeypatch.delattr(libris, "mcp_server", raising=False)
+
+    # When the MCP server is started
+    result = runner.invoke(app, ["mcp"])
+
+    # Then it says what to install, for a checkout and for a `uv tool` install
+    assert result.exit_code == 1
+    assert "uv sync --extra mcp" in result.output
+    assert "uv tool install 'libris[mcp]'" in result.output
     assert "Traceback" not in result.output
 
 
@@ -3263,5 +3282,6 @@ def test_sync_reports_a_missing_sync_extra_clearly(monkeypatch):
 
     # Then it says what to install rather than raising an ImportError
     assert _stopped_cleanly(result)
-    assert "--extra sync" in result.output
+    assert "uv sync --extra sync" in result.output
+    assert "uv tool install 'libris[sync]'" in result.output
     assert "Traceback" not in result.output

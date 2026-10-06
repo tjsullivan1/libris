@@ -2954,7 +2954,7 @@ def serve(
     except ImportError:
         typer.echo("The server extra is not installed, so `libris serve` cannot run.")
         typer.echo("Install it with: uv sync --extra server")
-        typer.echo("or, outside this repo: pip install 'libris[server]'")
+        typer.echo("or, outside this repo: uv tool install 'libris[server]'")
         raise typer.Exit(1) from None
 
     if not is_vault_configured():
@@ -3013,6 +3013,7 @@ def sync(
     except ImportError:
         typer.echo("The sync extra is not installed, so `libris sync` cannot run.")
         typer.echo("Install it with: uv sync --extra sync")
+        typer.echo("or, outside this repo: uv tool install 'libris[sync]'")
         raise typer.Exit(1) from None
 
     endpoint = endpoint or get_cosmos_endpoint()
@@ -3071,7 +3072,7 @@ def mcp():
             "The mcp extra is not installed, so `libris mcp` cannot run.", err=True
         )
         typer.echo("Install it with: uv sync --extra mcp", err=True)
-        typer.echo("or, outside this repo: pip install 'libris[mcp]'", err=True)
+        typer.echo("or, outside this repo: uv tool install 'libris[mcp]'", err=True)
         raise typer.Exit(1) from None
 
     if not is_vault_configured():

@@ -16,6 +16,7 @@ from libris.cosmos_store import (
     SyncRefused,
     push_shelf,
 )
+from libris.shelf import index_for
 
 
 def _write(vault, name, frontmatter, body="\nMy notes.\n"):
@@ -145,3 +146,21 @@ def test_a_failed_rebuild_fails_the_push(tmp_path):
     with pytest.raises(CountsNotRebuilt, match="unreachable"):
         push_shelf(tmp_path, books, counts)
     assert list(books.items) == ["01D"]
+
+
+def test_a_note_that_cannot_be_reread_is_reported_not_raised(tmp_path, lock_note):
+    # Given a Shelf the index has already read
+    _write(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _write(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+    index_for(tmp_path).notes()
+
+    # And one note is then locked, as a sync tool or an editor can hold it
+    lock_note(tmp_path / "emma.md", reads=True)
+
+    # When the Shelf is pushed
+    report, books, _ = _push(tmp_path)
+
+    # Then the rest go up, and the locked note is named rather than raised
+    assert list(books.items) == ["01D"]
+    assert [path.name for path in report.unreadable] == ["emma.md"]
+    assert not report.complete

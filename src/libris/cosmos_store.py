@@ -190,7 +190,13 @@ def push_shelf(vault_path: Path, books: Container, counts: Container) -> PushRep
     report = PushReport()
     pushed: list[StoredKeys] = []
     for listed in index.notes():
-        note = BookNote.read_whole(listed.path)
+        # The index read every note, but one can be locked, denied or removed
+        # since. That is the same race `ShelfIndex` reports rather than raises,
+        # and a crash here would push nothing and name nothing (#185 review).
+        try:
+            note = BookNote.read_whole(listed.path)
+        except OSError:
+            note = None
         if note is None:
             report.unreadable.append(listed.path)
             continue
