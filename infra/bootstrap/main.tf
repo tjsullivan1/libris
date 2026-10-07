@@ -19,6 +19,21 @@ provider "azurerm" {
   subscription_id = var.subscription_id
   # The account takes no access keys, so its data plane is reached through Entra.
   storage_use_azuread = true
+
+  # infra/ registers nothing: the deploy identity's roles stop at its resource
+  # group, and registering is subscription-wide. So on a clean subscription
+  # this is where the providers both roots use get registered, by a person
+  # who can. Registering one that already is changes nothing.
+  resource_provider_registrations = "none"
+  resource_providers_to_register = [
+    "Microsoft.App",
+    "Microsoft.ContainerRegistry",
+    "Microsoft.DocumentDB",
+    "Microsoft.KeyVault",
+    "Microsoft.ManagedIdentity",
+    "Microsoft.OperationalInsights",
+    "Microsoft.Storage",
+  ]
 }
 
 variable "subscription_id" {

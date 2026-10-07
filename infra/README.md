@@ -34,8 +34,10 @@ deploys on its own ([Deploying](#deploying)).
    ```
 
    `infra/bootstrap` keeps its own state locally (git-ignored). It holds no secret: the deploy
-   identity signs in with GitHub's OIDC token, so it has no password. Then put the suffix into the
-   `backend` block in `infra/versions.tf`, which can't read variables.
+   identity signs in with GitHub's OIDC token, so it has no password. It also registers the Azure
+   resource providers both roots use, since `infra/` runs with roles on one resource group and
+   can't. Then put the suffix into the `backend` block in `infra/versions.tf`, which can't read
+   variables.
 
 2. **Create the registry and environment**, everything but the app:
 
@@ -156,7 +158,7 @@ terraform init -migrate-state      # copies terraform.tfstate into the storage a
 ```
 
 Add `suffix`, `owner_object_id` and `deploy_principal_id` to `terraform.tfvars`, and
-`terraform apply`. The plan moves three resources to new names and destroys `random_string.suffix`,
+`terraform apply`. The plan moves four resources to new names and destroys `random_string.suffix`,
 which the pinned suffix replaces. Nothing in Azure changes except the two new role assignments for
 the deploy identity. Once the migration works, delete the local `terraform.tfstate` and its backup:
 they hold the signing key and the Google secret. Then do step 9.
