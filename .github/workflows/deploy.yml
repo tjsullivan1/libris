@@ -24,11 +24,16 @@ concurrency:
 jobs:
   deploy:
     # A workflow_run fires for every finished CI run, failed ones too, and for
-    # a pull request whose branch happens to be named main in a fork.
+    # a pull request whose branch happens to be named main in a fork. It also
+    # fires out of order: an older commit's CI can finish after a newer one's,
+    # and deploying it would roll production back. For workflow_run,
+    # github.sha is main's tip when the run fires, so only a run for the tip
+    # deploys. Whatever is newer has its own CI run coming, and deploys then.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push')
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_sha == github.sha)
     runs-on: ubuntu-latest
     environment: production
     env:
@@ -93,8 +98,35 @@ jobs:
             --resource-group "$(terraform -chdir=infra output -raw resource_group)" \
             --image "$registry.azurecr.io/libris-hosted:$COMMIT"
 
-      # The app scales to zero, so this also waits out a cold start. A revision
-      # that cannot start fails here rather than at the next person's question.
+      # In single-revision mode the previous revision keeps serving until the
+      # new one is ready, so /healthz alone would answer 200 from the old image
+      # while the new one failed to start. Wait for the latest revision to be
+      # the ready one and to run this commit's image, and fail on a revision
+      # that will not come up.
+      - name: Wait for the new revision
+        run: |
+          app="$(terraform -chdir=infra output -raw app_name)"
+          rg="$(terraform -chdir=infra output -raw resource_group)"
+          want="$(terraform -chdir=infra output -raw registry).azurecr.io/libris-hosted:$COMMIT"
+          for attempt in $(seq 1 40); do
+            read -r latest ready < <(az containerapp show --name "$app" --resource-group "$rg" \
+              --query "{l:properties.latestRevisionName, r:properties.latestReadyRevisionName}" -o tsv)
+            read -r image state < <(az containerapp revision show --name "$app" --resource-group "$rg" \
+              --revision "$latest" \
+              --query "{i:properties.template.containers[0].image, s:properties.provisioningState}" -o tsv)
+            echo "latest=$latest ready=$ready state=$state image=$image"
+            if [ "$state" = "Failed" ]; then
+              echo "::error::Revision $latest failed to provision"; exit 1
+            fi
+            if [ "$latest" = "$ready" ] && [ "$image" = "$want" ]; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::Revision $latest did not become ready running $want"; exit 1
+
+      # The app scales to zero, so this also waits out a cold start. With the
+      # new revision the ready one, this answer comes from it.
       - name: Check the new revision answers
         run: |
           mcp_url="$(terraform -chdir=infra output -raw mcp_url)"
