@@ -1,8 +1,9 @@
 # Hosted Libris
 
 The hosted MCP server (#171, ADR 0035): a Container App that signs people in through Google and
-lets one account in. This is the auth spike. Its only tool is `ping`, and the Library's tools
-arrive with #175.
+lets one account in. It serves the same tools as `libris mcp`, answered from what `libris sync`
+pushed to Cosmos (#175). The Library is read-only from here: `add_book` and `update_book` say
+that changes can't be made remotely yet, and write nothing.
 
 ## What you need
 
@@ -60,6 +61,8 @@ needs an image. And the right Google account ID is only known once someone tries
    ```hcl
    google_client_id     = "<client id>.apps.googleusercontent.com"
    google_client_secret = "<client secret>"
+   # Optional: find_book works without it, at Google's lower anonymous quota.
+   google_books_api_key = "<Google Books API key>"
    ```
 
 4. **Build the image in the registry**, from the repository root:
@@ -88,7 +91,8 @@ needs an image. And the right Google account ID is only known once someone tries
 7. **Connect for real**:
    - **Claude**: in **Customize → Connectors**, click **Connect** on the connector again and sign
      in. Changing the allowed account changes nothing in the connector's settings, so it doesn't
-     need removing. Then ask Claude to call the `ping` tool.
+     need removing. Then [push the Shelf](#pushing-the-shelf) and ask Claude whether you've
+     read a book you have.
    - **Gemini (untested).** Nobody has connected Gemini yet, and #180 tracks doing it. From
      Google's documentation, the route should be gemini.google.com, then **Settings → Connected
      apps → Add a custom app**, entering the same URL. It needs a personal Google account in the
@@ -140,7 +144,7 @@ reinstalls the project, which fails while a libris MCP server holds `libris.exe`
 applies to the `uv sync`. If it fails that way, stop the MCP server and run it again.
 
 Without `LIBRIS_COSMOS_ENDPOINT`, clients, tokens and sign-ins are kept in memory and lost on
-restart.
+restart, and there is no Library: the tools answer that the endpoint is not set.
 
 ## Troubleshooting
 
