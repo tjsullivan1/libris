@@ -167,23 +167,28 @@ def test_a_failed_create_never_removes_a_note_put_at_its_name_meanwhile(
 ):
     # Given a sync client that moves the half-written note aside and puts its
     # own note at the name, while the disk fills
-    from libris.markdown import create_note
+    from libris.markdown import NoteWriteFailed, create_note
 
     path = tmp_path / "Dune - Frank Herbert.md"
+    conflict = tmp_path / "Dune (conflict).md"
 
     def _sync_client_swaps_it():
-        path.rename(tmp_path / "Dune (conflict).md")
+        path.rename(conflict)
         path.write_text("My own notes.\n", encoding="utf-8")
 
     _fill_disk_while_creating(monkeypatch, path, meanwhile=_sync_client_swaps_it)
 
     # When the create fails
-    with pytest.raises(OSError):
+    with pytest.raises(NoteWriteFailed) as raised:
         create_note(path, "---\ntitle: Dune\n---\n\nBody.\n")
 
     # Then the note now at the name is not the one cleaned up (#193 review). An
     # unconditional removal deleted it.
     assert path.read_text(encoding="utf-8") == "My own notes.\n"
+    # And the partial copy, moved aside, is not passed off as nothing written:
+    # an OSError here reached every Surface as "Nothing was added"
+    assert conflict.exists()
+    assert "another name" in str(raised.value)
 
 
 def test_create_book_note_with_overrides(tmp_path):

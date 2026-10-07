@@ -417,9 +417,16 @@ class NoteWriteFailed(Exception):
         path: The note that may be damaged.
     """
 
-    def __init__(self, path: Path, cause: OSError, created: bool = False) -> None:
+    def __init__(
+        self, path: Path, cause: OSError, created: bool = False, moved: bool = False
+    ) -> None:
         self.path = path
-        if created:
+        if moved:
+            undone = (
+                "was moved or removed by another program before it could be "
+                "cleaned up, so a partial copy may be on the Shelf under another name."
+            )
+        elif created:
             undone = (
                 "could not be removed, so a partial note may be left at that name. "
                 "Delete it before adding the book again."
@@ -610,7 +617,8 @@ def create_note(path: Path, content: str) -> None:
         OSError: If the note cannot be created or written. A note created but
             not fully written is removed, so a failure leaves no partial note.
         NoteWriteFailed: If the write failed and the partial note could not be
-            removed. It may be left at `path`.
+            removed: it may be left at `path`, or, if another program moved it
+            meanwhile, under another name.
     """
     data = _encode_with_newline(content, note_newline(path))
     try:
@@ -626,15 +634,21 @@ def create_note(path: Path, content: str) -> None:
             handle.write(data)
     except OSError as exc:
         try:
-            _remove_if_still_ours(path, created)
+            removed = _remove_if_still_ours(path, created)
         except OSError:
             # Locked by a sync client the moment it closed, say. The note may be
             # partial, and "nothing was added" would be untrue (#193 review).
             raise NoteWriteFailed(path, exc, created=True) from exc
+        if not removed:
+            # Renamed aside while it was written - a sync client's conflict copy,
+            # say. The note now at the name is not this one and is left alone,
+            # but the partial note is somewhere, so this is not "nothing was
+            # added" either (#193 review).
+            raise NoteWriteFailed(path, exc, moved=True) from exc
         raise
 
 
-def _remove_if_still_ours(path: Path, created: os.stat_result) -> None:
+def _remove_if_still_ours(path: Path, created: os.stat_result) -> bool:
     """Remove the file at `path`, but only if it is the file this call created.
 
     Another process can rename or remove a file while it is being written - a
@@ -648,15 +662,21 @@ def _remove_if_still_ours(path: Path, created: os.stat_result) -> None:
         path: Where the note was created.
         created: The stat of the handle that created it.
 
+    Returns:
+        True if the file was removed. False if `path` no longer names it: it
+        was moved or removed by someone else, and another file may be there.
+
     Raises:
         OSError: If the file there cannot be examined or removed.
     """
     try:
         current = os.stat(path)
     except FileNotFoundError:
-        return
-    if os.path.samestat(created, current):
-        path.unlink(missing_ok=True)
+        return False
+    if not os.path.samestat(created, current):
+        return False
+    path.unlink(missing_ok=True)
+    return True
 
 
 def rewrite_note(path: Path, content: str, expected_sha256: str | None = None) -> None:
