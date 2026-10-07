@@ -51,6 +51,38 @@ describe("a failed add", () => {
     await expect(added).rejects.toThrow("already on the Shelf");
   });
 
+  it("shows why when a new note may have been left partly written", async () => {
+    // Given a daemon whose write failed and could not be undone (#193 review)
+    const detail =
+      "Dune - Frank Herbert.md failed partway through being written (No space " +
+      "left on device) and could not be removed, so a partial note may be left " +
+      "at that name. Delete it before adding the book again.";
+    fetch.mockResolvedValue(answer(500, { detail }));
+
+    // When the book is added
+    const added = createBook({ title: "Dune", authors: ["Frank Herbert"] });
+
+    // Then the person is told which note to look at, not to start the server
+    await expect(added).rejects.toMatchObject({ problem: Problem.REFUSED, detail });
+  });
+
+  it("still reads a 500 without a detail as unreachable", async () => {
+    // Given a daemon that failed without saying why
+    fetch.mockResolvedValue({
+      status: 500,
+      ok: false,
+      json: async () => {
+        throw new SyntaxError("not JSON");
+      },
+    });
+
+    // When the book is added
+    // Then nothing more specific is invented
+    await expect(
+      createBook({ title: "Dune", authors: ["Frank Herbert"] }),
+    ).rejects.toMatchObject({ problem: Problem.UNREACHABLE });
+  });
+
   it("still reads a 404 as something that is not Libris", async () => {
     // Given a base URL that answers, but is not the daemon
     fetch.mockResolvedValue(answer(404, {}));

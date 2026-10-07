@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from statistics import median
@@ -72,7 +73,11 @@ def test_create_book_note_never_replaces_a_file_under_its_name(tmp_path):
     assert isinstance(raised.value, FileExistsError)
 
 
-def _fill_disk_while_creating(monkeypatch, path, meanwhile=lambda: None):
+def _fill_disk_while_creating(
+    monkeypatch: pytest.MonkeyPatch,
+    path: Path,
+    meanwhile: Callable[[], None] = lambda: None,
+) -> None:
     """Make the next create of `path` fail partway, as a full disk does.
 
     Args:
@@ -126,6 +131,31 @@ def test_create_note_leaves_no_partial_note_when_the_write_fails(tmp_path, monke
     # Then nothing is left at its name: a truncated note would read as a damaged
     # one, and would take the name the next attempt needs
     assert not path.exists()
+
+
+def test_a_failed_create_that_cannot_be_undone_says_the_note_may_be_partial(
+    tmp_path, monkeypatch, lock_note
+):
+    # Given a disk that fills while the new note is written, and a sync client
+    # that locks the note the moment it is closed
+    from libris.markdown import NoteWriteFailed, create_note
+
+    path = tmp_path / "Dune - Frank Herbert.md"
+    lock_note(path, deletes=True)
+    _fill_disk_while_creating(monkeypatch, path)
+
+    # When the note is created
+    with pytest.raises(NoteWriteFailed) as raised:
+        create_note(path, "---\ntitle: Dune\n---\n\nBody.\n")
+
+    # Then the failure says a partial note may be there, under its name, rather
+    # than passing for an OSError every Surface reports as "nothing was added"
+    # (#193 review)
+    assert path.exists()
+    assert raised.value.path == path
+    assert path.name in str(raised.value)
+    assert "partial note" in str(raised.value)
+    assert not isinstance(raised.value, OSError)
 
 
 @pytest.mark.skipif(

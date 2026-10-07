@@ -302,6 +302,37 @@ def test_an_add_never_replaces_a_note_that_holds_another_book_under_its_name(
     assert taken.read_bytes() == before
 
 
+def test_an_add_whose_write_cannot_be_undone_says_the_note_may_be_partial(
+    tmp_path, monkeypatch
+):
+    # Given a new note whose write fails partway and cannot be removed
+    from libris.markdown import NoteWriteFailed
+
+    monkeypatch.setattr(config, "get_vault_path", lambda: tmp_path)
+    monkeypatch.setattr(config, "is_vault_configured", lambda: True)
+    item = {"id": "v1", "volumeInfo": {"title": "Dune", "authors": ["Frank Herbert"]}}
+    monkeypatch.setattr("libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(item))
+
+    def _fails(book, vault_path, **_kwargs):
+        raise NoteWriteFailed(
+            vault_path / "Dune - Frank Herbert.md",
+            OSError(28, "No space left on device"),
+            created=True,
+        )
+
+    monkeypatch.setattr("libris.service.create_book_note", _fails)
+
+    # When the model adds Dune
+    result = call("add_book", {"google_books_id": "v1"})
+
+    # Then it is told which note may be partial, not that nothing was added
+    # (#193 review)
+    assert result.is_error
+    assert "Dune - Frank Herbert.md" in text(result)
+    assert "partial note" in text(result)
+    assert "Nothing was added" not in text(result)
+
+
 def test_a_value_the_library_rejects_names_what_is_allowed(shelved):
     # Given a status the schema would have caught, sent anyway
     result = call("update_book", {"libris_id": "x", "status": "Finished"})

@@ -408,6 +408,9 @@ def create_server(
             raise ToolError(f"{exc} Nothing was added.") from None
         except NoteNameTaken as exc:
             raise ToolError(f"{exc} Nothing was added.") from None
+        except NoteWriteFailed as exc:
+            # Not "nothing was added": a partial note may be on the Shelf.
+            raise ToolError(str(exc)) from None
 
         return WriteAnswer(
             outcome=result.outcome.value,

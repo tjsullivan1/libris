@@ -606,6 +606,10 @@ def add(
     except OSError as exc:
         typer.echo(f"{could_not_access(exc, 'The new note')}. Nothing was added.")
         raise typer.Exit(code=1) from None
+    except NoteWriteFailed as exc:
+        # Not "nothing was added": a partial note may be on the Shelf.
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
 
     if result.outcome is Outcome.ALREADY_PRESENT:
         typer.echo(f"Already on the Shelf: {result.path}")
@@ -2718,7 +2722,9 @@ def import_cmd(
         result = run_import(
             file_path, vault_path, apply=apply, format_name=fmt, limit=limit
         )
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, NoteWriteFailed) as e:
+        # NoteWriteFailed is deliberately not an OSError: a new note whose write
+        # failed could not be removed, and may be partial (#193 review).
         typer.echo(f"Error: {e}")
         raise typer.Exit(code=1)
 

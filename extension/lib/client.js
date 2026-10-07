@@ -69,6 +69,13 @@ async function call(path, { method = "GET", body, auth = true } = {}) {
   if ([409, 422, 503].includes(response.status)) {
     throw new DaemonError(Problem.REFUSED, settings, await detailOf(response));
   }
+  // 500 with a detail: a new note's write failed and could not be undone, so a
+  // partial note may be on the Shelf under the name it gives (#193 review). A
+  // bare 500 says nothing usable, and is treated as before.
+  if (response.status === 500) {
+    const detail = await detailOf(response);
+    if (detail) throw new DaemonError(Problem.REFUSED, settings, detail);
+  }
   if (!response.ok) {
     // Includes 404. The daemon never answers a miss with one (ADR 0021), so a
     // 404 here means the base URL points at something that is not Libris.

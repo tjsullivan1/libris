@@ -403,23 +403,32 @@ class NoteNameTaken(FileExistsError):
 
 
 class NoteWriteFailed(Exception):
-    """A rewrite failed partway, and the note's old bytes could not be put back.
+    """A write failed partway, and could not be undone.
+
+    A rewrite whose note's old bytes could not be put back, or a new note that
+    could not be removed after its write failed (#193 review).
 
     Not an `OSError`, deliberately. Every handler that catches one reports the
-    note as untouched - "nothing merged", "nothing recorded" - and that is only
-    true of a write that failed before a byte changed, or whose note was put
-    back. This is the one case where neither holds (#166 review).
+    note as untouched - "nothing merged", "nothing recorded", "nothing added" -
+    and that is only true of a write that failed before a byte changed, or that
+    was undone. This is the one case where neither holds (#166 review).
 
     Attributes:
         path: The note that may be damaged.
     """
 
-    def __init__(self, path: Path, cause: OSError) -> None:
+    def __init__(self, path: Path, cause: OSError, created: bool = False) -> None:
         self.path = path
+        if created:
+            undone = (
+                "could not be removed, so a partial note may be left at that name. "
+                "Delete it before adding the book again."
+            )
+        else:
+            undone = "could not be put back as it was, so it may be damaged."
         super().__init__(
             f"{path.name} failed partway through being written "
-            f"({cause.strerror or cause}) and could not be put back as it was, "
-            "so it may be damaged."
+            f"({cause.strerror or cause}) and {undone}"
         )
 
 
@@ -600,6 +609,8 @@ def create_note(path: Path, content: str) -> None:
         NoteNameTaken: If a file is already at `path`. It is left untouched.
         OSError: If the note cannot be created or written. A note created but
             not fully written is removed, so a failure leaves no partial note.
+        NoteWriteFailed: If the write failed and the partial note could not be
+            removed. It may be left at `path`.
     """
     data = _encode_with_newline(content, note_newline(path))
     try:
@@ -613,8 +624,13 @@ def create_note(path: Path, content: str) -> None:
         # `close` flushes, so a full disk reported only then is caught too.
         with handle:
             handle.write(data)
-    except OSError:
-        _remove_if_still_ours(path, created)
+    except OSError as exc:
+        try:
+            _remove_if_still_ours(path, created)
+        except OSError:
+            # Locked by a sync client the moment it closed, say. The note may be
+            # partial, and "nothing was added" would be untrue (#193 review).
+            raise NoteWriteFailed(path, exc, created=True) from exc
         raise
 
 
@@ -631,6 +647,9 @@ def _remove_if_still_ours(path: Path, created: os.stat_result) -> None:
     Args:
         path: Where the note was created.
         created: The stat of the handle that created it.
+
+    Raises:
+        OSError: If the file there cannot be examined or removed.
     """
     try:
         current = os.stat(path)

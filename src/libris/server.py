@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from . import config, installed_version, service, shelf
 from .api import BookCandidate, GoogleBooksClient
-from .markdown import BookNote, NoteNameTaken
+from .markdown import BookNote, NoteNameTaken, NoteWriteFailed
 from .note_format import FIELD_VOCABULARIES, MULTI_VALUED_FIELDS
 from .store import ShelfStore
 
@@ -369,6 +369,10 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=409, detail=f"{exc} Nothing was added."
             ) from None
+        except NoteWriteFailed as exc:
+            # The daemon's own failure, so a 500, but with a detail: a partial
+            # note may be on the Shelf, and the person needs its name.
+            raise HTTPException(status_code=500, detail=str(exc)) from None
 
         if result.outcome is service.Outcome.ALREADY_PRESENT:
             response.status_code = 200

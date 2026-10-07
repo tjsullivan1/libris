@@ -672,6 +672,34 @@ def test_add_never_replaces_a_note_that_holds_another_book_under_its_name(
     assert taken.read_bytes() == before
 
 
+def test_add_says_a_new_note_may_be_partial_when_its_write_cannot_be_undone(
+    monkeypatch, tmp_path
+):
+    # Given a new note whose write fails partway and cannot be removed
+    from libris.markdown import NoteWriteFailed
+
+    def _fails(book, vault_path, **_kwargs):
+        raise NoteWriteFailed(
+            vault_path / "Dune - Frank Herbert.md",
+            OSError(28, "No space left on device"),
+            created=True,
+        )
+
+    monkeypatch.setattr("libris.service.create_book_note", _fails)
+    _add_finds(monkeypatch, tmp_path, _dune())
+
+    # When the book is added
+    result = runner.invoke(app, ["add", "dune"])
+
+    # Then the note is named as possibly partial, and the command does not claim
+    # nothing was added (#193 review)
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "Dune - Frank Herbert.md" in result.output
+    assert "partial note" in result.output
+    assert "Nothing was added" not in result.output
+
+
 def test_cleanup_dry_run_refuses_to_combine_with_rename(tmp_path, monkeypatch):
     # Given a dry run asked to also rename files
     monkeypatch.setattr("libris.cli.get_vault_path", lambda: tmp_path)
