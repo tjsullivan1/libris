@@ -196,6 +196,32 @@ def test_adding_a_new_book_writes_it_and_returns_its_identity(tmp_path):
     assert result.libris_id in result.path.read_text(encoding="utf-8")
 
 
+def test_adding_reports_a_created_note_it_cannot_read_back(tmp_path, monkeypatch):
+    # Given a sync client that locks a new note the moment it is written
+    from libris.markdown import BookNote
+
+    candidate = _candidate(isbn="9780441013593")
+    real_read = BookNote.read.__func__
+
+    def _locked_once_written(cls, path):
+        if path.name.startswith(candidate.title):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_read(cls, path)
+
+    monkeypatch.setattr(BookNote, "read", classmethod(_locked_once_written))
+
+    # When the book is added
+    result = add_book(tmp_path, candidate)
+
+    # Then it is reported as created, from the candidate. It was: an OSError
+    # here reached the Surfaces as "nothing was added" while the note sat on the
+    # Shelf (#193 review).
+    assert result.outcome is Outcome.CREATED
+    assert result.path.exists()
+    assert result.title == candidate.title
+    assert result.authors == candidate.authors
+
+
 def test_adding_a_book_already_held_does_not_overwrite_it(tmp_path):
     # Given a Book Note already on the Shelf
     first = add_book(tmp_path, _candidate(isbn="9780441013593"))

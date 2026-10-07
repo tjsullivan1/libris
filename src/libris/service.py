@@ -679,7 +679,14 @@ def add_book(
     # did not run, so the Surface can tell the person rather than imply that
     # nothing resembled this Book.
     path = create_book_note(candidate, vault_path, overrides=overrides or None)
-    note = BookNote.read(path)
+    try:
+        note = BookNote.read(path)
+    except OSError:
+        # Written, then locked by a sync client before it could be read back.
+        # Raised, every Surface said "nothing was added" about a note on the
+        # Shelf (#193 review). Answered from the candidate, as an unparseable
+        # read-back already is.
+        note = None
     return AddResult(
         libris_id=note.libris_id if note else None,
         path=path,

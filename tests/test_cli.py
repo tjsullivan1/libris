@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 import libris
 from libris import config
+from libris.api import BookCandidate
 from libris.cli import app
 
 runner = CliRunner()
@@ -512,7 +513,12 @@ def test_add_refuses_an_unknown_format_before_searching(monkeypatch):
     assert "Traceback" not in result.output
 
 
-def _add_finds(monkeypatch, vault, candidate, confirm=None):
+def _add_finds(
+    monkeypatch: pytest.MonkeyPatch,
+    vault: Path,
+    candidate: BookCandidate,
+    confirm: bool | None = None,
+) -> list[str]:
     """Point `libris add` at `vault`, with a search that offers only `candidate`.
 
     Args:
@@ -547,9 +553,7 @@ def _add_finds(monkeypatch, vault, candidate, confirm=None):
     return asked
 
 
-def _dune():
-    from libris.api import BookCandidate
-
+def _dune() -> BookCandidate:
     return BookCandidate(
         title="Dune",
         authors=["Frank Herbert"],
@@ -599,9 +603,7 @@ def test_add_writes_no_second_note_for_a_book_held_under_another_name(
     assert sorted(p.name for p in tmp_path.glob("*.md")) == [renamed.name]
 
 
-def _brass_verdict(title):
-    from libris.api import BookCandidate
-
+def _brass_verdict(title: str) -> BookCandidate:
     return BookCandidate(title=title, authors=["Michael Connelly"])
 
 
