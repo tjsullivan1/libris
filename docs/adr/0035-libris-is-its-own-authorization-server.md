@@ -143,3 +143,5 @@ instance that was already running. #179 owns the measurement and the `min_replic
 
 Gemini was not tested. The design does not depend on it, but whether Gemini's custom apps accept this
 server is still open.
+
+Amended by ADR 0036: Libris keeps this provider rather than move to FastMCP's OAuthProxy, and adds a Client ID Metadata Document only when a client needs one.
