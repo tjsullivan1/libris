@@ -49,8 +49,24 @@ variable "allowed_google_sub" {
   default     = ""
 }
 
+variable "owner_object_id" {
+  description = "The Entra object ID of the person the Library belongs to (`az ad signed-in-user show --query id -o tsv`). Their az login pushes the Shelf and can apply by hand."
+  type        = string
+}
+
+variable "deploy_principal_id" {
+  description = "The deploy workflow's identity (`terraform -chdir=infra/bootstrap output -raw deploy_principal_id`)."
+  type        = string
+}
+
+variable "deploy_app" {
+  description = "Whether to create the Container App. False on the first deployment, until the registry holds an image for it to run."
+  type        = bool
+  default     = true
+}
+
 variable "image_tag" {
-  description = "The libris-hosted image tag in the registry to run."
+  description = "The libris-hosted image tag the Container App is created with. After that, the deploy workflow sets the image and Terraform leaves it alone."
   type        = string
   default     = "spike"
 }

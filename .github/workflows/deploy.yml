@@ -1,0 +1,134 @@
+name: Deploy
+
+# A merge to main deploys the hosted server once CI has passed on it (#175).
+# Nothing here is a stored Azure credential: the job signs in with GitHub's
+# OIDC token, which only the identity infra/bootstrap created accepts, and only
+# from the `production` environment.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# Two applies against one state would fight over its lock. A second merge waits
+# for the first deploy rather than cancelling it partway.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # A workflow_run fires for every finished CI run, failed ones too, and for
+    # a pull request whose branch happens to be named main in a fork. It also
+    # fires out of order: an older commit's CI can finish after a newer one's,
+    # and deploying it would roll production back. For workflow_run,
+    # github.sha is main's tip when the run fires, so only a run for the tip
+    # deploys. Whatever is newer has its own CI run coming, and deploys then.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_sha == github.sha)
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      # Pinned, or Terraform would generate a new one and build a second copy
+      # of everything beside the first.
+      TF_VAR_suffix: ${{ vars.LIBRIS_SUFFIX }}
+      TF_VAR_owner_object_id: ${{ vars.LIBRIS_OWNER_OBJECT_ID }}
+      TF_VAR_deploy_principal_id: ${{ vars.LIBRIS_DEPLOY_PRINCIPAL_ID }}
+      # Not a credential, but it names a personal Google account, and a
+      # variable's value is printed in this public repository's logs.
+      TF_VAR_allowed_google_sub: ${{ secrets.LIBRIS_ALLOWED_GOOGLE_SUB }}
+      TF_VAR_google_client_id: ${{ secrets.GOOGLE_CLIENT_ID }}
+      TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      TF_VAR_google_books_api_key: ${{ secrets.GOOGLE_BOOKS_API_KEY }}
+      # The commit CI tested, not whatever main points at by now. Every image
+      # gets its own tag: reusing one leaves the running revision on the old
+      # image.
+      COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.COMMIT }}
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          # The wrapper prints each output with its own framing, which breaks
+          # `terraform output -raw` captured into a variable.
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init
+
+      # Infrastructure first. The apply leaves the app's image alone
+      # (infra/main.tf), so it cannot roll back what an earlier run deployed.
+      - name: Terraform apply
+        working-directory: infra
+        run: terraform apply -auto-approve
+
+      - name: Build the image
+        run: |
+          registry="$(terraform -chdir=infra output -raw registry)"
+          az acr build --registry "$registry" --image "libris-hosted:$COMMIT" .
+
+      - name: Deploy the image
+        run: |
+          registry="$(terraform -chdir=infra output -raw registry)"
+          az containerapp update \
+            --name "$(terraform -chdir=infra output -raw app_name)" \
+            --resource-group "$(terraform -chdir=infra output -raw resource_group)" \
+            --image "$registry.azurecr.io/libris-hosted:$COMMIT"
+
+      # In single-revision mode the previous revision keeps serving until the
+      # new one is ready, so /healthz alone would answer 200 from the old image
+      # while the new one failed to start. Wait for the latest revision to be
+      # the ready one and to run this commit's image, and fail on a revision
+      # that will not come up.
+      - name: Wait for the new revision
+        run: |
+          app="$(terraform -chdir=infra output -raw app_name)"
+          rg="$(terraform -chdir=infra output -raw resource_group)"
+          want="$(terraform -chdir=infra output -raw registry).azurecr.io/libris-hosted:$COMMIT"
+          for attempt in $(seq 1 40); do
+            read -r latest ready < <(az containerapp show --name "$app" --resource-group "$rg" \
+              --query "{l:properties.latestRevisionName, r:properties.latestReadyRevisionName}" -o tsv)
+            read -r image state < <(az containerapp revision show --name "$app" --resource-group "$rg" \
+              --revision "$latest" \
+              --query "{i:properties.template.containers[0].image, s:properties.provisioningState}" -o tsv)
+            echo "latest=$latest ready=$ready state=$state image=$image"
+            if [ "$state" = "Failed" ]; then
+              echo "::error::Revision $latest failed to provision"; exit 1
+            fi
+            if [ "$latest" = "$ready" ] && [ "$image" = "$want" ]; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::Revision $latest did not become ready running $want"; exit 1
+
+      # The app scales to zero, so this also waits out a cold start. With the
+      # new revision the ready one, this answer comes from it.
+      - name: Check the new revision answers
+        run: |
+          mcp_url="$(terraform -chdir=infra output -raw mcp_url)"
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 6 \
+            "${mcp_url%/mcp}/healthz"

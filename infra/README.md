@@ -15,48 +15,58 @@ Docker is optional, because the image builds in the registry.
 
 ## First deployment
 
-The steps follow from three dependencies. The Google client needs the app's address. The app
-needs an image. And the right Google account ID is only known once someone tries to sign in.
+The steps follow from four dependencies. Terraform's state needs somewhere to live before
+anything else. The Google client needs the app's address. The app needs an image. And the right
+Google account ID is only known once someone tries to sign in. After step 9, a merge to `main`
+deploys on its own ([Deploying](#deploying)).
 
-1. **Sign in to Azure and create the registry and environment**
+1. **Sign in to Azure and create the state storage and the deploy identity.** Pick a suffix
+   first: 1-14 lowercase letters or digits. Every resource name ends in it, which keeps globally
+   unique names unique (the registry, Key Vault, Cosmos, the state's storage account, and the
+   app's address). Changing it later replaces every resource, including the app's address and
+   therefore the Google redirect URI.
 
    ```bash
    az login
-   export ARM_SUBSCRIPTION_ID=<id>     # or set subscription_id in terraform.tfvars
+   export ARM_SUBSCRIPTION_ID=<id>
+   terraform -chdir=infra/bootstrap init
+   terraform -chdir=infra/bootstrap apply -var suffix=<suffix>
+   ```
+
+   `infra/bootstrap` keeps its own state locally (git-ignored). It holds no secret: the deploy
+   identity signs in with GitHub's OIDC token, so it has no password. It also registers the Azure
+   resource providers both roots use, since `infra/` runs with roles on one resource group and
+   can't. Then put the suffix into the `backend` block in `infra/versions.tf`, which can't read
+   variables.
+
+2. **Create the registry and environment**, everything but the app:
+
+   ```bash
    cd infra
    terraform init
-   terraform apply \
-     -target=azurerm_container_registry.main -target=azurerm_container_app_environment.main
+   terraform apply -var deploy_app=false
    terraform output google_redirect_uri
    ```
 
-   In PowerShell, quote each `-target`. Otherwise PowerShell splits the argument at the `.` and
-   Terraform reports "Too many command line arguments":
+   Before this, write `infra/terraform.tfvars` with what bootstrap printed. The file is
+   git-ignored:
 
-   ```powershell
-   az login
-   $env:ARM_SUBSCRIPTION_ID = "<id>"
-   cd infra
-   terraform init
-   terraform apply '-target=azurerm_container_registry.main' '-target=azurerm_container_app_environment.main'
-   terraform output google_redirect_uri
+   ```hcl
+   suffix              = "<suffix>"
+   owner_object_id     = "<owner_object_id>"
+   deploy_principal_id = "<deploy_principal_id>"
    ```
 
-   Every resource name ends in a suffix, which keeps globally unique names unique (the
-   registry, Key Vault, Cosmos, and the app's address). Terraform generates one unless you set
-   `suffix` in `terraform.tfvars` (1-14 lowercase letters or digits). Changing it later renames
-   and replaces every resource, including the app's address and therefore the Google redirect URI.
-
-2. **Create the Google OAuth client.** In the Google Cloud console, create a project and open
+3. **Create the Google OAuth client.** In the Google Cloud console, create a project and open
    **Google Auth Platform**:
    - **Get started**: an app name and support email, audience **External**, and a contact email.
    - **Audience → Test users → Add users**: your Gmail address. Leave the app in *Testing*.
      Google expires a test user's consent after seven days, but that doesn't matter here: Libris
      asks Google only who you are, once per sign-in, and keeps no Google token.
    - **Clients → Create client**, type **Web application**. Under **Authorized redirect URIs**,
-     add the `google_redirect_uri` from step 1. Leave **Authorized JavaScript origins** empty.
+     add the `google_redirect_uri` from step 2. Leave **Authorized JavaScript origins** empty.
 
-3. **Write `infra/terraform.tfvars`**. The file is git-ignored.
+4. **Add the Google client to `infra/terraform.tfvars`**:
 
    ```hcl
    google_client_id     = "<client id>.apps.googleusercontent.com"
@@ -65,15 +75,16 @@ needs an image. And the right Google account ID is only known once someone tries
    google_books_api_key = "<Google Books API key>"
    ```
 
-4. **Build the image in the registry**, from the repository root:
+5. **Build the image in the registry**, from the repository root:
 
    ```bash
    az acr build -r "$(terraform -chdir=infra output -raw registry)" -t libris-hosted:spike .
    ```
 
-5. **Deploy everything**: `terraform -chdir=infra apply`
+6. **Deploy everything**: `terraform -chdir=infra apply`. This also gives the deploy identity
+   its roles on the app's resource group, which is what lets the workflow run.
 
-6. **Add the connector in Claude and find your Google account ID.** Get the connector URL with
+7. **Add the connector in Claude and find your Google account ID.** Get the connector URL with
    `terraform -chdir=infra output -raw mcp_url`. Then, in claude.ai:
    - On Free, Pro or Max: **Customize → Connectors → Add custom connector**.
    - On Team or Enterprise, an Owner adds it under **Organization settings → Connectors → Add →
@@ -88,7 +99,7 @@ needs an image. And the right Google account ID is only known once someone tries
    refusal page in the sign-in window shows your Google ID. Add `allowed_google_sub = "<that id>"`
    to `terraform.tfvars` and apply again.
 
-7. **Connect for real**:
+8. **Connect for real**:
    - **Claude**: in **Customize → Connectors**, click **Connect** on the connector again and sign
      in. Changing the allowed account changes nothing in the connector's settings, so it doesn't
      need removing. Then [push the Shelf](#pushing-the-shelf) and ask Claude whether you've
@@ -98,14 +109,59 @@ needs an image. And the right Google account ID is only known once someone tries
      apps → Add a custom app**, entering the same URL. It needs a personal Google account in the
      US. Treat the menu names as a guess, and correct them here once #180 is done.
 
-## Updating the app
+9. **Let GitHub deploy.** In the repository's **Settings → Environments**, create `production`.
+   Under **Deployment branches and tags**, choose **Selected branches and tags** and add `main`.
+   The deploy identity accepts a token only from this environment, so this rule is what keeps a
+   pull request or another branch from deploying. Then add to the environment:
+
+   | Variable | Value |
+   |---|---|
+   | `AZURE_CLIENT_ID` | bootstrap's `azure_client_id` |
+   | `AZURE_TENANT_ID` | bootstrap's `azure_tenant_id` |
+   | `AZURE_SUBSCRIPTION_ID` | bootstrap's `azure_subscription_id` |
+   | `LIBRIS_SUFFIX` | the suffix |
+   | `LIBRIS_OWNER_OBJECT_ID` | bootstrap's `owner_object_id` |
+   | `LIBRIS_DEPLOY_PRINCIPAL_ID` | bootstrap's `deploy_principal_id` |
+
+   | Secret | Value |
+   |---|---|
+   | `GOOGLE_CLIENT_ID` | as in `terraform.tfvars` |
+   | `GOOGLE_CLIENT_SECRET` | as in `terraform.tfvars` |
+   | `GOOGLE_BOOKS_API_KEY` | as in `terraform.tfvars`, or leave it out to run keyless |
+   | `LIBRIS_ALLOWED_GOOGLE_SUB` | the `allowed_google_sub` from step 7 |
+
+   None of these is an Azure credential. The variables are identifiers that grant nothing, and
+   they stay variables so the logs stay readable: GitHub masks a secret's value wherever it
+   appears, and the suffix is in every resource name. The Google account ID isn't a credential
+   either, but the repository is public, and so are its logs, which print a variable's value.
+
+## Deploying
+
+A merge to `main` deploys, once CI has passed on it (`.github/workflows/deploy.yml`). The workflow
+signs in to Azure as the deploy identity, applies `infra/`, builds the image tagged with the
+commit SHA, moves the app to it, and waits for `/healthz` to answer. To deploy without a merge,
+run the workflow from **Actions → Deploy → Run workflow**.
+
+Terraform sets the app's image only when it creates the app. Every image after that is the
+workflow's, so an apply by hand never rolls the app back to `image_tag`. An apply by hand still
+works, with the same `terraform.tfvars`, and reads and writes the same state as the workflow.
+Whichever runs second waits for the other's state lock.
+
+## Moving an existing deployment onto the pipeline
+
+A deployment from before #175 has local state and no deploy identity. Run step 1 with the
+existing suffix (`terraform -chdir=infra output -raw suffix`), then:
 
 ```bash
-az acr build -r "$(terraform -chdir=infra output -raw registry)" -t libris-hosted:<tag> .
-terraform -chdir=infra apply -var image_tag=<tag>
+cd infra
+terraform init -migrate-state      # copies terraform.tfstate into the storage account
 ```
 
-A new tag every time. Reusing a tag leaves the running revision on the old image.
+Add `suffix`, `owner_object_id` and `deploy_principal_id` to `terraform.tfvars`, and
+`terraform apply`. The plan moves four resources to new names and destroys `random_string.suffix`,
+which the pinned suffix replaces. Nothing in Azure changes except the two new role assignments for
+the deploy identity. Once the migration works, delete the local `terraform.tfstate` and its backup:
+they hold the signing key and the Google secret. Then do step 9.
 
 ## Pushing the Shelf
 
@@ -162,5 +218,7 @@ repeat the write afterwards; let Terraform create the resource. See
 - **One replica.** Enough for one person. Sign-ins are kept in Cosmos, not in memory, so this is a
   cost choice rather than a correctness one (ADR 0035).
 - **Scale to zero.** The first call after an idle period waits for a cold start. #179 measures it.
-- **Local Terraform state.** The state holds the signing key and the Google secret. #175 moves it
-  to a storage account.
+- **The deploy identity is Owner of the app's resource group.** It applies `infra/`, which grants
+  roles, and Contributor can't. It holds no role outside that group and the state container.
+- **The state's storage account takes no access keys.** Everyone who reaches the state, CI or a
+  person, does it through Entra. The state holds the signing key and the Google secret.

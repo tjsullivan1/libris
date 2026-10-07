@@ -26,6 +26,15 @@ resource "azurerm_resource_group" "main" {
   location = var.location
 }
 
+# The deploy workflow (#175) applies this configuration, which grants roles of
+# its own, so Contributor is not enough. Scoped to this one group. The first
+# apply, by hand, is what lets the workflow run at all.
+resource "azurerm_role_assignment" "deploy_owns_group" {
+  scope                = azurerm_resource_group.main.id
+  role_definition_name = "Owner"
+  principal_id         = var.deploy_principal_id
+}
+
 resource "azurerm_user_assigned_identity" "app" {
   name                = "id-libris-mcp-${local.suffix}"
   location            = azurerm_resource_group.main.location
@@ -60,10 +69,26 @@ resource "azurerm_key_vault" "main" {
   soft_delete_retention_days = 7
 }
 
-resource "azurerm_role_assignment" "deployer_writes_secrets" {
+# For an apply by hand; the deploy workflow's identity has its own, below.
+# Neither is keyed to whoever is running Terraform: that would
+# swap the assignment between the two on every apply, and an apply from CI
+# would take away the owner's own access (#175).
+resource "azurerm_role_assignment" "owner_writes_secrets" {
   scope                = azurerm_key_vault.main.id
   role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = data.azurerm_client_config.current.object_id
+  principal_id         = var.owner_object_id
+}
+
+moved {
+  from = azurerm_role_assignment.deployer_writes_secrets
+  to   = azurerm_role_assignment.owner_writes_secrets
+}
+
+# Owner does not reach a Key Vault's data plane.
+resource "azurerm_role_assignment" "deploy_writes_secrets" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = var.deploy_principal_id
 }
 
 resource "azurerm_role_assignment" "app_reads_secrets" {
@@ -80,7 +105,8 @@ resource "azurerm_role_assignment" "app_reads_secrets" {
 # this one wait.
 resource "time_sleep" "secrets_role_propagates" {
   depends_on = [
-    azurerm_role_assignment.deployer_writes_secrets,
+    azurerm_role_assignment.owner_writes_secrets,
+    azurerm_role_assignment.deploy_writes_secrets,
     azurerm_role_assignment.app_reads_secrets,
     azurerm_role_assignment.app_pulls_images,
     azurerm_cosmosdb_sql_role_assignment.app,
@@ -228,7 +254,12 @@ locals {
 }
 
 resource "random_uuid" "app_cosmos_role" {}
-resource "random_uuid" "deployer_cosmos_role" {}
+resource "random_uuid" "owner_cosmos_role" {}
+
+moved {
+  from = random_uuid.deployer_cosmos_role
+  to   = random_uuid.owner_cosmos_role
+}
 
 resource "azurerm_cosmosdb_sql_role_assignment" "app" {
   name                = random_uuid.app_cosmos_role.result
@@ -241,13 +272,18 @@ resource "azurerm_cosmosdb_sql_role_assignment" "app" {
 
 # For `libris sync` from the PC (#173), which reaches Cosmos as the person's
 # own Azure sign-in rather than through the hosted app.
-resource "azurerm_cosmosdb_sql_role_assignment" "deployer" {
-  name                = random_uuid.deployer_cosmos_role.result
+resource "azurerm_cosmosdb_sql_role_assignment" "owner" {
+  name                = random_uuid.owner_cosmos_role.result
   resource_group_name = azurerm_resource_group.main.name
   account_name        = azurerm_cosmosdb_account.main.name
   role_definition_id  = local.cosmos_data_contributor
-  principal_id        = data.azurerm_client_config.current.object_id
+  principal_id        = var.owner_object_id
   scope               = azurerm_cosmosdb_account.main.id
+}
+
+moved {
+  from = azurerm_cosmosdb_sql_role_assignment.deployer
+  to   = azurerm_cosmosdb_sql_role_assignment.owner
 }
 
 # The app -------------------------------------------------------------------
@@ -268,7 +304,10 @@ resource "azurerm_container_app_environment" "main" {
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
 }
 
+# Created only once the registry holds an image for it, which is what the first
+# deployment's two applies are about (infra/README.md).
 resource "azurerm_container_app" "mcp" {
+  count                        = var.deploy_app ? 1 : 0
   name                         = local.app_name
   container_app_environment_id = azurerm_container_app_environment.main.id
   resource_group_name          = azurerm_resource_group.main.name
@@ -389,5 +428,15 @@ resource "azurerm_container_app" "mcp" {
       condition     = var.google_client_id != "" && var.google_client_secret != ""
       error_message = "Set google_client_id and google_client_secret (in terraform.tfvars, or TF_VAR_google_client_id and TF_VAR_google_client_secret) before deploying the app. Without them nobody can sign in."
     }
+
+    # The deploy workflow moves the app to each commit's image. Terraform sets
+    # the image only when it creates the app, so an apply never rolls back
+    # what the workflow deployed.
+    ignore_changes = [template[0].container[0].image]
   }
+}
+
+moved {
+  from = azurerm_container_app.mcp
+  to   = azurerm_container_app.mcp[0]
 }

@@ -264,7 +264,7 @@ Get the server's URL from `terraform -chdir=infra output -raw mcp_url`, then add
 - **Claude**: **Customize → Connectors → Add custom connector** on Free, Pro or Max. On Team or Enterprise, an Owner adds it under **Organization settings → Connectors**. When asked about the OAuth client, choose **Register automatically**, and leave the client ID and secret empty.
 - **Gemini** (untested, #180): **Settings → Connected apps → Add a custom app** at gemini.google.com, with the same URL.
 
-Either one sends you to sign in with Google, and only the account the server was deployed for gets in. Deploying the server, and finding that account's ID, is covered in [infra/README.md](infra/README.md#first-deployment).
+Either one sends you to sign in with Google, and only the account the server was deployed for gets in. Deploying the server, and finding that account's ID, is covered in [infra/README.md](infra/README.md#first-deployment). After the first deployment, every merge to `main` redeploys it.
 
 ## Browser extension
 
