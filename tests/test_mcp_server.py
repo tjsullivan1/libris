@@ -276,6 +276,32 @@ def test_an_add_is_refused_while_a_note_it_could_not_read_may_be_the_book(
     assert sorted(Path(shelved).glob("*.md")) == before
 
 
+def test_an_add_never_replaces_a_note_that_holds_another_book_under_its_name(
+    tmp_path, monkeypatch
+):
+    # Given a note at Dune's filename that holds a different book
+    monkeypatch.setattr(config, "get_vault_path", lambda: tmp_path)
+    monkeypatch.setattr(config, "is_vault_configured", lambda: True)
+    taken = tmp_path / "Dune - Frank Herbert.md"
+    taken.write_text(
+        "---\ntitle: Children of Dune\nauthors:\n  - Frank Herbert\n---\n\n"
+        "My own notes.\n",
+        encoding="utf-8",
+    )
+    before = taken.read_bytes()
+    item = {"id": "v1", "volumeInfo": {"title": "Dune", "authors": ["Frank Herbert"]}}
+    monkeypatch.setattr("libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(item))
+
+    # When the model adds Dune, confirming past the Near Match
+    result = call("add_book", {"google_books_id": "v1", "confirm": True})
+
+    # Then the model is told the name is taken, and the note is untouched (#169)
+    assert result.is_error
+    assert taken.name in text(result)
+    assert "Nothing was added" in text(result)
+    assert taken.read_bytes() == before
+
+
 def test_a_value_the_library_rejects_names_what_is_allowed(shelved):
     # Given a status the schema would have caught, sent anyway
     result = call("update_book", {"libris_id": "x", "status": "Finished"})

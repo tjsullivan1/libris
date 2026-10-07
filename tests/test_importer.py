@@ -542,11 +542,11 @@ def test_apply_updates_writes_status_and_format_together(tmp_path, monkeypatch):
         "_write_through",
         lambda *args: (writes.append("rewrite"), real_through(*args))[1],
     )
-    real_write_note = markdown.write_note
+    real_create_note = markdown.create_note
     monkeypatch.setattr(
         importer,
-        "write_note",
-        lambda *args: (writes.append("write_note"), real_write_note(*args))[1],
+        "create_note",
+        lambda *args: (writes.append("create_note"), real_create_note(*args))[1],
         raising=False,
     )
     book = ImportBook(

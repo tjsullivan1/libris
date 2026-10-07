@@ -261,9 +261,10 @@ def test_search_command_no_results(monkeypatch):
 def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
     # Status is "Read" rather than the "Finished" this test used to pass: the
     # Library defines four statuses and Finished is not one of them (#65). The
-    # assertion here is that overrides reach create_book_note, not that any
-    # string may be written into a Book Note.
+    # assertion here is that overrides reach the write, not that any string may
+    # be written into a Book Note.
     from libris.api import BookCandidate
+    from libris.service import AddResult, Outcome
 
     mock_books = [
         BookCandidate(
@@ -293,14 +294,13 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_create_book_note(book, vault_path, status, overrides):
+    def fake_add_book(vault_path, book, overrides, stop_on_near_match=False):
         captured["book"] = book
         captured["vault_path"] = vault_path
-        captured["status"] = status
         captured["overrides"] = overrides
-        return vault_path / "Dune.md"
+        return AddResult("lb-1", vault_path / "Dune.md", Outcome.CREATED)
 
-    monkeypatch.setattr("libris.cli.create_book_note", fake_create_book_note)
+    monkeypatch.setattr("libris.cli.add_book", fake_add_book)
 
     result = runner.invoke(
         app,
@@ -327,7 +327,6 @@ def test_add_command_passes_cli_overrides(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert captured["book"] == mock_books[0]
     assert captured["vault_path"] == tmp_path
-    assert captured["status"] == "Read"
     assert captured["overrides"] == {
         "status": "Read",
         "format": ["Audiobook"],
@@ -467,6 +466,7 @@ def test_add_refuses_an_unknown_status_before_searching(monkeypatch):
 def test_add_accepts_more_than_one_format(monkeypatch, tmp_path):
     # Given a book owned on paper and listened to
     from libris.api import BookCandidate
+    from libris.service import AddResult, Outcome
 
     monkeypatch.setattr(
         "libris.cli.GoogleBooksClient.search",
@@ -482,11 +482,11 @@ def test_add_accepts_more_than_one_format(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_create(book, vault_path, status, overrides):
+    def fake_add_book(vault_path, book, overrides, stop_on_near_match=False):
         captured["overrides"] = overrides
-        return vault_path / "Changes.md"
+        return AddResult("lb-1", vault_path / "Changes.md", Outcome.CREATED)
 
-    monkeypatch.setattr("libris.cli.create_book_note", fake_create)
+    monkeypatch.setattr("libris.cli.add_book", fake_add_book)
 
     # When both are given
     result = runner.invoke(app, ["add", "Changes", "-f", "Physical", "-f", "Audiobook"])
@@ -510,6 +510,166 @@ def test_add_refuses_an_unknown_format_before_searching(monkeypatch):
     assert result.exit_code != 0
     assert "Physical" in result.output
     assert "Traceback" not in result.output
+
+
+def _add_finds(monkeypatch, vault, candidate, confirm=None):
+    """Point `libris add` at `vault`, with a search that offers only `candidate`.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        vault: The Shelf the command writes into.
+        candidate: The one Book Candidate the search returns, and so the one picked.
+        confirm: The answer to a Near Match question, or None to fail the test
+            if one is asked.
+
+    Returns:
+        The questions the command asked through `questionary.confirm`.
+    """
+    monkeypatch.setattr(
+        "libris.cli.GoogleBooksClient.search", lambda self, q: [candidate]
+    )
+    _choose_first(monkeypatch)
+    monkeypatch.setattr("libris.cli.get_vault_path", lambda: vault)
+    asked = []
+
+    def _confirm(message, **_kwargs):
+        asked.append(message)
+        if confirm is None:
+            raise AssertionError(f"add asked a question it should not have: {message}")
+
+        class _Answer:
+            def ask(self):
+                return confirm
+
+        return _Answer()
+
+    monkeypatch.setattr("questionary.confirm", _confirm)
+    return asked
+
+
+def _dune():
+    from libris.api import BookCandidate
+
+    return BookCandidate(
+        title="Dune",
+        authors=["Frank Herbert"],
+        isbn="9780441013593",
+        google_books_id="dune1",
+    )
+
+
+def test_add_keeps_the_reader_writing_in_a_note_the_shelf_already_holds(
+    monkeypatch, tmp_path
+):
+    # Given Dune on the Shelf, with the reader's own writing in it
+    from libris.markdown import create_book_note
+
+    note = create_book_note(_dune(), tmp_path)
+    note.write_text(note.read_text(encoding="utf-8") + "\nMy own notes.\n", "utf-8")
+    _add_finds(monkeypatch, tmp_path, _dune())
+
+    # When the same book is added again
+    result = runner.invoke(app, ["add", "dune"])
+
+    # Then it is reported as held, and the note is untouched (#169). It was
+    # replaced, and the reader's writing with it.
+    assert result.exit_code == 0, result.output
+    assert "Already on the Shelf" in result.output
+    assert note.name in result.output
+    assert "My own notes." in note.read_text(encoding="utf-8")
+    assert sorted(p.name for p in tmp_path.glob("*.md")) == [note.name]
+
+
+def test_add_writes_no_second_note_for_a_book_held_under_another_name(
+    monkeypatch, tmp_path
+):
+    # Given Dune on the Shelf under a name the reader chose
+    from libris.markdown import create_book_note
+
+    note = create_book_note(_dune(), tmp_path)
+    renamed = note.rename(tmp_path / "My copy of Dune.md")
+    _add_finds(monkeypatch, tmp_path, _dune())
+
+    # When the same book is added again
+    result = runner.invoke(app, ["add", "dune"])
+
+    # Then the held note is named and no second one is written (#169)
+    assert result.exit_code == 0, result.output
+    assert renamed.name in result.output
+    assert sorted(p.name for p in tmp_path.glob("*.md")) == [renamed.name]
+
+
+def _brass_verdict(title):
+    from libris.api import BookCandidate
+
+    return BookCandidate(title=title, authors=["Michael Connelly"])
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_add_asks_before_adding_beside_a_near_match(monkeypatch, tmp_path, answer):
+    # Given a note whose title might name the same book as the candidate
+    from libris.markdown import create_book_note
+
+    held = create_book_note(_brass_verdict("The Brass Verdict"), tmp_path)
+    asked = _add_finds(
+        monkeypatch, tmp_path, _brass_verdict("The Brass Verdict: A Novel"), answer
+    )
+
+    # When the candidate is added, and the reader answers
+    result = runner.invoke(app, ["add", "brass verdict"])
+
+    # Then the held note was shown before anything was written, and the answer
+    # decided whether a second note exists
+    assert result.exit_code == 0, result.output
+    assert len(asked) == 1
+    assert held.name in result.output
+    written = sorted(p.name for p in tmp_path.glob("*.md") if p != held)
+    assert len(written) == (1 if answer else 0)
+
+
+def test_add_writes_nothing_when_shelf_notes_cannot_be_read(
+    monkeypatch, tmp_path, lock_note
+):
+    # Given a note the duplicate check cannot read, which may be this book
+    from libris.markdown import create_book_note
+
+    other = create_book_note(_brass_verdict("The Brass Verdict"), tmp_path)
+    lock_note(other, reads=True)
+    _add_finds(monkeypatch, tmp_path, _dune())
+
+    # When a book is added
+    result = runner.invoke(app, ["add", "dune"])
+
+    # Then the unread note is named and nothing is written
+    assert result.exit_code == 1
+    assert other.name in result.output
+    assert "Nothing was" in result.output
+    assert "Traceback" not in result.output
+    assert sorted(p.name for p in tmp_path.glob("*.md")) == [other.name]
+
+
+def test_add_never_replaces_a_note_that_holds_another_book_under_its_name(
+    monkeypatch, tmp_path
+):
+    # Given a note at Dune's filename that holds a different book - a near
+    # match, so not one the duplicate check can call the same
+    taken = tmp_path / "Dune - Frank Herbert.md"
+    taken.write_text(
+        "---\ntitle: Children of Dune\nauthors:\n  - Frank Herbert\n---\n\n"
+        "My own notes.\n",
+        encoding="utf-8",
+    )
+    before = taken.read_bytes()
+    _add_finds(monkeypatch, tmp_path, _dune(), confirm=True)
+
+    # When Dune is added, and the reader says it is not that book
+    result = runner.invoke(app, ["add", "dune"])
+
+    # Then the name is reported as taken, and the note is untouched
+    assert result.exit_code == 1
+    assert taken.name in result.output
+    assert "Traceback" not in result.output
+    assert taken.read_bytes() == before
 
 
 def test_cleanup_dry_run_refuses_to_combine_with_rename(tmp_path, monkeypatch):

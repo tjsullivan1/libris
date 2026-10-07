@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from . import config, installed_version, service, shelf
 from .api import BookCandidate, GoogleBooksClient
-from .markdown import BookNote
+from .markdown import BookNote, NoteNameTaken
 from .note_format import FIELD_VOCABULARIES, MULTI_VALUED_FIELDS
 from .store import ShelfStore
 
@@ -361,6 +361,13 @@ def create_app() -> FastAPI:
             # request succeeds once they can (#168 review).
             raise HTTPException(
                 status_code=503, detail=f"{exc} Nothing was added."
+            ) from None
+        except NoteNameTaken as exc:
+            # The Book is not held, but another note has its name. A conflict
+            # with the Shelf's state, not a bad request: the same request
+            # succeeds once one of the two notes is renamed (#169).
+            raise HTTPException(
+                status_code=409, detail=f"{exc} Nothing was added."
             ) from None
 
         if result.outcome is service.Outcome.ALREADY_PRESENT:

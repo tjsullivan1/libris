@@ -618,6 +618,8 @@ def add_book(
             place for.
         ShelfUnreadable: If no note it could read holds the Book, and some
             notes could not be read. Nothing is written.
+        NoteNameTaken: If the Book is not held, but a note that is not it
+            already has its filename. Nothing is written (#169).
     """
     # Writes land on the Shelf, so the duplicate check is asked of the live Shelf:
     # the stronger guarantee, true at the moment of the write (ADR 0010).

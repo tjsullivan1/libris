@@ -51,6 +51,63 @@ def test_create_book_note(tmp_path):
     assert "> A test description" in content
 
 
+def test_create_book_note_never_replaces_a_file_under_its_name(tmp_path):
+    # Given a note already at the name a new one would take
+    from libris.markdown import NoteNameTaken
+
+    book = BookCandidate(title="Dune", authors=["Frank Herbert"])
+    taken = tmp_path / "Dune - Frank Herbert.md"
+    taken.write_text("---\ntitle: Dune\n---\n\nMy own notes.\n", encoding="utf-8")
+    before = taken.read_bytes()
+
+    # When a note is created for the book anyway, as a caller that skipped the
+    # duplicate check would
+    with pytest.raises(NoteNameTaken) as raised:
+        create_book_note(book, tmp_path)
+
+    # Then the file is untouched, and the refusal names it. It was replaced,
+    # and the reader's writing with it (#169).
+    assert taken.read_bytes() == before
+    assert taken.name in str(raised.value)
+    assert isinstance(raised.value, FileExistsError)
+
+
+def test_create_note_leaves_no_partial_note_when_the_write_fails(tmp_path, monkeypatch):
+    # Given a disk that fills while the new note is written
+    from libris.markdown import create_note
+
+    path = tmp_path / "Dune - Frank Herbert.md"
+    real_open = Path.open
+
+    class _FullDisk:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+
+        def write(self, data):
+            self._handle.write(data[:5])
+            raise OSError(28, "No space left on device")
+
+    def _open(self, mode="r", *args, **kwargs):
+        handle = real_open(self, mode, *args, **kwargs)
+        return _FullDisk(handle) if self == path else handle
+
+    monkeypatch.setattr(Path, "open", _open)
+
+    # When the note is created
+    with pytest.raises(OSError):
+        create_note(path, "---\ntitle: Dune\n---\n\nBody.\n")
+
+    # Then nothing is left at its name: a truncated note would read as a damaged
+    # one, and would take the name the next attempt needs
+    assert not path.exists()
+
+
 def test_create_book_note_with_overrides(tmp_path):
     """Test that overrides dict sets frontmatter fields."""
     book = BookCandidate(
@@ -301,22 +358,21 @@ def test_a_write_keeps_the_line_endings_the_note_already_had(tmp_path, note, exp
             assert bare_lf > 0
 
 
-def test_write_note_never_doubles_a_carriage_return(tmp_path):
-    # Given a CRLF note, and content that already carries CRLF itself - the
-    # shape that produced \r\r\n across 1,345 notes when the platform added its
-    # own translation on top (see migrate.plan_format_note_migration)
-    from libris.markdown import write_note
+def test_create_note_never_doubles_a_carriage_return(tmp_path):
+    # Given content that already carries CRLF itself - the shape that produced
+    # \r\r\n across 1,345 notes when the platform added its own translation on
+    # top (see migrate.plan_format_note_migration)
+    from libris.markdown import create_note
 
     path = tmp_path / "crlf.md"
-    path.write_bytes(_CRLF_NOTE)
 
-    # When it is written back
-    write_note(path, "---\r\ntitle: A Book\r\n---\r\n\r\nBody.\r\n")
+    # When a note is created from it
+    create_note(path, "---\r\ntitle: A Book\r\n---\r\n\r\nBody.\r\n")
 
-    # Then no line ends in two carriage returns
+    # Then no line ends in two carriage returns, and every line ends one way
     raw = path.read_bytes()
     assert b"\r\r" not in raw
-    assert _endings(raw) == (raw.count(b"\r\n"), 0)
+    assert raw.count(b"\r\n") in (0, raw.count(b"\n"))
 
 
 # A body whose first element is an indented code block - four spaces is how

@@ -35,6 +35,22 @@ describe("a failed add", () => {
     await expect(added).rejects.toThrow("could not be read");
   });
 
+  it("shows why when another note already has the book's name", async () => {
+    // Given a daemon whose Shelf has a different book under this one's name (#169)
+    const detail =
+      "A note named Dune - Frank Herbert.md is already on the Shelf, and a new " +
+      "note never replaces one. Rename one of the two if they are different " +
+      "books. Nothing was added.";
+    fetch.mockResolvedValue(answer(409, { detail }));
+
+    // When the book is added
+    const added = createBook({ title: "Dune", authors: ["Frank Herbert"] });
+
+    // Then the person is told that, not that the daemon isn't running
+    await expect(added).rejects.toMatchObject({ problem: Problem.REFUSED, detail });
+    await expect(added).rejects.toThrow("already on the Shelf");
+  });
+
   it("still reads a 404 as something that is not Libris", async () => {
     // Given a base URL that answers, but is not the daemon
     fetch.mockResolvedValue(answer(404, {}));

@@ -574,6 +574,27 @@ def test_adding_a_book_whose_note_could_not_be_read_is_unavailable(
     assert list(tmp_path.glob("*.md")) == [held]
 
 
+def test_adding_a_book_whose_name_another_note_holds_is_a_conflict(token, tmp_path):
+    # Given a note at Dune's filename that holds a different book
+    config.set_book_vault_path(tmp_path)
+    taken = tmp_path / "Dune - Frank Herbert.md"
+    taken.write_text(
+        "---\ntitle: Children of Dune\nauthors:\n  - Frank Herbert\n---\n\n"
+        "My own notes.\n",
+        encoding="utf-8",
+    )
+    before = taken.read_bytes()
+
+    # When the extension adds Dune
+    response = _post_book(token)
+
+    # Then it is refused as a conflict, and the note is untouched (#169). The
+    # same request succeeds once one of the two is renamed.
+    assert response.status_code == 409
+    assert taken.name in response.json()["detail"]
+    assert taken.read_bytes() == before
+
+
 def test_adding_a_book_already_held_leaves_it_untouched(token, tmp_path):
     # Given the book already on the Shelf
     config.set_book_vault_path(tmp_path)
