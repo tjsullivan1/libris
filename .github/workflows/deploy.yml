@@ -1,0 +1,100 @@
+name: Deploy
+
+# A merge to main deploys the hosted server once CI has passed on it (#175).
+# Nothing here is a stored Azure credential: the job signs in with GitHub's
+# OIDC token, which only the identity infra/bootstrap created accepts, and only
+# from the `production` environment.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# Two applies against one state would fight over its lock. A second merge waits
+# for the first deploy rather than cancelling it partway.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # A workflow_run fires for every finished CI run, failed ones too, and for
+    # a pull request whose branch happens to be named main in a fork.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      # Pinned, or Terraform would generate a new one and build a second copy
+      # of everything beside the first.
+      TF_VAR_suffix: ${{ vars.LIBRIS_SUFFIX }}
+      TF_VAR_owner_object_id: ${{ vars.LIBRIS_OWNER_OBJECT_ID }}
+      TF_VAR_deploy_principal_id: ${{ vars.LIBRIS_DEPLOY_PRINCIPAL_ID }}
+      TF_VAR_allowed_google_sub: ${{ vars.LIBRIS_ALLOWED_GOOGLE_SUB }}
+      TF_VAR_google_client_id: ${{ secrets.GOOGLE_CLIENT_ID }}
+      TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      TF_VAR_google_books_api_key: ${{ secrets.GOOGLE_BOOKS_API_KEY }}
+      # The commit CI tested, not whatever main points at by now. Every image
+      # gets its own tag: reusing one leaves the running revision on the old
+      # image.
+      COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.COMMIT }}
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          # The wrapper prints each output with its own framing, which breaks
+          # `terraform output -raw` captured into a variable.
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init
+
+      # Infrastructure first. The apply leaves the app's image alone
+      # (infra/main.tf), so it cannot roll back what an earlier run deployed.
+      - name: Terraform apply
+        working-directory: infra
+        run: terraform apply -auto-approve
+
+      - name: Build the image
+        run: |
+          registry="$(terraform -chdir=infra output -raw registry)"
+          az acr build --registry "$registry" --image "libris-hosted:$COMMIT" .
+
+      - name: Deploy the image
+        run: |
+          registry="$(terraform -chdir=infra output -raw registry)"
+          az containerapp update \
+            --name "$(terraform -chdir=infra output -raw app_name)" \
+            --resource-group "$(terraform -chdir=infra output -raw resource_group)" \
+            --image "$registry.azurecr.io/libris-hosted:$COMMIT"
+
+      # The app scales to zero, so this also waits out a cold start. A revision
+      # that cannot start fails here rather than at the next person's question.
+      - name: Check the new revision answers
+        run: |
+          mcp_url="$(terraform -chdir=infra output -raw mcp_url)"
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 6 \
+            "${mcp_url%/mcp}/healthz"

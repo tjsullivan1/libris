@@ -13,6 +13,11 @@ output "registry" {
   value       = azurerm_container_registry.main.name
 }
 
+output "app_name" {
+  description = "The Container App the deploy workflow moves to each new image."
+  value       = local.app_name
+}
+
 output "resource_group" {
   value = azurerm_resource_group.main.name
 }
