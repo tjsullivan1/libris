@@ -606,12 +606,38 @@ def create_note(path: Path, content: str) -> None:
         handle = path.open("xb")
     except FileExistsError:
         raise NoteNameTaken(path) from None
+    # Which file this is, asked while the handle still names it. The cleanup
+    # below runs after `close`, because Windows will not remove an open file.
+    created = os.fstat(handle.fileno())
     try:
+        # `close` flushes, so a full disk reported only then is caught too.
         with handle:
             handle.write(data)
     except OSError:
-        path.unlink(missing_ok=True)
+        _remove_if_still_ours(path, created)
         raise
+
+
+def _remove_if_still_ours(path: Path, created: os.stat_result) -> None:
+    """Remove the file at `path`, but only if it is the file this call created.
+
+    Another process can rename or remove a file while it is being written - a
+    sync client, Obsidian - and put a different note at the same name. Removing
+    `path` without asking would delete that note, the loss `create_note` exists
+    to prevent (#193 review). Only the file whose identity matches `created`
+    is removed. What remains is the moment between the check and the removal,
+    which no portable call closes.
+
+    Args:
+        path: Where the note was created.
+        created: The stat of the handle that created it.
+    """
+    try:
+        current = os.stat(path)
+    except FileNotFoundError:
+        return
+    if os.path.samestat(created, current):
+        path.unlink(missing_ok=True)
 
 
 def rewrite_note(path: Path, content: str, expected_sha256: str | None = None) -> None:

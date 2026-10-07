@@ -72,11 +72,15 @@ def test_create_book_note_never_replaces_a_file_under_its_name(tmp_path):
     assert isinstance(raised.value, FileExistsError)
 
 
-def test_create_note_leaves_no_partial_note_when_the_write_fails(tmp_path, monkeypatch):
-    # Given a disk that fills while the new note is written
-    from libris.markdown import create_note
+def _fill_disk_while_creating(monkeypatch, path, meanwhile=lambda: None):
+    """Make the next create of `path` fail partway, as a full disk does.
 
-    path = tmp_path / "Dune - Frank Herbert.md"
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        path: The note whose write fails.
+        meanwhile: Run after part of the note is written and before the failure
+            is raised, for what another process does in that gap.
+    """
     real_open = Path.open
 
     class _FullDisk:
@@ -89,15 +93,31 @@ def test_create_note_leaves_no_partial_note_when_the_write_fails(tmp_path, monke
         def __exit__(self, *exc):
             self._handle.close()
 
+        def fileno(self):
+            return self._handle.fileno()
+
+        def flush(self):
+            self._handle.flush()
+
         def write(self, data):
             self._handle.write(data[:5])
+            self._handle.flush()
+            meanwhile()
             raise OSError(28, "No space left on device")
 
     def _open(self, mode="r", *args, **kwargs):
         handle = real_open(self, mode, *args, **kwargs)
-        return _FullDisk(handle) if self == path else handle
+        return _FullDisk(handle) if self == path and "x" in mode else handle
 
     monkeypatch.setattr(Path, "open", _open)
+
+
+def test_create_note_leaves_no_partial_note_when_the_write_fails(tmp_path, monkeypatch):
+    # Given a disk that fills while the new note is written
+    from libris.markdown import create_note
+
+    path = tmp_path / "Dune - Frank Herbert.md"
+    _fill_disk_while_creating(monkeypatch, path)
 
     # When the note is created
     with pytest.raises(OSError):
@@ -106,6 +126,34 @@ def test_create_note_leaves_no_partial_note_when_the_write_fails(tmp_path, monke
     # Then nothing is left at its name: a truncated note would read as a damaged
     # one, and would take the name the next attempt needs
     assert not path.exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows refuses to rename a file another handle holds open",
+)
+def test_a_failed_create_never_removes_a_note_put_at_its_name_meanwhile(
+    tmp_path, monkeypatch
+):
+    # Given a sync client that moves the half-written note aside and puts its
+    # own note at the name, while the disk fills
+    from libris.markdown import create_note
+
+    path = tmp_path / "Dune - Frank Herbert.md"
+
+    def _sync_client_swaps_it():
+        path.rename(tmp_path / "Dune (conflict).md")
+        path.write_text("My own notes.\n", encoding="utf-8")
+
+    _fill_disk_while_creating(monkeypatch, path, meanwhile=_sync_client_swaps_it)
+
+    # When the create fails
+    with pytest.raises(OSError):
+        create_note(path, "---\ntitle: Dune\n---\n\nBody.\n")
+
+    # Then the note now at the name is not the one cleaned up (#193 review). An
+    # unconditional removal deleted it.
+    assert path.read_text(encoding="utf-8") == "My own notes.\n"
 
 
 def test_create_book_note_with_overrides(tmp_path):
