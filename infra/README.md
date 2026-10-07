@@ -120,15 +120,18 @@ deploys on its own ([Deploying](#deploying)).
    | `LIBRIS_SUFFIX` | the suffix |
    | `LIBRIS_OWNER_OBJECT_ID` | bootstrap's `owner_object_id` |
    | `LIBRIS_DEPLOY_PRINCIPAL_ID` | bootstrap's `deploy_principal_id` |
-   | `LIBRIS_ALLOWED_GOOGLE_SUB` | the `allowed_google_sub` from step 7 |
 
    | Secret | Value |
    |---|---|
    | `GOOGLE_CLIENT_ID` | as in `terraform.tfvars` |
    | `GOOGLE_CLIENT_SECRET` | as in `terraform.tfvars` |
    | `GOOGLE_BOOKS_API_KEY` | as in `terraform.tfvars`, or leave it out to run keyless |
+   | `LIBRIS_ALLOWED_GOOGLE_SUB` | the `allowed_google_sub` from step 7 |
 
-   None of these is an Azure credential.
+   None of these is an Azure credential. The variables are identifiers that grant nothing, and
+   they stay variables so the logs stay readable: GitHub masks a secret's value wherever it
+   appears, and the suffix is in every resource name. The Google account ID isn't a credential
+   either, but the repository is public, and so are its logs, which print a variable's value.
 
 ## Deploying
 

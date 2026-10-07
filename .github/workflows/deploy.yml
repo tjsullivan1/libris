@@ -43,7 +43,9 @@ jobs:
       TF_VAR_suffix: ${{ vars.LIBRIS_SUFFIX }}
       TF_VAR_owner_object_id: ${{ vars.LIBRIS_OWNER_OBJECT_ID }}
       TF_VAR_deploy_principal_id: ${{ vars.LIBRIS_DEPLOY_PRINCIPAL_ID }}
-      TF_VAR_allowed_google_sub: ${{ vars.LIBRIS_ALLOWED_GOOGLE_SUB }}
+      # Not a credential, but it names a personal Google account, and a
+      # variable's value is printed in this public repository's logs.
+      TF_VAR_allowed_google_sub: ${{ secrets.LIBRIS_ALLOWED_GOOGLE_SUB }}
       TF_VAR_google_client_id: ${{ secrets.GOOGLE_CLIENT_ID }}
       TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       TF_VAR_google_books_api_key: ${{ secrets.GOOGLE_BOOKS_API_KEY }}
