@@ -11,11 +11,6 @@ that someone else would maintain it, and that it already supports a Client ID Me
 **The answer is to keep `oauth.py`.** Reading FastMCP 4.0.11's source on 2026-10-07 settled the
 questions #182 left open:
 
-- **The cheap moment to switch has passed, and switching is now a rewrite.** #182 asked for the
-  decision before #175 wired the real tools into `hosted.py`. #175 shipped first, on the official
-  `mcp` SDK. FastMCP 4 no longer builds on that SDK: it depends on `mcp-types` alone. Moving would
-  rewrite the MCP layer: the tools, the stdio server for Claude Code, `hosted.py`, and their tests.
-  ADR 0020's promise of the same tools everywhere would have to be re-proven on the new framework.
 - **Its consent cookies are as sound as ours.** They carry the `__Host-` prefix over HTTPS and are
   signed, the consent form carries a CSRF token, and the weaker unprefixed name is refused over
   HTTPS. A sibling Container App cannot plant an approval. #182's comparison had this as unknown.
@@ -24,19 +19,29 @@ questions #182 left open:
   found", and the grant it came from stays alive, so a thief who refreshed first keeps a working
   sign-in. Ours marks a rotated token spent with a conditional write and deletes the whole grant on
   a replay (ADR 0035, RFC 9700 §4.14.2).
-- **Its revocation is per token.** Revoking deletes that refresh token and asks Google to revoke
-  Google's own token. Nothing ends every token from one sign-in at once, which is what ADR 0035's
-  grant exists to do.
-- **It holds more and calls out more.** A proxy keeps the person's Google access and refresh tokens,
-  encrypted, and checks every tool call against Google's `tokeninfo` and `userinfo` endpoints: two
-  outbound requests per call. Libris keeps no Google token at all, because Google only says who
+- **With `GoogleProvider`, nothing can be revoked.** `OAuthProxy` serves `/revoke` only when it is
+  given an upstream revocation endpoint, and `GoogleProvider` gives it none. A client cannot end a
+  sign-in, and a leaked refresh token lives out its lifetime. Even with an endpoint configured,
+  the proxy revokes one token at a time. Nothing ends every token from one sign-in at once, which
+  is what ADR 0035's grant exists to do.
+- **It holds more and calls out more.** A proxy keeps the person's Google access and refresh tokens
+  in its store. Only its default store, a local file tree, is encrypted for you. Libris would have to
+  supply its own store, because the app scales to zero and runs more than one replica, so
+  encrypting it would be Libris's job again. The proxy also checks every tool call against Google's
+  `tokeninfo` and `userinfo` endpoints: two outbound requests per call. Libris keeps no Google token at all, because Google only says who
   signed in. A tool call costs a local signature check and one Cosmos point read. On an app that
   scales to zero, fewer outbound calls is fewer things to wait on.
 - **The one-account rule would still be ours to write.** `GoogleProvider` exposes the `sub` but does
   not restrict it. That check is a small part of `oauth.py`, not the bulk of it.
+- **Switching is a migration, not a rewrite, but it is no longer free.** FastMCP 4 still runs on
+  the official `mcp` SDK: its `server` extra requires `mcp>=2.0.0,<3.0.0`, and `OAuthProxy` builds
+  on the SDK's own auth handlers. The tools' logic would carry over. Their registration would not,
+  and neither would `hosted.py`'s custom routes, the in-memory test client, or `oauth.py`'s tests.
+  #182 asked for the decision before #175 wired the real tools into `hosted.py`, while that work
+  was changing anyway. #175 shipped first, so a move now is work done for its own sake.
 
-What FastMCP offers that Libris lacks is CIMD and outside maintenance. Neither outweighs a rewrite
-that weakens refresh tokens and revocation.
+What FastMCP offers that Libris lacks is CIMD and outside maintenance. Neither outweighs a
+migration that weakens refresh tokens and removes revocation.
 
 **CIMD waits until a client needs it.** Claude falls back to Dynamic Client Registration when CIMD
 isn't advertised, and #171's spike connected Claude that way. DCR is deprecated in the 2026-07-28
