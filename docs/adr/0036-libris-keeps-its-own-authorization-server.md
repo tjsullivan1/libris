@@ -26,7 +26,7 @@ questions #182 left open:
   is what ADR 0035's grant exists to do.
 - **It holds more and calls out more.** A proxy keeps the person's Google access and refresh tokens
   in its store. Only its default store, a local file tree, is encrypted for you. Libris would have to
-  supply its own store, because the app scales to zero and runs more than one replica, so
+  supply its own store, because the app scales to zero and a sign-in must survive a restart, so
   encrypting it would be Libris's job again. The proxy also checks every tool call against Google's
   `tokeninfo` and `userinfo` endpoints: two outbound requests per call. Libris keeps no Google token at all, because Google only says who
   signed in. A tool call costs a local signature check and one Cosmos point read. On an app that
