@@ -59,8 +59,8 @@ note, and the run exits non-zero and says why.
 
 **The state file names the account and database it describes.** State recorded for one account
 says nothing about another, and trusting it would leave a newly deployed account empty. A remote
-with no word counts is treated as holding nothing, whatever the state says: no sync has finished
-there (`CountsMissing`).
+with no word counts gets a full push whatever the state says: no sync has finished there
+(`CountsMissing`), so the state cannot vouch for any document it holds.
 
 **Whenever everything goes up, the remote is asked what it holds.** A lost state file, one
 written for another account, a remote with no counts and a split-version change all push every
