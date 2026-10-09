@@ -62,6 +62,14 @@ says nothing about another, and trusting it would leave a newly deployed account
 with no word counts is treated as holding nothing, whatever the state says: no sync has finished
 there (`CountsMissing`).
 
+**Whenever everything goes up, the remote is asked what it holds.** A lost state file, one
+written for another account, a remote with no counts and a split-version change all push every
+note, and in each case the state alone cannot list what the remote holds. A note that left the
+Shelf meanwhile would keep its document forever, because nothing would remember to delete it. So
+those syncs also list the remote's IDs, at the cost of one query, and delete whatever the Shelf
+no longer has. The deletion guard applies to those deletions as to any other. An ordinary sync
+trusts the state and does not ask (#195 review).
+
 **A second sync with nothing changed writes nothing.** The word counts are still rebuilt every
 run (ADR 0033), but they are compared with the stored document and written only if they differ.
 That costs one read rather than a write of 150-190 KiB every half hour.

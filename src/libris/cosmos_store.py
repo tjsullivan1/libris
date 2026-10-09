@@ -338,14 +338,23 @@ def push_shelf(
     report.repushed_all = (
         remote is not None and remote.get("split_version") != SPLIT_VERSION
     )
-    if remote is None or report.repushed_all:
+    if remote is None or report.repushed_all or not state.trusted:
         # Every document goes up, so no recorded hash may match. The IDs are
         # kept: they are how a note that left the Shelf is found to delete.
         state.hashes = dict.fromkeys(state.hashes, "")
+        # And the state is not the only inventory: a lost file, or one written
+        # for another account, forgets documents the remote still holds, and
+        # what it forgets here it would never delete (#195 review). Asked only
+        # when everything goes up anyway, so an ordinary sync pays nothing.
+        for libris_id in _ids_on_remote(books):
+            state.hashes.setdefault(libris_id, "")
 
     leaving = sorted(set(state.hashes) - present)
-    if leaving and not allow_mass_deletion:
-        scanned_empty = not on_shelf
+    if not allow_mass_deletion:
+        # Whatever the count, and whether or not the IDs held are known: an
+        # empty Shelf would otherwise rebuild the counts as empty, and hide
+        # every book the remote holds (#195 review).
+        scanned_empty = not on_shelf and bool(state.hashes)
         if scanned_empty or len(leaving) > _plausible_deletions(len(state.hashes)):
             raise DeletionsRefused(
                 deleting=len(leaving),
@@ -419,6 +428,14 @@ def _counts_on_remote(counts: Container) -> dict[str, Any] | None:
     return found[0] if found else None
 
 
+def _ids_on_remote(books: Container) -> list[str]:
+    return list(
+        books.query_items(
+            query="SELECT VALUE c.id FROM c", enable_cross_partition_query=True
+        )
+    )
+
+
 def _delete(books: Container, libris_id: str) -> None:
     try:
         books.delete_item(libris_id, partition_key=libris_id)
@@ -435,11 +452,14 @@ class SyncState:
 
     Keyed by Libris ID, because paths move. Kept in Libris's config directory,
     not the Vault: it describes one PC's syncs and has no business on a phone.
-    Lost or unreadable, it is empty, and the next sync pushes everything.
+    Lost, unreadable or written for another target, it is empty and not
+    `trusted`, and the next sync pushes everything and asks the remote what it
+    holds.
     """
 
     target: str
     hashes: dict[str, str] = field(default_factory=dict)
+    trusted: bool = False
 
     @staticmethod
     def path() -> Path:
@@ -456,7 +476,7 @@ class SyncState:
         hashes = recorded.get("hashes")
         if not isinstance(hashes, dict):
             return cls(target)
-        return cls(target, {str(k): str(v) for k, v in hashes.items()})
+        return cls(target, {str(k): str(v) for k, v in hashes.items()}, trusted=True)
 
     def save(self) -> None:
         path = self.path()

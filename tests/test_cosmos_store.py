@@ -458,6 +458,80 @@ def test_a_lost_state_file_means_the_next_push_sends_everything(
     assert books.writes == []
 
 
+def test_a_note_that_left_while_the_state_was_lost_is_still_deleted(
+    tmp_path, mock_config_dir
+):
+    # Given a Shelf already pushed, whose state file is then lost
+    books, counts = _pushed(tmp_path, 3)
+    (mock_config_dir / "sync-state.json").unlink()
+
+    # When a note leaves the Shelf and it is pushed again
+    (tmp_path / "book-01.md").unlink()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then the remote is asked what it holds, and the note's document goes
+    assert "01B01" not in books.items
+    assert report.deleted == 1
+
+
+def test_a_note_that_left_while_syncing_elsewhere_is_deleted_on_return(tmp_path):
+    # Given a Shelf pushed to one account, then to another
+    books, counts = FakeContainer(), FakeContainer()
+    _shelf_of(tmp_path, 3)
+    push_shelf(tmp_path, books, counts, target="https://a#libris")
+    push_shelf(tmp_path, FakeContainer(), FakeContainer(), target="https://b#libris")
+
+    # When a note leaves, and the Shelf is pushed to the first account again
+    (tmp_path / "book-01.md").unlink()
+    push_shelf(tmp_path, books, counts, target="https://a#libris")
+
+    # Then the first account loses the note too, though no state remembered it
+    assert sorted(books.items) == ["01B00", "01B02"]
+
+
+def test_a_shelf_that_scans_empty_is_refused_even_with_no_state(
+    tmp_path, mock_config_dir
+):
+    # Given a Shelf already pushed, whose state file is then lost
+    books, counts = _pushed(tmp_path, 2)
+    (mock_config_dir / "sync-state.json").unlink()
+
+    # When the Shelf scans empty
+    for path in tmp_path.glob("*.md"):
+        path.unlink()
+
+    # Then the sync refuses, rather than rebuilding the counts as empty
+    with pytest.raises(DeletionsRefused) as refused:
+        push_shelf(tmp_path, books, counts)
+    assert refused.value.scanned_empty
+    assert counts.writes == []
+    assert len(books.items) == 2
+
+
+def test_an_empty_shelf_pushed_to_an_empty_remote_is_not_refused(tmp_path):
+    # Given a Shelf with no notes, and a remote with none either
+    books, counts = FakeContainer(), FakeContainer()
+
+    # When it is pushed
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then there is nothing to lose, so it goes through
+    assert report.pushed == 0
+    assert "word-counts" in counts.items
+
+
+def test_an_ordinary_sync_does_not_list_the_remote(tmp_path):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 3)
+    books.queries.clear()
+
+    # When it is pushed again
+    push_shelf(tmp_path, books, counts)
+
+    # Then the remote's inventory is not fetched: the state is trusted
+    assert books.queries == []
+
+
 def test_the_state_file_is_kept_outside_the_shelf(tmp_path, mock_config_dir):
     # Given a Shelf
     _shelf_of(tmp_path, 1)
@@ -514,19 +588,36 @@ def test_a_change_to_how_words_split_repushes_everything(tmp_path, monkeypatch):
     assert counts.items["word-counts"]["split_version"] == SPLIT_VERSION + 1
 
 
+def _fail_third_write(books, monkeypatch):
+    """Make `books` refuse its third write from now; return what undoes that."""
+    upsert = books.upsert_item
+    start = len(books.writes)
+
+    def _fails_third(body):
+        if len(books.writes) - start == 2:
+            raise OSError("throttled")
+        return upsert(body)
+
+    monkeypatch.setattr(books, "upsert_item", _fails_third)
+    return lambda: monkeypatch.setattr(books, "upsert_item", upsert)
+
+
 def test_a_repush_that_fails_partway_is_retried_in_full(tmp_path, monkeypatch):
     # Given a Shelf pushed when words were split one way
     books, counts = _pushed(tmp_path, 3)
 
-    # When the splitting changes and the re-push fails before it finishes
+    # When the splitting changes and the re-push fails after two notes went up
     monkeypatch.setattr("libris.cosmos_store.SPLIT_VERSION", SPLIT_VERSION + 1)
-    books.fail_writes = OSError("throttled")
+    restore = _fail_third_write(books, monkeypatch)
     with pytest.raises(OSError, match="throttled"):
         push_shelf(tmp_path, books, counts)
+    assert len(books.writes) == 2
 
-    # Then the old version stands, so the next sync re-pushes everything
+    # Then the old version stands, so the next sync re-pushes all three - not
+    # only the one the failed run did not reach
     assert counts.items["word-counts"]["split_version"] == SPLIT_VERSION
-    books.fail_writes = None
+    restore()
+    books.writes.clear()
     report = push_shelf(tmp_path, books, counts)
     assert report.repushed_all
     assert len(books.writes) == 3
@@ -537,19 +628,12 @@ def test_a_push_that_fails_partway_keeps_what_did_go_up(tmp_path, monkeypatch):
     # Given a Shelf, and a remote that fails on the third write
     _shelf_of(tmp_path, 4)
     books, counts = FakeContainer(), FakeContainer()
-    upsert = books.upsert_item
-
-    def _fails_third(body):
-        if len(books.writes) == 2:
-            raise OSError("throttled")
-        return upsert(body)
-
-    monkeypatch.setattr(books, "upsert_item", _fails_third)
+    restore = _fail_third_write(books, monkeypatch)
     with pytest.raises(OSError):
         push_shelf(tmp_path, books, counts)
 
     # When the counts are in place and the Shelf is pushed again
-    monkeypatch.setattr(books, "upsert_item", upsert)
+    restore()
     counts.upsert_item(
         {"id": "word-counts", "buckets": [], "split_version": SPLIT_VERSION}
     )

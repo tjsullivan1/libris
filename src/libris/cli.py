@@ -3090,6 +3090,7 @@ def sync(
                 # A crash nobody is watching for has to land in the log, or the
                 # task just reports a failure code and the reason is lost.
                 traceback.print_exc(file=out)
+                out.write("Exit 1 (crashed).\n")
                 raise
         out.write("Exit 0.\n")
 

@@ -3581,7 +3581,9 @@ def test_sync_with_a_log_records_a_crash_there(monkeypatch, tmp_path):
     # When it runs with a log
     runner.invoke(app, ["sync", "--log", str(log)])
 
-    # Then the traceback is in the log, where the person will look
+    # Then the traceback is in the log, where the person will look, and the run
+    # ends with an exit line as every other run does
     text = log.read_text(encoding="utf-8")
     assert "Traceback" in text
     assert "something unforeseen" in text
+    assert text.rstrip().endswith("Exit 1 (crashed).")

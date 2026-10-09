@@ -76,6 +76,8 @@ class FakeContainer:
         enable_cross_partition_query: bool | None = None,
     ) -> list[dict[str, Any]]:
         self.queries.append(query)
+        if query == "SELECT VALUE c.id FROM c":
+            return list(self.items)
         values = {p["name"]: p["value"] for p in parameters or []}
         shape = _QUERY.match(query)
         assert shape, f"the fake does not understand {query!r}"
