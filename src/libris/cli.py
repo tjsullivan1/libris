@@ -1,8 +1,10 @@
+import contextlib
 import ipaddress
 import json
 import re
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import typer
@@ -22,7 +24,9 @@ from .config import (
 )
 from .cosmos_store import (
     CountsNotRebuilt,
+    DeletionsRefused,
     PushReport,
+    SyncInProgress,
     SyncRefused,
     connect_containers,
     push_shelf,
@@ -3030,6 +3034,12 @@ def _report_left_out(report: PushReport) -> None:
         typer.echo(f"\n{len(report.unreadable)} note(s) could not be read:")
         for path in report.unreadable:
             typer.echo(f"  {path.name}")
+    if report.unparseable:
+        typer.echo(
+            f"\n{len(report.unparseable)} file(s) have frontmatter that will not parse:"
+        )
+        for path in report.unparseable:
+            typer.echo(f"  {path.name}")
     if report.not_storable:
         typer.echo(
             f"\n{len(report.not_storable)} note(s) Cosmos cannot hold as written:"
@@ -3049,13 +3059,50 @@ def sync(
     database: str = typer.Option(
         "libris", "--database", envvar="LIBRIS_COSMOS_DATABASE"
     ),
+    allow_deletions: bool = typer.Option(
+        False,
+        "--allow-deletions",
+        help="Delete however many notes left the Shelf, rather than stopping "
+        "at a number that looks like a missing drive.",
+    ),
+    log: Path | None = typer.Option(
+        None,
+        "--log",
+        help="Append everything this run says to a file instead of the console, "
+        "for a run nobody is watching.",
+    ),
 ) -> None:
     """Push the Shelf to the remote Library in Cosmos.
 
-    Pushes every Book Note, then rebuilds the word counts searches are weighed
-    by. Signs in as whoever `DefaultAzureCredential` finds - `az login` on a PC.
-    Exits non-zero if anything was left out, so an unattended run is noticed.
+    Pushes the Book Notes that changed since the last sync, deletes the remote
+    copy of any that left the Shelf, and rebuilds the word counts searches are
+    weighed by. Signs in as whoever `DefaultAzureCredential` finds - `az login`
+    on a PC. Exits non-zero if anything was left out, so an unattended run is
+    noticed.
     """
+    if log is None:
+        _sync(endpoint, database, allow_deletions)
+        return
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a", encoding="utf-8") as out:
+        out.write(f"\n== libris sync {time.strftime('%Y-%m-%d %H:%M:%S')} ==\n")
+        out.flush()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
+                _sync(endpoint, database, allow_deletions)
+            except typer.Exit as stop:
+                out.write(f"Exit {stop.exit_code}.\n")
+                raise
+            except Exception:
+                # A crash nobody is watching for has to land in the log, or the
+                # task just reports a failure code and the reason is lost.
+                traceback.print_exc(file=out)
+                out.write("Exit 1 (crashed).\n")
+                raise
+        out.write("Exit 0.\n")
+
+
+def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
     try:
         from azure.core.exceptions import AzureError
     except ImportError:
@@ -3075,13 +3122,36 @@ def sync(
 
     try:
         books, counts = connect_containers(endpoint, database)
-        report = push_shelf(vault_path, books, counts)
+        report = push_shelf(
+            vault_path,
+            books,
+            counts,
+            # The account and database together: the state recorded for one
+            # says nothing about what another holds.
+            target=f"{endpoint}#{database}",
+            allow_mass_deletion=allow_deletions,
+        )
     except SyncRefused as refused:
         _report_id_collisions(refused.collisions)
         typer.echo(
             "\nNothing was pushed. The remote would keep one note per Libris ID, "
             "so it would hold fewer books than the Shelf (ADR 0033)."
         )
+        raise typer.Exit(1) from None
+    except DeletionsRefused as refused:
+        if refused.scanned_empty:
+            typer.echo(f"The Shelf at {vault_path} has no notes in it.")
+        typer.echo(
+            f"Sync would delete {refused.deleting} of the {refused.held} notes "
+            "the remote Library holds, which looks more like a missing or "
+            "half-synced drive than books you removed."
+        )
+        typer.echo("Nothing was pushed or deleted.")
+        typer.echo("If they really are gone, run: libris sync --allow-deletions")
+        raise typer.Exit(1) from None
+    except SyncInProgress:
+        typer.echo("Another `libris sync` is running on this PC. Nothing was pushed.")
+        typer.echo("It finishes the job; run this again afterwards if you need to.")
         raise typer.Exit(1) from None
     except CountsNotRebuilt as error:
         typer.echo(f"The notes were pushed, but the word counts were not: {error}")
@@ -3091,10 +3161,43 @@ def sync(
         typer.echo(f"Cosmos refused the sync: {error}")
         raise typer.Exit(1) from None
 
-    typer.echo(f"Pushed {report.pushed} note(s) to Cosmos.")
-    if not report.complete:
+    if report.repushed_all:
+        typer.echo(
+            "Words are split differently since the last sync, so every note "
+            "the Shelf could send was pushed again."
+        )
+        if not report.complete:
+            # Some documents were kept rather than replaced, so the old split
+            # version stands and the re-push is not finished (#195 review).
+            typer.echo(
+                "The re-push is not finished: the notes named below keep their "
+                "old copies, and the next sync tries again."
+            )
+    typer.echo(
+        f"Pushed {report.pushed} note(s) to Cosmos; {report.unchanged} unchanged, "
+        f"{report.deleted} deleted."
+    )
+    if (
+        report.without_id
+        or report.unreadable
+        or report.unparseable
+        or report.not_storable
+    ):
         _report_left_out(report)
-        typer.echo("\nThe remote Library cannot find these until they are pushed.")
+        # Not "cannot find": a note pushed before it became unreadable or
+        # unstorable keeps its last copy remotely (#195 review).
+        typer.echo(
+            "\nUntil these are pushed, the remote Library holds either nothing "
+            "for them or the copy from the last sync that sent them."
+        )
+    if report.deletions_held:
+        typer.echo(
+            f"\n{report.deletions_held} note(s) have left the Shelf but were not "
+            "deleted from the remote: a note that could not be read or parsed "
+            "might be one of them. The next sync that reads every note deletes "
+            "them."
+        )
+    if not report.complete:
         raise typer.Exit(1)
 
 

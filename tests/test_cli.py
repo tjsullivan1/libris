@@ -3479,3 +3479,156 @@ def test_sync_reports_a_missing_sync_extra_clearly(monkeypatch):
     assert "uv sync --extra sync" in result.output
     assert "uv tool install 'libris[sync]'" in result.output
     assert "Traceback" not in result.output
+
+
+# --- libris sync pushes what changed (#174) ---
+
+
+def test_a_second_sync_summarises_what_it_kept_and_deleted(monkeypatch, tmp_path):
+    # Given a Shelf already synced
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+    runner.invoke(app, ["sync"])
+
+    # When one note leaves and the Shelf is synced again
+    (tmp_path / "emma.md").unlink()
+    result = runner.invoke(app, ["sync"])
+
+    # Then the summary says what was sent, kept and removed
+    assert result.exit_code == 0, result.output
+    assert "Pushed 0 note(s) to Cosmos; 1 unchanged, 1 deleted." in result.output
+    assert list(books.items) == ["01D"]
+
+
+def test_sync_stops_short_of_emptying_the_remote_and_says_how_to_go_on(
+    monkeypatch, tmp_path
+):
+    # Given a Shelf already synced, which then scans empty
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    runner.invoke(app, ["sync"])
+    (tmp_path / "dune.md").unlink()
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then it stops, says why, names the way through, and deletes nothing
+    assert _stopped_cleanly(result)
+    assert "has no notes in it" in result.output
+    assert "delete 1 of the 1 notes" in result.output
+    assert "libris sync --allow-deletions" in result.output
+    assert list(books.items) == ["01D"]
+
+    # And given that, it deletes them
+    result = runner.invoke(app, ["sync", "--allow-deletions"])
+    assert result.exit_code == 0, result.output
+    assert books.items == {}
+
+
+def test_sync_says_when_deletions_waited_on_an_unreadable_note(
+    monkeypatch, tmp_path, lock_note
+):
+    # Given a Shelf already synced
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+    runner.invoke(app, ["sync"])
+
+    # When one note leaves while another cannot be read
+    (tmp_path / "emma.md").unlink()
+    lock_note(tmp_path / "dune.md", reads=True)
+    result = runner.invoke(app, ["sync"])
+
+    # Then the deletion waits, the run fails, and it says why
+    assert _stopped_cleanly(result)
+    assert "1 note(s) have left the Shelf but were not deleted" in result.output
+    assert "01E" in books.items
+
+
+def test_sync_says_a_repush_that_kept_old_copies_is_not_finished(
+    monkeypatch, tmp_path, lock_note
+):
+    # Given a Shelf synced when words were split one way
+    _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+    runner.invoke(app, ["sync"])
+    from libris.store import SPLIT_VERSION
+
+    # When the splitting changes while one note cannot be read
+    monkeypatch.setattr("libris.cosmos_store.SPLIT_VERSION", SPLIT_VERSION + 1)
+    lock_note(tmp_path / "emma.md", reads=True)
+    result = runner.invoke(app, ["sync"])
+
+    # Then it says the re-push is unfinished, and that the note keeps its copy
+    assert _stopped_cleanly(result)
+    assert "The re-push is not finished" in result.output
+    assert "emma.md" in result.output
+    assert "the copy from the last sync that sent them" in result.output
+
+    # And once it can read every note, it says only that everything went again
+    lock_note(tmp_path / "emma.md", reads=False)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0, result.output
+    assert "pushed again" in result.output
+    assert "not finished" not in result.output
+
+
+def test_sync_while_another_runs_says_so(monkeypatch, tmp_path):
+    # Given a sync already running on this PC
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    from libris.cosmos_store import _sync_lock
+
+    # When another is started
+    with _sync_lock():
+        result = runner.invoke(app, ["sync"])
+
+    # Then it stops cleanly, saying why, and pushes nothing
+    assert _stopped_cleanly(result)
+    assert "Another `libris sync` is running" in result.output
+    assert books.items == {}
+
+
+def test_sync_with_a_log_appends_each_run_to_it(monkeypatch, tmp_path):
+    # Given a Shelf, and a log a scheduled task writes to
+    _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "nameless.md", "title: Emma\n")
+    log = tmp_path / "logs" / "sync.log"
+
+    # When the Shelf is synced twice, once failing
+    first = runner.invoke(app, ["sync", "--log", str(log)])
+    (tmp_path / "nameless.md").unlink()
+    second = runner.invoke(app, ["sync", "--log", str(log)])
+
+    # Then both runs, and how each ended, are in the log rather than the console
+    text = log.read_text(encoding="utf-8")
+    assert text.count("== libris sync ") == 2
+    assert "nameless.md" in text
+    assert "Exit 1." in text
+    assert text.rstrip().endswith("Exit 0.")
+    assert first.exit_code == 1
+    assert second.exit_code == 0
+    assert "nameless.md" not in first.output
+
+
+def test_sync_with_a_log_records_a_crash_there(monkeypatch, tmp_path):
+    # Given a sync that crashes on something nobody planned for
+    _sync_to_fakes(monkeypatch, tmp_path)
+
+    def _crash(*args, **kwargs):
+        raise RuntimeError("something unforeseen")
+
+    monkeypatch.setattr("libris.cli.push_shelf", _crash)
+    log = tmp_path / "sync.log"
+
+    # When it runs with a log
+    runner.invoke(app, ["sync", "--log", str(log)])
+
+    # Then the traceback is in the log, where the person will look, and the run
+    # ends with an exit line as every other run does
+    text = log.read_text(encoding="utf-8")
+    assert "Traceback" in text
+    assert "something unforeseen" in text
+    assert text.rstrip().endswith("Exit 1 (crashed).")

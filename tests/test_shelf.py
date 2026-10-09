@@ -351,3 +351,26 @@ def test_resolving_an_unknown_identity_does_not_re_read_the_shelf(
 
     # Then it still costs nothing. This was the worst case at 10.4 seconds.
     assert counted_reads == []
+
+
+def test_the_index_names_the_files_it_could_not_parse_on_every_call(tmp_path):
+    # Given a Shelf holding a good note and one whose frontmatter is broken
+    (tmp_path / "dune.md").write_text("---\ntitle: Dune\n---\n", encoding="utf-8")
+    broken = tmp_path / "emma.md"
+    broken.write_text("---\ntitle: [Emma\n---\n", encoding="utf-8")
+    index = shelf.index_for(tmp_path)
+
+    # When the Shelf is listed, and listed again with nothing changed
+    first = [path.name for path in (index.notes(), index.unparseable)[1]]
+    second = [path.name for path in (index.notes(), index.unparseable)[1]]
+
+    # Then the broken file is named both times, though the second skipped it
+    # unread as one it already knew would not parse
+    assert first == ["emma.md"]
+    assert second == ["emma.md"]
+
+    # And once it is mended, it is not
+    broken.write_text("---\ntitle: Emma\n---\n", encoding="utf-8")
+    os.utime(broken, (1, 1))
+    index.notes()
+    assert index.unparseable == []

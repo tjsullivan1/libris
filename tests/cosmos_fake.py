@@ -21,6 +21,7 @@ from typing import Any
 
 _EQUALS = re.compile(r"^c\.(\w+) = (@\w+|true)$")
 _ARRAY_HOLDS = re.compile(r"^ARRAY_CONTAINS\(c\.(\w+), (@\w+)\)$")
+_ONE_OF = re.compile(r"^ARRAY_CONTAINS\((@\w+), c\.(\w+)\)$")
 _ANY_WORD = re.compile(
     r"^EXISTS\(SELECT VALUE w FROM w IN c\.(\w+) WHERE ARRAY_CONTAINS\((@\w+), w\)\)$"
 )
@@ -31,12 +32,21 @@ _QUERY = re.compile(
 _ORDER_KEY = re.compile(r"^c\.(\w+) ASC$")
 
 
+class NotFound(Exception):
+    """What the SDK raises for a missing item: an error carrying a 404."""
+
+    status_code = 404
+
+
 class FakeContainer:
-    """The two container calls `push_shelf` and `CosmosStore` make."""
+    """The container calls `push_shelf` and `CosmosStore` make."""
 
     def __init__(self) -> None:
         self.items: dict[str, dict[str, Any]] = {}
         self.queries: list[str] = []
+        # Every write, in order, so a test can say what a sync sent - and that
+        # it sent nothing.
+        self.writes: list[tuple[str, str]] = []
         # Lets a test make a write fail, as an outage or a throttle would.
         self.fail_writes: Exception | None = None
 
@@ -44,10 +54,21 @@ class FakeContainer:
         if self.fail_writes is not None:
             raise self.fail_writes
         stored = json.loads(json.dumps(body, allow_nan=False))
+        self.writes.append(("upsert", stored["id"]))
         # Re-inserted, so the newest write comes back first.
         self.items.pop(stored["id"], None)
         self.items[stored["id"]] = stored
         return stored
+
+    def delete_item(self, item: str, partition_key: Any) -> None:
+        if self.fail_writes is not None:
+            raise self.fail_writes
+        # Every container here is partitioned on /id (infra/main.tf).
+        assert partition_key == item, "partition key must be the id"
+        self.writes.append(("delete", item))
+        if item not in self.items:
+            raise NotFound(item)
+        del self.items[item]
 
     def query_items(
         self,
@@ -56,6 +77,8 @@ class FakeContainer:
         enable_cross_partition_query: bool | None = None,
     ) -> list[dict[str, Any]]:
         self.queries.append(query)
+        if query == "SELECT VALUE c.id FROM c":
+            return list(self.items)
         values = {p["name"]: p["value"] for p in parameters or []}
         shape = _QUERY.match(query)
         assert shape, f"the fake does not understand {query!r}"
@@ -85,6 +108,9 @@ def _clause(text: str, values: dict[str, Any]):
     if match := _ARRAY_HOLDS.match(text):
         name, value = match[1], values[match[2]]
         return lambda item: any(_same(held, value) for held in item.get(name, []))
+    if match := _ONE_OF.match(text):
+        wanted, name = values[match[1]], match[2]
+        return lambda item: name in item and any(_same(item[name], w) for w in wanted)
     if match := _ANY_WORD.match(text):
         name, wanted = match[1], values[match[2]]
         return lambda item: any(word in wanted for word in item.get(name, []))

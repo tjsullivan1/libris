@@ -253,7 +253,20 @@ libris config --cosmos-endpoint https://<account>.documents.azure.com
 libris sync
 ```
 
+Each sync pushes only the notes that changed since the last one, renames included, and deletes the remote copy of any note that has left the Shelf. What was pushed is recorded in `sync-state.json` beside `config.yaml`. If you delete it, the next sync pushes everything and rebuilds it.
+
 Sync refuses to push anything while two notes share a Libris ID, and names them, because the remote would keep only one. A note it cannot push - one with no Libris ID, say, which `libris migrate` gives - is named, and the command exits non-zero while every other note still goes up.
+
+Sync also stops, writing nothing, if the Shelf scans empty or more than a tenth of it (and more than 20 notes) has gone since the last sync. That is what an unmounted drive or a half-finished Obsidian Sync looks like. If you really did remove them, run `libris sync --allow-deletions`. While any note can't be read, or any file's frontmatter won't parse, no deletions are made, because that note might be one of them. Sync names the file so you can fix it.
+
+To keep the remote current without thinking about it, register a scheduled task on Windows:
+
+```powershell
+.\contrib\Register-LibrisSync.ps1               # every 30 minutes; -Minutes changes it
+.\contrib\Register-LibrisSync.ps1 -Remove
+```
+
+It runs the installed `librisw` (the console-less build of `libris`, so no window flashes up and the task reports sync's real exit code) while you're logged on and waits for the first run to finish so it can show how it went. Each run appends what it said, and its exit code, to `%LOCALAPPDATA%\libris\sync.log`. The task only runs while you're logged on because sync signs in with your `az login`, which Windows can only unlock for your own logon. Refresh the installed `libris` after an upgrade (`uv tool install 'libris[sync]' --force`), or the task keeps running the old one.
 
 ### 15. Ask Claude or Gemini about the Library
 
