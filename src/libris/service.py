@@ -618,6 +618,10 @@ def add_book(
             place for.
         ShelfUnreadable: If no note it could read holds the Book, and some
             notes could not be read. Nothing is written.
+        NoteNameTaken: If the Book is not held, but a note that is not it
+            already has its filename. Nothing is written (#169).
+        NoteWriteFailed: If the new note's write failed and the partial note
+            could not be removed.
     """
     # Writes land on the Shelf, so the duplicate check is asked of the live Shelf:
     # the stronger guarantee, true at the moment of the write (ADR 0010).
@@ -675,7 +679,14 @@ def add_book(
     # did not run, so the Surface can tell the person rather than imply that
     # nothing resembled this Book.
     path = create_book_note(candidate, vault_path, overrides=overrides or None)
-    note = BookNote.read(path)
+    try:
+        note = BookNote.read(path)
+    except OSError:
+        # Written, then locked by a sync client before it could be read back.
+        # Raised, every Surface said "nothing was added" about a note on the
+        # Shelf (#193 review). Answered from the candidate, as an unparseable
+        # read-back already is.
+        note = None
     return AddResult(
         libris_id=note.libris_id if note else None,
         path=path,

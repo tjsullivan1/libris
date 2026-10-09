@@ -290,12 +290,19 @@ def create_book_note(
 ) -> Path:
     """Creates a Markdown note for a book in the specified vault path.
 
+    Never replaces a file. Deciding whether the Library already holds the book
+    is `service.add_book`'s job, but a caller that skips it must still not cost
+    a reader the note already at this name (#169).
+
     Args:
         book: The candidate whose metadata seeds the note.
         vault_path: Directory where the note will be written.
         status: Default reading status (overridden if 'status' is in overrides).
         overrides: Optional dict of frontmatter fields to set/override.
             Keys must exist in DEFAULT_FRONTMATTER.
+
+    Raises:
+        NoteNameTaken: If a file already has the note's name. Nothing is written.
     """
     filename = sanitize_filename(f"{book.title} - {', '.join(book.authors[:1])}.md")
     file_path = vault_path / filename
@@ -335,7 +342,7 @@ def create_book_note(
     yaml_content = dump_frontmatter_yaml(frontmatter)
 
     body = render_body(book.title, "", book.description)
-    write_note(file_path, f"---\n{yaml_content}---\n\n{body}")
+    create_note(file_path, f"---\n{yaml_content}---\n\n{body}")
     return file_path
 
 
@@ -376,24 +383,59 @@ class NoteChanged(Exception):
     """
 
 
+class NoteNameTaken(FileExistsError):
+    """A new Book Note's filename is already taken, so nothing was written.
+
+    A `FileExistsError`, so a handler that reports any `OSError` as a note it
+    could not write still reports this one truthfully. The Surfaces catch it
+    first, to say what to do about it.
+
+    Attributes:
+        path: The note already at that name.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            f"A note named {path.name} is already on the Shelf, and a new note "
+            "never replaces one. Rename one of the two if they are different books."
+        )
+
+
 class NoteWriteFailed(Exception):
-    """A rewrite failed partway, and the note's old bytes could not be put back.
+    """A write failed partway, and could not be undone.
+
+    A rewrite whose note's old bytes could not be put back, or a new note that
+    could not be removed after its write failed (#193 review).
 
     Not an `OSError`, deliberately. Every handler that catches one reports the
-    note as untouched - "nothing merged", "nothing recorded" - and that is only
-    true of a write that failed before a byte changed, or whose note was put
-    back. This is the one case where neither holds (#166 review).
+    note as untouched - "nothing merged", "nothing recorded", "nothing added" -
+    and that is only true of a write that failed before a byte changed, or that
+    was undone. This is the one case where neither holds (#166 review).
 
     Attributes:
         path: The note that may be damaged.
     """
 
-    def __init__(self, path: Path, cause: OSError) -> None:
+    def __init__(
+        self, path: Path, cause: OSError, created: bool = False, moved: bool = False
+    ) -> None:
         self.path = path
+        if moved:
+            undone = (
+                "was moved or removed by another program before it could be "
+                "cleaned up, so a partial copy may be on the Shelf under another name."
+            )
+        elif created:
+            undone = (
+                "could not be removed, so a partial note may be left at that name. "
+                "Delete it before adding the book again."
+            )
+        else:
+            undone = "could not be put back as it was, so it may be damaged."
         super().__init__(
             f"{path.name} failed partway through being written "
-            f"({cause.strerror or cause}) and could not be put back as it was, "
-            "so it may be damaged."
+            f"({cause.strerror or cause}) and {undone}"
         )
 
 
@@ -553,29 +595,94 @@ def _encode_with_newline(content: str, newline: str) -> bytes:
     return content.encode("utf-8")
 
 
-def write_note(path: Path, content: str) -> None:
-    """Write a Book Note, keeping the line endings it already had.
+def create_note(path: Path, content: str) -> None:
+    """Write a new Book Note, never replacing a file already at its path.
 
-    `Path.write_text` leaves `newline=None`, and that translates every "\\n" to
-    `os.linesep` on the way out. It made every write platform-dependent: this
-    Shelf is stored CRLF, so reading a note on macOS and writing it back turned
-    all 3,059 of them into LF and showed every line as changed (#100). Writing
-    bytes takes the platform out of it.
+    The counterpart of `rewrite_note`, which never creates one. This was
+    `write_note`, which opened for writing and so replaced whatever was there:
+    adding a book already on the Shelf wrote over its note, and the reader's own
+    writing in it was lost (#169). An exclusive create cannot. The check and the
+    create are one call, so a note that appears between them is refused too.
 
-    Creates the file when it does not exist. A write that means to change a note
-    already on the Shelf wants `rewrite_note`, which refuses instead.
+    Writes bytes, in the platform's line ending, as `write_note` did:
+    `Path.write_text` translates every "\\n" itself, which made writes
+    platform-dependent (#100). A new note has no line ending of its own to keep.
 
     Args:
-        path: The Book Note to write.
+        path: The Book Note to create.
         content: The note's full text.
+
+    Raises:
+        NoteNameTaken: If a file is already at `path`. It is left untouched.
+        OSError: If the note cannot be created or written. A note created but
+            not fully written is removed, so a failure leaves no partial note.
+        NoteWriteFailed: If the write failed and the partial note could not be
+            removed: it may be left at `path`, or, if another program moved it
+            meanwhile, under another name.
     """
-    path.write_bytes(_encode_with_newline(content, note_newline(path)))
+    data = _encode_with_newline(content, note_newline(path))
+    try:
+        handle = path.open("xb")
+    except FileExistsError:
+        raise NoteNameTaken(path) from None
+    # Which file this is, asked while the handle still names it. The cleanup
+    # below runs after `close`, because Windows will not remove an open file.
+    created = os.fstat(handle.fileno())
+    try:
+        # `close` flushes, so a full disk reported only then is caught too.
+        with handle:
+            handle.write(data)
+    except OSError as exc:
+        try:
+            removed = _remove_if_still_ours(path, created)
+        except OSError:
+            # Locked by a sync client the moment it closed, say. The note may be
+            # partial, and "nothing was added" would be untrue (#193 review).
+            raise NoteWriteFailed(path, exc, created=True) from exc
+        if not removed:
+            # Renamed aside while it was written - a sync client's conflict copy,
+            # say. The note now at the name is not this one and is left alone,
+            # but the partial note is somewhere, so this is not "nothing was
+            # added" either (#193 review).
+            raise NoteWriteFailed(path, exc, moved=True) from exc
+        raise
+
+
+def _remove_if_still_ours(path: Path, created: os.stat_result) -> bool:
+    """Remove the file at `path`, but only if it is the file this call created.
+
+    Another process can rename or remove a file while it is being written - a
+    sync client, Obsidian - and put a different note at the same name. Removing
+    `path` without asking would delete that note, the loss `create_note` exists
+    to prevent (#193 review). Only the file whose identity matches `created`
+    is removed. What remains is the moment between the check and the removal,
+    which no portable call closes.
+
+    Args:
+        path: Where the note was created.
+        created: The stat of the handle that created it.
+
+    Returns:
+        True if the file was removed. False if `path` no longer names it: it
+        was moved or removed by someone else, and another file may be there.
+
+    Raises:
+        OSError: If the file there cannot be examined or removed.
+    """
+    try:
+        current = os.stat(path)
+    except FileNotFoundError:
+        return False
+    if not os.path.samestat(created, current):
+        return False
+    path.unlink(missing_ok=True)
+    return True
 
 
 def rewrite_note(path: Path, content: str, expected_sha256: str | None = None) -> None:
     """Replace the text of a Book Note that exists, never creating one.
 
-    `write_note` opens for writing, which creates a missing file. A write that
+    Opening for writing creates a missing file, as `write_note` did. A write that
     read a note and then found it removed before the write - Obsidian renaming
     it, a sync client moving it - put the old note back under its old name and
     reported success (#127 review): a Book Note resurrected by the act of

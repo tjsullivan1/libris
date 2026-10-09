@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from . import config, installed_version, service
 from .api import GoogleBooksClient
 from .cosmos_store import CountsMissing
-from .markdown import BookNote, NoteWriteFailed
+from .markdown import BookNote, NoteNameTaken, NoteWriteFailed
 from .note_format import (
     FORMAT_VALUES,
     PRIORITY_VALUES,
@@ -406,6 +406,11 @@ def create_server(
             raise ToolError(str(exc)) from None
         except service.ShelfUnreadable as exc:
             raise ToolError(f"{exc} Nothing was added.") from None
+        except NoteNameTaken as exc:
+            raise ToolError(f"{exc} Nothing was added.") from None
+        except NoteWriteFailed as exc:
+            # Not "nothing was added": a partial note may be on the Shelf.
+            raise ToolError(str(exc)) from None
 
         return WriteAnswer(
             outcome=result.outcome.value,

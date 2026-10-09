@@ -33,9 +33,9 @@ from .markdown import (
     BookNote,
     FrontmatterUnreadable,
     NoteChanged,
+    NoteNameTaken,
     NoteWriteFailed,
     RenameResult,
-    create_book_note,
     ensure_frontmatter_fields,
     find_duplicate_candidates,
     find_duplicates,
@@ -89,9 +89,11 @@ from .service import (
     IdCollision,
     IsbnAgreement,
     NotTwoNotes,
+    Outcome,
     ShelfExport,
     ShelfUnreadable,
     accept_correction,
+    add_book,
     apply_decisions,
     apply_encoding_repair,
     could_not_access,
@@ -573,11 +575,46 @@ def add(
     if date_finished is not None:
         overrides["date_finished"] = date_finished
 
-    # Create the book note
-    file_path = create_book_note(
-        selected_book, vault_path, status=status, overrides=overrides or None
-    )
-    typer.echo(f"Added: {file_path}")
+    # Through the service, as every other Surface adds (ADR 0008). This called
+    # `create_book_note` directly, so it skipped the duplicate check and wrote
+    # over a note the Shelf already held, the reader's writing with it (#169).
+    try:
+        # Asked to stop on a Near Match, so the reader sees it before anything
+        # is written: a person is here to answer, unlike the extension's caller
+        # by the time it presses Add (ADR 0026).
+        result = add_book(
+            vault_path, selected_book, overrides=overrides, stop_on_near_match=True
+        )
+        if result.outcome is Outcome.NEEDS_CONFIRMATION:
+            typer.echo("The Library holds notes that might be this book:")
+            for note in result.near_matches:
+                typer.echo(f"  {note.path.name}")
+            if not questionary.confirm(
+                "Add it as a different book?", default=False
+            ).ask():
+                typer.echo("Nothing was added.")
+                return
+            result = add_book(vault_path, selected_book, overrides=overrides)
+    except ValueError as exc:
+        # InvalidFieldValue subclasses ValueError, so this covers a value the
+        # Library does not define and a field it has no place for.
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
+    except (ShelfUnreadable, NoteNameTaken) as exc:
+        typer.echo(f"{exc} Nothing was added.")
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        typer.echo(f"{could_not_access(exc, 'The new note')}. Nothing was added.")
+        raise typer.Exit(code=1) from None
+    except NoteWriteFailed as exc:
+        # Not "nothing was added": a partial note may be on the Shelf.
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from None
+
+    if result.outcome is Outcome.ALREADY_PRESENT:
+        typer.echo(f"Already on the Shelf: {result.path}")
+        return
+    typer.echo(f"Added: {result.path}")
 
 
 @app.command()
@@ -2685,7 +2722,9 @@ def import_cmd(
         result = run_import(
             file_path, vault_path, apply=apply, format_name=fmt, limit=limit
         )
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, NoteWriteFailed) as e:
+        # NoteWriteFailed is deliberately not an OSError: a new note whose write
+        # failed could not be removed, and may be partial (#193 review).
         typer.echo(f"Error: {e}")
         raise typer.Exit(code=1)
 

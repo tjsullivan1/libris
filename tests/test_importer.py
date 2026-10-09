@@ -412,6 +412,38 @@ def test_cli_import_apply(tmp_path):
     assert len(list(vault.glob("*.md"))) == 1
 
 
+def test_cli_import_reports_a_new_note_left_partly_written(tmp_path, monkeypatch):
+    # Given an import whose new note fails partway and cannot be removed
+    from libris.markdown import NoteWriteFailed
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    set_config("book_vault", str(vault))
+    json_file = _write_audible_json(
+        tmp_path / "library.json",
+        [{"title": "CLI Book", "author": "CLI Author", "finished": "Yes"}],
+    )
+
+    def _fails(book, vault_path, **_kwargs):
+        raise NoteWriteFailed(
+            vault_path / "CLI Book - CLI Author.md",
+            OSError(28, "No space left on device"),
+            created=True,
+        )
+
+    monkeypatch.setattr("libris.importer.create_book_note", _fails)
+
+    # When the import is applied
+    result = runner.invoke(app, ["import", str(json_file), "--apply"])
+
+    # Then the note is named as possibly partial, not a traceback (#193 review).
+    # NoteWriteFailed is not an OSError, so the handler for those missed it.
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "CLI Book - CLI Author.md" in result.output
+    assert "partial note" in result.output
+
+
 def test_cli_import_file_not_found(tmp_path):
     result = runner.invoke(app, ["import", str(tmp_path / "nonexistent.json")])
     assert result.exit_code == 1
@@ -542,11 +574,11 @@ def test_apply_updates_writes_status_and_format_together(tmp_path, monkeypatch):
         "_write_through",
         lambda *args: (writes.append("rewrite"), real_through(*args))[1],
     )
-    real_write_note = markdown.write_note
+    real_create_note = markdown.create_note
     monkeypatch.setattr(
         importer,
-        "write_note",
-        lambda *args: (writes.append("write_note"), real_write_note(*args))[1],
+        "create_note",
+        lambda *args: (writes.append("create_note"), real_create_note(*args))[1],
         raising=False,
     )
     book = ImportBook(

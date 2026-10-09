@@ -63,9 +63,18 @@ async function call(path, { method = "GET", body, auth = true } = {}) {
   if (response.status === 401) throw new DaemonError(Problem.UNAUTHORIZED, settings);
   if (response.status === 502) throw new DaemonError(Problem.UPSTREAM, settings);
   // 503: the daemon could not read every note, so cannot say whether the Book
-  // is already held. Its detail names them; "start the server" would be wrong.
-  if (response.status === 422 || response.status === 503) {
+  // is already held. 409: another note already has the new note's name, and a
+  // note is never replaced (#169). Each detail names the notes; "start the
+  // server" would be wrong.
+  if ([409, 422, 503].includes(response.status)) {
     throw new DaemonError(Problem.REFUSED, settings, await detailOf(response));
+  }
+  // 500 with a detail: a new note's write failed and could not be undone, so a
+  // partial note may be on the Shelf under the name it gives (#193 review). A
+  // bare 500 says nothing usable, and is treated as before.
+  if (response.status === 500) {
+    const detail = await detailOf(response);
+    if (detail) throw new DaemonError(Problem.REFUSED, settings, detail);
   }
   if (!response.ok) {
     // Includes 404. The daemon never answers a miss with one (ADR 0021), so a
