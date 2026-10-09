@@ -2722,9 +2722,9 @@ def import_cmd(
         result = run_import(
             file_path, vault_path, apply=apply, format_name=fmt, limit=limit
         )
-    except (ValueError, OSError, NoteWriteFailed) as e:
-        # NoteWriteFailed is deliberately not an OSError: a new note whose write
-        # failed could not be removed, and may be partial (#193 review).
+    except (ValueError, OSError) as e:
+        # A note that cannot be written is reported per book in the summary
+        # below, not here: earlier books may already be written (#170).
         typer.echo(f"Error: {e}")
         raise typer.Exit(code=1)
 
@@ -2776,6 +2776,13 @@ def import_cmd(
         )
         for _book, path in result.damaged_books:
             typer.echo(f"  ! {path.name}")
+
+    if result.uncreated_books:
+        # Kept out of the "added" count: an import goes on past a note it could
+        # not create, and says which (#170).
+        typer.echo(f"\nCould not be added ({len(result.uncreated_books)}):")
+        for book, reason in result.uncreated_books:
+            typer.echo(f"  ! {book.title} by {', '.join(book.authors)} - {reason}")
 
     if result.unreadable_notes:
         # The duplicate check could not see these, so nothing new was created:

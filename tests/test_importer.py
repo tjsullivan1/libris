@@ -373,6 +373,86 @@ def test_import_case_insensitive_duplicate(tmp_path):
     assert len(result.new_books) == 0
 
 
+def _three_new_books(tmp_path: Path) -> tuple[Path, Path]:
+    """A vault and an import of three books, none of them on the Shelf."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    set_config("book_vault", str(vault))
+    json_file = _write_audible_json(
+        tmp_path / "library.json",
+        [
+            {"title": "Book One", "author": "Author A", "finished": "No"},
+            {"title": "Book Two", "author": "Author B", "finished": "No"},
+            {"title": "Book Three", "author": "Author C", "finished": "No"},
+        ],
+    )
+    return vault, json_file
+
+
+def test_import_goes_on_past_a_new_note_that_cannot_be_created(tmp_path, lock_note):
+    # Given an import of three new books, the second of which the Shelf refuses
+    vault, json_file = _three_new_books(tmp_path)
+    lock_note(vault / "Book Two - Author B.md", writes=True)
+
+    # When the import is applied
+    result = run_import(json_file, vault, apply=True)
+
+    # Then the books either side of it are still created (#170)
+    assert (vault / "Book One - Author A.md").exists()
+    assert (vault / "Book Three - Author C.md").exists()
+    assert not (vault / "Book Two - Author B.md").exists()
+    # And the refused book is reported as not created, not as added
+    assert [b.title for b in result.new_books] == ["Book One", "Book Three"]
+    assert [b.title for b, _ in result.uncreated_books] == ["Book Two"]
+    assert "Permission denied" in result.uncreated_books[0][1]
+
+
+def test_import_goes_on_past_a_name_already_taken_by_another_file(tmp_path):
+    # Given an import whose second book's filename is held by a file the
+    # duplicate check does not match - its frontmatter names a different book
+    vault, json_file = _three_new_books(tmp_path)
+    taken = _write_book(vault, "Book Two - Author B.md", title="Something Else")
+    before = taken.read_bytes()
+
+    # When the import is applied
+    result = run_import(json_file, vault, apply=True)
+
+    # Then that file is left exactly as it was, and the import goes on (#169, #170)
+    assert taken.read_bytes() == before
+    assert (vault / "Book Three - Author C.md").exists()
+    assert [b.title for b in result.new_books] == ["Book One", "Book Three"]
+    assert [b.title for b, _ in result.uncreated_books] == ["Book Two"]
+    assert "already on the Shelf" in result.uncreated_books[0][1]
+
+
+def test_import_goes_on_past_a_new_note_left_partly_written(tmp_path, monkeypatch):
+    # Given an import whose second new note fails partway and cannot be removed
+    from libris.importer import create_book_note as real_create
+    from libris.markdown import NoteWriteFailed
+
+    vault, json_file = _three_new_books(tmp_path)
+
+    def _second_fails(book, vault_path, **kwargs):
+        if book.title == "Book Two":
+            raise NoteWriteFailed(
+                vault_path / "Book Two - Author B.md",
+                OSError(28, "No space left on device"),
+                created=True,
+            )
+        return real_create(book, vault_path, **kwargs)
+
+    monkeypatch.setattr("libris.importer.create_book_note", _second_fails)
+
+    # When the import is applied
+    result = run_import(json_file, vault, apply=True)
+
+    # Then the import goes on, and the book is named with what may be left of it
+    assert (vault / "Book Three - Author C.md").exists()
+    assert [b.title for b in result.new_books] == ["Book One", "Book Three"]
+    assert [b.title for b, _ in result.uncreated_books] == ["Book Two"]
+    assert "partial note" in result.uncreated_books[0][1]
+
+
 # --- CLI tests ---
 
 
@@ -413,35 +493,55 @@ def test_cli_import_apply(tmp_path):
 
 
 def test_cli_import_reports_a_new_note_left_partly_written(tmp_path, monkeypatch):
-    # Given an import whose new note fails partway and cannot be removed
+    # Given an import whose second new note fails partway and cannot be removed
+    from libris.importer import create_book_note as real_create
     from libris.markdown import NoteWriteFailed
 
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    set_config("book_vault", str(vault))
-    json_file = _write_audible_json(
-        tmp_path / "library.json",
-        [{"title": "CLI Book", "author": "CLI Author", "finished": "Yes"}],
-    )
+    vault, json_file = _three_new_books(tmp_path)
 
-    def _fails(book, vault_path, **_kwargs):
-        raise NoteWriteFailed(
-            vault_path / "CLI Book - CLI Author.md",
-            OSError(28, "No space left on device"),
-            created=True,
-        )
+    def _second_fails(book, vault_path, **kwargs):
+        if book.title == "Book Two":
+            raise NoteWriteFailed(
+                vault_path / "Book Two - Author B.md",
+                OSError(28, "No space left on device"),
+                created=True,
+            )
+        return real_create(book, vault_path, **kwargs)
 
-    monkeypatch.setattr("libris.importer.create_book_note", _fails)
+    monkeypatch.setattr("libris.importer.create_book_note", _second_fails)
 
     # When the import is applied
     result = runner.invoke(app, ["import", str(json_file), "--apply"])
 
-    # Then the note is named as possibly partial, not a traceback (#193 review).
-    # NoteWriteFailed is not an OSError, so the handler for those missed it.
-    assert result.exit_code == 1
+    # Then the summary is printed, counting only the books actually added
+    assert result.exit_code == 0
     assert "Traceback" not in result.output
-    assert "CLI Book - CLI Author.md" in result.output
-    assert "partial note" in result.output
+    assert "2 new book(s) added" in result.output
+    # And the failed book is listed apart, named as possibly partial (#193
+    # review, #170)
+    failed = result.output.split("Could not be added (1):", 1)[1]
+    assert "Book Two by Author B" in failed
+    assert "Book Two - Author B.md" in failed
+    assert "partial note" in failed
+
+
+def test_cli_import_lists_a_book_the_shelf_refused(tmp_path, lock_note):
+    # Given an import of three new books, the second of which the Shelf refuses
+    vault, json_file = _three_new_books(tmp_path)
+    lock_note(vault / "Book Two - Author B.md", writes=True)
+
+    # When the import is applied
+    result = runner.invoke(app, ["import", str(json_file), "--apply"])
+
+    # Then the work done either side of it is reported (#170)
+    assert result.exit_code == 0
+    assert "2 new book(s) added" in result.output
+    added = result.output.split("Added books", 1)[1].split("Could not be added", 1)[0]
+    assert "Book One" in added
+    assert "Book Three" in added
+    assert "Book Two" not in added
+    failed = result.output.split("Could not be added (1):", 1)[1]
+    assert "Book Two by Author B - Permission denied" in failed
 
 
 def test_cli_import_file_not_found(tmp_path):

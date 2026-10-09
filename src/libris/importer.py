@@ -9,6 +9,7 @@ from .api import UNKNOWN_AUTHOR, BookCandidate
 from .markdown import (
     BookNote,
     FrontmatterUnreadable,
+    NoteNameTaken,
     NoteWriteFailed,
     create_book_note,
     list_books,
@@ -170,6 +171,9 @@ class ImportResult:
     unapplied_books: List[Tuple[ImportBook, Path]] = field(default_factory=list)
     # Due an update whose write failed partway and could not be put back.
     damaged_books: List[Tuple[ImportBook, Path]] = field(default_factory=list)
+    # New books whose note could not be created, each with why. Kept out of
+    # `new_books`, which a summary reports as added (#170).
+    uncreated_books: List[Tuple[ImportBook, str]] = field(default_factory=list)
     # Notes on the Shelf that could not be read, so could not be matched.
     unreadable_notes: List[Path] = field(default_factory=list)
     # Books that matched no note while some notes could not be read. Any of
@@ -284,15 +288,28 @@ def run_import(
         if dup is None and result.unreadable_notes:
             result.held_books.append(book)
         elif dup is None:
-            result.new_books.append(book)
             if apply:
                 overrides = {"format": book.format} if book.format else None
-                create_book_note(
-                    book.candidate,
-                    vault_path,
-                    status=book.status,
-                    overrides=overrides,
-                )
+                # An import must not stop on one note, as it does not for an
+                # update (#168): earlier books are already written, and a run
+                # that ends here never reports them (#170). `NoteNameTaken` is
+                # an `OSError`; `NoteWriteFailed` is not, and its message says
+                # a partial note may be left.
+                try:
+                    create_book_note(
+                        book.candidate,
+                        vault_path,
+                        status=book.status,
+                        overrides=overrides,
+                    )
+                except (NoteNameTaken, NoteWriteFailed) as exc:
+                    # Their messages say what happened and what to do.
+                    result.uncreated_books.append((book, str(exc)))
+                    continue
+                except OSError as exc:
+                    result.uncreated_books.append((book, exc.strerror or str(exc)))
+                    continue
+            result.new_books.append(book)
         else:
             dup_path, _, updates = dup
             if updates:
