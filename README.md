@@ -257,7 +257,7 @@ Each sync pushes only the notes that changed since the last one, renames include
 
 Sync refuses to push anything while two notes share a Libris ID, and names them, because the remote would keep only one. A note it cannot push - one with no Libris ID, say, which `libris migrate` gives - is named, and the command exits non-zero while every other note still goes up.
 
-Sync also stops, writing nothing, if the Shelf scans empty or more than a tenth of it (and more than 20 notes) has gone since the last sync. That is what an unmounted drive or a half-finished Obsidian Sync looks like. If you really did remove them, run `libris sync --allow-deletions`. While any note can't be read, no deletions are made, because the unreadable note might be one of them.
+Sync also stops, writing nothing, if the Shelf scans empty or more than a tenth of it (and more than 20 notes) has gone since the last sync. That is what an unmounted drive or a half-finished Obsidian Sync looks like. If you really did remove them, run `libris sync --allow-deletions`. While any note can't be read, or any file's frontmatter won't parse, no deletions are made, because that note might be one of them. Sync names the file so you can fix it.
 
 To keep the remote current without thinking about it, register a scheduled task on Windows:
 

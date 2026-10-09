@@ -76,6 +76,21 @@ class ShelfIndex:
     # answered for by an earlier parse of what they used to say. Either way a
     # question that found nothing has not ruled them out (#168 review).
     _unread: list[Path] = field(default_factory=list)
+    # The `.md` files the last call found but could not parse as notes.
+    _broken: list[Path] = field(default_factory=list)
+
+    @property
+    def unparseable(self) -> list[Path]:
+        """The `.md` files the last `notes()` skipped because they would not parse.
+
+        Not notes, as far as a search is concerned, but a note whose frontmatter
+        was broken by an edit is still a Book someone owns, and a caller that
+        reads absence as "left the Shelf" must not read it from these.
+
+        Returns:
+            Their paths, empty when every file parsed.
+        """
+        return list(self._broken)
 
     @property
     def unreadable(self) -> list[Path]:
@@ -96,6 +111,7 @@ class ShelfIndex:
         seen: set[str] = set()
         found: list[BookNote] = []
         self._unread = []
+        self._broken = []
 
         try:
             # Closed deterministically rather than left to exhaustion: if the
@@ -128,6 +144,7 @@ class ShelfIndex:
                 found.append(cached)
                 continue
             if self._unparseable.get(name) == fingerprint:
+                self._broken.append(Path(path))
                 continue
 
             try:
@@ -164,6 +181,7 @@ class ShelfIndex:
                 self._unparseable[name] = fingerprint
                 self._notes.pop(name, None)
                 self._fingerprints.pop(name, None)
+                self._broken.append(Path(path))
                 continue
 
             self._notes[name] = note

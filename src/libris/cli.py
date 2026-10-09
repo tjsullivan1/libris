@@ -3033,6 +3033,12 @@ def _report_left_out(report: PushReport) -> None:
         typer.echo(f"\n{len(report.unreadable)} note(s) could not be read:")
         for path in report.unreadable:
             typer.echo(f"  {path.name}")
+    if report.unparseable:
+        typer.echo(
+            f"\n{len(report.unparseable)} file(s) have frontmatter that will not parse:"
+        )
+        for path in report.unparseable:
+            typer.echo(f"  {path.name}")
     if report.not_storable:
         typer.echo(
             f"\n{len(report.not_storable)} note(s) Cosmos cannot hold as written:"
@@ -3159,14 +3165,20 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
         f"Pushed {report.pushed} note(s) to Cosmos; {report.unchanged} unchanged, "
         f"{report.deleted} deleted."
     )
-    if report.without_id or report.unreadable or report.not_storable:
+    if (
+        report.without_id
+        or report.unreadable
+        or report.unparseable
+        or report.not_storable
+    ):
         _report_left_out(report)
         typer.echo("\nThe remote Library cannot find these until they are pushed.")
     if report.deletions_held:
         typer.echo(
             f"\n{report.deletions_held} note(s) have left the Shelf but were not "
-            "deleted from the remote: a note that could not be read might be one "
-            "of them. The next sync that reads every note deletes them."
+            "deleted from the remote: a note that could not be read or parsed "
+            "might be one of them. The next sync that reads every note deletes "
+            "them."
         )
     if not report.complete:
         raise typer.Exit(1)

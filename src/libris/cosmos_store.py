@@ -139,6 +139,10 @@ class PushReport:
     repushed_all: bool = False
     without_id: list[Path] = field(default_factory=list)
     unreadable: list[Path] = field(default_factory=list)
+    # `.md` files whose frontmatter would not parse. Not searchable on the
+    # Shelf either, but one may be a note an edit broke, so they hold back
+    # deletions just as an unreadable note does.
+    unparseable: list[Path] = field(default_factory=list)
     not_storable: list[tuple[Path, str]] = field(default_factory=list)
 
     @property
@@ -147,6 +151,7 @@ class PushReport:
         return not (
             self.without_id
             or self.unreadable
+            or self.unparseable
             or self.not_storable
             or self.deletions_held
         )
@@ -329,6 +334,7 @@ def push_shelf(
     # earlier parse, so one path can be named by both.
     unreadable = set(report.unreadable) | set(index.unreadable)
     report.unreadable = sorted(unreadable, key=lambda path: path.name)
+    report.unparseable = sorted(index.unparseable, key=lambda path: path.name)
 
     collisions = _shared_ids(note for note, _ in documents)
     if collisions:
@@ -342,15 +348,14 @@ def push_shelf(
         remote is not None and remote.get("split_version") != SPLIT_VERSION
     )
     if remote is None or report.repushed_all or not state.trusted:
-        # Every document goes up, so no recorded hash may match. The IDs are
-        # kept: they are how a note that left the Shelf is found to delete.
-        state.hashes = dict.fromkeys(state.hashes, "")
-        # And the state is not the only inventory: a lost file, or one written
-        # for another account, forgets documents the remote still holds, and
-        # what it forgets here it would never delete (#195 review). Asked only
-        # when everything goes up anyway, so an ordinary sync pays nothing.
-        for libris_id in _ids_on_remote(books):
-            state.hashes.setdefault(libris_id, "")
+        # Every document goes up, so no recorded hash may match. And the state
+        # cannot be the inventory: a lost file, or one written for another
+        # account, forgets documents the remote still holds, and remembers ones
+        # a recreated container no longer does. So the remote is asked, and
+        # what it answers replaces the state's IDs outright (#195 review).
+        # Asked only when everything goes up anyway, so an ordinary sync pays
+        # nothing.
+        state.hashes = dict.fromkeys(_ids_on_remote(books), "")
 
     leaving = sorted(set(state.hashes) - present)
     if not allow_mass_deletion:
@@ -365,8 +370,10 @@ def push_shelf(
                 scanned_empty=scanned_empty,
             )
     # A note that cannot be read may be any of the ones leaving, so none is
-    # deleted until every note on the Shelf can be.
-    if unreadable:
+    # deleted until every note on the Shelf can be. A file that will not parse
+    # is the same: a note whose frontmatter an edit broke looks exactly like a
+    # note that left, and deleting it for a typo is not a sync's call.
+    if unreadable or report.unparseable:
         report.deletions_held = len(leaving)
         leaving = []
 

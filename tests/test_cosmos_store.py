@@ -532,6 +532,40 @@ def test_an_ordinary_sync_does_not_list_the_remote(tmp_path):
     assert books.queries == []
 
 
+def test_a_note_whose_frontmatter_breaks_is_not_deleted_for_it(tmp_path):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 3)
+
+    # When one note's frontmatter is broken by an edit, and the Shelf pushed
+    (tmp_path / "book-01.md").write_text(
+        "---\ntitle: [Book 1\nlibris_id: 01B01\n---\n", encoding="utf-8"
+    )
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then its document stays, the file is named, and the sync is not complete
+    assert "01B01" in books.items
+    assert [path.name for path in report.unparseable] == ["book-01.md"]
+    assert report.deletions_held == 1
+    assert not report.complete
+
+
+def test_a_recreated_remote_is_not_held_to_what_the_old_one_held(tmp_path):
+    # Given a Shelf of 30 pushed to an account
+    _pushed(tmp_path, 30)
+
+    # When 21 notes leave, and the account's containers are recreated empty
+    for n in range(21):
+        (tmp_path / f"book-{n:02}.md").unlink()
+    books, counts = FakeContainer(), FakeContainer()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then nothing is refused, since the new remote holds none of the 21, and
+    # the nine still on the Shelf go up
+    assert report.pushed == 9
+    assert report.deleted == 0
+    assert len(books.items) == 9
+
+
 def test_an_id_given_up_between_the_two_reads_is_deleted(tmp_path, monkeypatch):
     # Given a pushed note, which the index read while it held its first ID
     books, counts = _pushed(tmp_path, 2)
@@ -542,6 +576,7 @@ def test_an_id_given_up_between_the_two_reads_is_deleted(tmp_path, monkeypatch):
 
     class _Stale:
         unreadable: list = []
+        unparseable: list = []
 
         def notes(self):
             return listed
