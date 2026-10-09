@@ -71,6 +71,12 @@ test = [
 [project.scripts]
 libris = "libris.cli:app"
 
+# The same app with no console, for a scheduled task. It opens no window and
+# still exits with the command's own status, which `conhost --headless` does not
+# pass on (#195 review). Run it with --log, since it has nowhere to print.
+[project.gui-scripts]
+librisw = "libris.cli:app"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

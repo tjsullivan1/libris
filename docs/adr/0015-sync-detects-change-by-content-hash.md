@@ -70,6 +70,12 @@ those syncs also list the remote's IDs, at the cost of one query, and delete wha
 no longer has. The deletion guard applies to those deletions as to any other. An ordinary sync
 trusts the state and does not ask (#195 review).
 
+**A document kept rather than replaced is still counted, and still holds the version back.** A
+note that cannot be read or stored keeps its old document, and so does a note whose deletion
+waited. The word counts include those documents, because the remote can still return them. During
+a full re-push, a kept document still holds words split the old way. The old split version is
+then recorded rather than the new one, so the next sync tries the full re-push again.
+
 **A second sync with nothing changed writes nothing.** The word counts are still rebuilt every
 run (ADR 0033), but they are compared with the stored document and written only if they differ.
 That costs one read rather than a write of 150-190 KiB every half hour.

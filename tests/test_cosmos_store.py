@@ -532,6 +532,68 @@ def test_an_ordinary_sync_does_not_list_the_remote(tmp_path):
     assert books.queries == []
 
 
+def test_an_id_given_up_between_the_two_reads_is_deleted(tmp_path, monkeypatch):
+    # Given a pushed note, which the index read while it held its first ID
+    books, counts = _pushed(tmp_path, 2)
+    listed = index_for(tmp_path).notes()
+
+    # When its ID changes before sync reads it again
+    _write(tmp_path, "book-01.md", "title: Book 1\nlibris_id: 01NEW\n")
+
+    class _Stale:
+        unreadable: list = []
+
+        def notes(self):
+            return listed
+
+    monkeypatch.setattr("libris.cosmos_store.index_for", lambda vault: _Stale())
+    push_shelf(tmp_path, books, counts)
+
+    # Then the note goes up under the ID it now has, and the old one goes
+    assert sorted(books.items) == ["01B00", "01NEW"]
+
+
+def test_a_document_kept_for_a_note_cosmos_cannot_hold_is_still_counted(tmp_path):
+    # Given two pushed notes
+    books, counts = _pushed(tmp_path, 2)
+
+    # When one gains a key JSON cannot carry, so it can no longer go up
+    _write(tmp_path, "book-01.md", "title: Book 1\nlibris_id: 01B01\n1984: yes\n")
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then its old document stays, and the counts still weigh both notes
+    assert report.not_storable
+    assert sorted(books.items) == ["01B00", "01B01"]
+    assert CosmosStore(books, counts).word_counts(None).total == 2
+
+
+def test_a_repush_that_leaves_a_document_unreplaced_keeps_the_old_version(
+    tmp_path, monkeypatch, lock_note
+):
+    # Given a Shelf pushed when words were split one way
+    books, counts = _pushed(tmp_path, 3)
+    index_for(tmp_path).notes()
+
+    # When the splitting changes while one note cannot be read
+    monkeypatch.setattr("libris.cosmos_store.SPLIT_VERSION", SPLIT_VERSION + 1)
+    lock_note(tmp_path / "book-02.md", reads=True)
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then the old version stands, since that note's document is split the old
+    # way, and the counts still weigh it
+    assert not report.complete
+    assert counts.items["word-counts"]["split_version"] == SPLIT_VERSION
+    assert CosmosStore(books, counts).word_counts(None).total == 3
+
+    # And the next sync that can read it re-pushes everything and records it
+    lock_note(tmp_path / "book-02.md", reads=False)
+    books.writes.clear()
+    report = push_shelf(tmp_path, books, counts)
+    assert report.repushed_all
+    assert len(books.writes) == 3
+    assert counts.items["word-counts"]["split_version"] == SPLIT_VERSION + 1
+
+
 def test_the_state_file_is_kept_outside_the_shelf(tmp_path, mock_config_dir):
     # Given a Shelf
     _shelf_of(tmp_path, 1)

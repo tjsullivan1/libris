@@ -302,8 +302,6 @@ def push_shelf(
     # Once: each call rescans the Shelf, and resets what it could not read.
     on_shelf = index.notes()
     for listed in on_shelf:
-        if listed.libris_id is not None:
-            present.add(listed.libris_id)
         # The index read every note, but one can be locked, denied or removed
         # since. That is the same race `ShelfIndex` reports rather than raises,
         # and a crash here would push nothing and name nothing (#185 review).
@@ -313,6 +311,11 @@ def push_shelf(
             note = None
         if note is None:
             report.unreadable.append(listed.path)
+            # The index's earlier reading is the best word on what this note
+            # is. Only then: a note read afresh may have changed its ID since,
+            # and the ID it gave up has left the Shelf (#195 review).
+            if listed.libris_id is not None:
+                present.add(listed.libris_id)
             continue
         if note.libris_id is None:
             report.without_id.append(note.path)
@@ -385,11 +388,24 @@ def push_shelf(
         # only what it did not get to.
         state.save()
 
-    # Over the notes the remote now holds, not those this run sent: a note
-    # unchanged since the last sync is there to be weighed, and one that could
-    # not go up is not. Written only once every document is up, so a version
-    # recorded here means none still holds words split the old way.
-    rebuilt = counts_document(count_by_status(stored_keys(n) for n, _ in documents))
+    # Over every note the remote now holds, not only those read this run: one
+    # unchanged since the last sync is there to be weighed, and so is one kept
+    # because its note could not be read or stored, or because its deletion
+    # waited (#195 review). Kept documents are fetched, which is none on a
+    # Shelf that reads and stores cleanly.
+    sent = {document["id"] for _, document in documents}
+    kept = [
+        stored_keys(_note(document))
+        for document in _held_documents(books, set(state.hashes) - sent)
+    ]
+    rebuilt = counts_document(
+        count_by_status([stored_keys(n) for n, _ in documents] + kept)
+    )
+    # A hash left empty is a document this code has not sent: a full push kept
+    # it rather than replacing it. Its words may be split the old way, so the
+    # version stays as it was, and the next sync tries the full push again.
+    if any(not digest for digest in state.hashes.values()):
+        rebuilt["split_version"] = (remote or {}).get("split_version")
     if remote is None or any(
         remote.get(key) != value for key, value in rebuilt.items()
     ):
@@ -434,6 +450,19 @@ def _ids_on_remote(books: Container) -> list[str]:
             query="SELECT VALUE c.id FROM c", enable_cross_partition_query=True
         )
     )
+
+
+def _held_documents(books: Container, ids: set[str]) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for libris_id in sorted(ids):
+        found.extend(
+            books.query_items(
+                query="SELECT * FROM c WHERE c.id = @id",
+                parameters=[{"name": "@id", "value": libris_id}],
+                enable_cross_partition_query=True,
+            )
+        )
+    return found
 
 
 def _delete(books: Container, libris_id: str) -> None:

@@ -13,7 +13,10 @@
     through your `az login`, and that sign-in is encrypted for your logon:
     the S4U logon type the daemon's task uses has no password to unlock it.
 
-    It runs under `conhost --headless`, so no console window appears each time.
+    It runs `librisw`, the console-less build of `libris` installed beside it,
+    so no window appears each time and the task's result is sync's own exit
+    code. `conhost --headless` hid the window too, but reported every run as a
+    success.
 
 .PARAMETER TaskName
     The scheduled task to create. Re-running with the same name replaces it.
@@ -25,7 +28,7 @@
     The file each run appends to.
 
 .PARAMETER LibrisPath
-    The libris executable. Resolved from PATH when not given.
+    The librisw executable. Found beside the libris on PATH when not given.
 
 .PARAMETER Remove
     Unregister the task instead of creating it.
@@ -64,15 +67,14 @@ if (-not $LibrisPath) {
     if (-not $found) {
         throw "libris is not on PATH. Install it with 'uv tool install libris[sync]', or pass -LibrisPath."
     }
-    $LibrisPath = $found.Source
+    $LibrisPath = Join-Path (Split-Path -Parent $found.Source) 'librisw.exe'
 }
 
 if (-not (Test-Path -LiteralPath $LibrisPath)) {
-    throw "No libris executable at $LibrisPath."
+    throw "No librisw executable at $LibrisPath. It ships with libris 0.18 and later: uv tool install 'libris[sync]' --force"
 }
 
-$arguments = "--headless `"$LibrisPath`" sync --log `"$LogPath`""
-$action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument $arguments -WorkingDirectory $HOME
+$action = New-ScheduledTaskAction -Execute $LibrisPath -Argument "sync --log `"$LogPath`"" -WorkingDirectory $HOME
 # Starts now and repeats with no end date.
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $Minutes)
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
