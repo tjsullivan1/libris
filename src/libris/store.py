@@ -158,11 +158,15 @@ def _title_order(note: BookNote) -> tuple[str, tuple[bool, str, str]]:
 
 
 def _count(notes: Iterable[BookNote]) -> WordCounts:
+    return _count_words(note_words(note) for note in notes)
+
+
+def _count_words(word_sets: Iterable[frozenset[str]]) -> WordCounts:
     total = 0
     counts: dict[str, int] = {}
-    for note in notes:
+    for words in word_sets:
         total += 1
-        for word in note_words(note):
+        for word in words:
             counts[word] = counts.get(word, 0) + 1
     return WordCounts(total=total, counts=counts)
 
@@ -296,11 +300,14 @@ def count_by_status(documents: Iterable[StoredKeys]) -> dict[str | None, WordCou
     """The word counts sync stores, one bucket per Status found (ADR 0033).
 
     Covers the titled notes only, and every Status value they carry, including
-    none, so the buckets split the searchable notes exactly.
+    none, so the buckets split the searchable notes exactly. Counts the words
+    each document stores rather than splitting its note again, so a document
+    kept from an older sync is weighed by the words it is queried on (#195
+    review).
     """
     titled = [d for d in documents if d.title_key is not None]
     return {
-        status: _count(d.note for d in titled if d.status == status)
+        status: _count_words(d.words for d in titled if d.status == status)
         for status in {d.status for d in titled}
     }
 

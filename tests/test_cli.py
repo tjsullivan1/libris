@@ -3575,6 +3575,22 @@ def test_sync_says_a_repush_that_kept_old_copies_is_not_finished(
     assert "not finished" not in result.output
 
 
+def test_sync_while_another_runs_says_so(monkeypatch, tmp_path):
+    # Given a sync already running on this PC
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    from libris.cosmos_store import _sync_lock
+
+    # When another is started
+    with _sync_lock():
+        result = runner.invoke(app, ["sync"])
+
+    # Then it stops cleanly, saying why, and pushes nothing
+    assert _stopped_cleanly(result)
+    assert "Another `libris sync` is running" in result.output
+    assert books.items == {}
+
+
 def test_sync_with_a_log_appends_each_run_to_it(monkeypatch, tmp_path):
     # Given a Shelf, and a log a scheduled task writes to
     _sync_to_fakes(monkeypatch, tmp_path)

@@ -26,6 +26,7 @@ from .cosmos_store import (
     CountsNotRebuilt,
     DeletionsRefused,
     PushReport,
+    SyncInProgress,
     SyncRefused,
     connect_containers,
     push_shelf,
@@ -3147,6 +3148,10 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
         )
         typer.echo("Nothing was pushed or deleted.")
         typer.echo("If they really are gone, run: libris sync --allow-deletions")
+        raise typer.Exit(1) from None
+    except SyncInProgress:
+        typer.echo("Another `libris sync` is running on this PC. Nothing was pushed.")
+        typer.echo("It finishes the job; run this again afterwards if you need to.")
         raise typer.Exit(1) from None
     except CountsNotRebuilt as error:
         typer.echo(f"The notes were pushed, but the word counts were not: {error}")

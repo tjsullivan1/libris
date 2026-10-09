@@ -17,7 +17,9 @@ from libris.cosmos_store import (
     CountsMissing,
     CountsNotRebuilt,
     DeletionsRefused,
+    SyncInProgress,
     SyncRefused,
+    _sync_lock,
     push_shelf,
 )
 from libris.shelf import index_for
@@ -564,6 +566,48 @@ def test_a_shelf_of_only_broken_notes_is_named_not_called_empty(tmp_path):
     assert sorted(p.name for p in report.unparseable) == ["book-00.md", "book-01.md"]
     assert report.deletions_held == 2
     assert len(books.items) == 2
+
+
+def test_a_sync_while_another_runs_is_refused_before_any_write(tmp_path):
+    # Given a Shelf, and a sync already holding the lock
+    _shelf_of(tmp_path, 2)
+    books, counts = FakeContainer(), FakeContainer()
+
+    # When a second sync starts while it does
+    with _sync_lock():
+        with pytest.raises(SyncInProgress):
+            push_shelf(tmp_path, books, counts)
+
+    # Then the second wrote nothing, and once the first is done a sync runs
+    assert books.writes == [] and counts.writes == []
+    assert push_shelf(tmp_path, books, counts).pushed == 2
+
+
+def test_a_kept_document_is_counted_by_the_words_it_was_stored_with(
+    tmp_path, monkeypatch, lock_note
+):
+    # Given a Shelf pushed when words were split one way
+    books, counts = _pushed(tmp_path, 3)
+    index_for(tmp_path).notes()
+    import libris.store
+
+    # When the splitting changes, while one note cannot be read so its
+    # document is kept with the words it was stored with
+    split = libris.store.note_words
+    monkeypatch.setattr(
+        "libris.store.note_words",
+        lambda note: frozenset(word + "x" for word in split(note)),
+    )
+    monkeypatch.setattr("libris.cosmos_store.SPLIT_VERSION", SPLIT_VERSION + 1)
+    lock_note(tmp_path / "book-02.md", reads=True)
+    push_shelf(tmp_path, books, counts)
+
+    # Then the counts weigh the kept document by its stored, old-split words -
+    # the ones a query will match it on - and the others by their new ones
+    weights = CosmosStore(books, counts).word_counts(None).counts
+    assert books.items["01B02"]["words"] == ["2", "book"]
+    assert weights["book"] == 1
+    assert weights["bookx"] == 2
 
 
 def test_a_recreated_remote_is_not_held_to_what_the_old_one_held(tmp_path):

@@ -19,10 +19,11 @@ themselves, so the tests run them against a fake. Only `connect_containers`
 imports the SDK, which is the `sync` extra; nothing else here needs it.
 """
 
+import contextlib
 import hashlib
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -34,6 +35,7 @@ from .shelf import index_for
 from .store import (
     SPLIT_VERSION,
     Listing,
+    StoredKeys,
     WordCounts,
     count_by_status,
     stored_keys,
@@ -288,7 +290,77 @@ def push_shelf(
         DeletionsRefused: If the Shelf scans empty or implausibly many notes
             have left it. Nothing is written.
         CountsNotRebuilt: If the word counts could not be written.
+        SyncInProgress: If another sync on this PC is running. Nothing is
+            written.
     """
+    # One sync at a time, from reading the state to saving it. Two interleaved
+    # could leave Cosmos holding one run's document while the state records the
+    # other's digest, and every later sync would skip the stale copy (#195
+    # review). The scheduled task's own runs never overlap, but a sync typed
+    # while it runs would.
+    with _sync_lock():
+        return _push_shelf(
+            vault_path,
+            books,
+            counts,
+            target=target,
+            allow_mass_deletion=allow_mass_deletion,
+        )
+
+
+class SyncInProgress(Exception):
+    """Another `libris sync` on this PC holds the lock. Nothing was written."""
+
+
+@contextlib.contextmanager
+def _sync_lock() -> Iterator[None]:
+    # An operating-system lock rather than a file that exists or not: the lock
+    # goes when the process does, so a crash cannot leave every later sync
+    # refused.
+    path = get_config_dir() / "sync.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+b") as handle:
+        try:
+            _lock(handle)
+        except OSError:
+            raise SyncInProgress(
+                "another `libris sync` is running on this PC"
+            ) from None
+        try:
+            yield
+        finally:
+            _unlock(handle)
+
+
+if os.name == "nt":
+    import msvcrt
+
+    def _lock(handle: Any) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock(handle: Any) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock(handle: Any) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(handle: Any) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _push_shelf(
+    vault_path: Path,
+    books: Container,
+    counts: Container,
+    *,
+    target: str,
+    allow_mass_deletion: bool,
+) -> PushReport:
     collisions = find_id_collisions(vault_path)
     if collisions:
         raise SyncRefused(collisions)
@@ -405,7 +477,7 @@ def push_shelf(
     # Shelf that reads and stores cleanly.
     sent = {document["id"] for _, document in documents}
     kept = [
-        stored_keys(_note(document))
+        _keys_as_stored(document)
         for document in _held_documents(books, set(state.hashes) - sent)
     ]
     rebuilt = counts_document(
@@ -459,6 +531,25 @@ def _ids_on_remote(books: Container) -> list[str]:
         books.query_items(
             query="SELECT VALUE c.id FROM c", enable_cross_partition_query=True
         )
+    )
+
+
+def _keys_as_stored(document: dict[str, Any]) -> StoredKeys:
+    """A kept document's keys as Cosmos holds them, not as this code would split them.
+
+    During a split-version change a kept document still holds words split the
+    old way, and those are what it is queried on (#195 review).
+    """
+    return StoredKeys(
+        note=_note(document),
+        libris_id=document["id"],
+        superseded_ids=tuple(document.get("superseded_ids") or ()),
+        isbn=document.get("isbn"),
+        google_books_id=document.get("google_books_id"),
+        title_key=document.get("title_key"),
+        author_key=document.get("author_key"),
+        words=frozenset(document.get("words") or ()),
+        status=document.get("status"),
     )
 
 

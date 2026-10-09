@@ -75,8 +75,11 @@ if (-not (Test-Path -LiteralPath $LibrisPath)) {
 }
 
 $action = New-ScheduledTaskAction -Execute $LibrisPath -Argument "sync --log `"$LogPath`"" -WorkingDirectory $HOME
-# Starts now and repeats with no end date.
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $Minutes)
+# First fires one interval from now and repeats with no end date. Not now: the
+# explicit start below is the first run, and a trigger firing at registration
+# would race it, leaving this script waiting on a run it never saw start
+# (#195 review).
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($Minutes) -RepetitionInterval (New-TimeSpan -Minutes $Minutes)
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
