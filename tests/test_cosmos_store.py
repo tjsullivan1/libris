@@ -549,6 +549,23 @@ def test_a_note_whose_frontmatter_breaks_is_not_deleted_for_it(tmp_path):
     assert not report.complete
 
 
+def test_a_shelf_of_only_broken_notes_is_named_not_called_empty(tmp_path):
+    # Given a Shelf of two already pushed
+    books, counts = _pushed(tmp_path, 2)
+
+    # When every note's frontmatter is broken, so the scan finds no note
+    for n in range(2):
+        (tmp_path / f"book-{n:02}.md").write_text(
+            f"---\ntitle: [Book {n}\n---\n", encoding="utf-8"
+        )
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then it is not refused as empty: the files are named, nothing is deleted
+    assert sorted(p.name for p in report.unparseable) == ["book-00.md", "book-01.md"]
+    assert report.deletions_held == 2
+    assert len(books.items) == 2
+
+
 def test_a_recreated_remote_is_not_held_to_what_the_old_one_held(tmp_path):
     # Given a Shelf of 30 pushed to an account
     _pushed(tmp_path, 30)

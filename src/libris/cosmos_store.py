@@ -362,7 +362,10 @@ def push_shelf(
         # Whatever the count, and whether or not the IDs held are known: an
         # empty Shelf would otherwise rebuild the counts as empty, and hide
         # every book the remote holds (#195 review).
-        scanned_empty = not on_shelf and bool(state.hashes)
+        # A scan that found files it could not read or parse is not empty: it
+        # is incomplete, and the hold below names those files (#195 review).
+        incomplete = bool(unreadable or report.unparseable)
+        scanned_empty = not on_shelf and not incomplete and bool(state.hashes)
         if scanned_empty or len(leaving) > _plausible_deletions(len(state.hashes)):
             raise DeletionsRefused(
                 deleting=len(leaving),

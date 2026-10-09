@@ -95,23 +95,27 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register 'libris sync' every $Minutes mi
         -Description "Pushes what changed on the Libris Shelf to the remote Library. Log: $LogPath" `
         -Force | Out-Null
 
-    Start-ScheduledTask -TaskName $TaskName
-
     # Verified by waiting for the first run and reading how it ended, rather
     # than by trusting the task started: a sync that cannot sign in fails every
-    # half hour in silence otherwise.
+    # half hour in silence otherwise. Start-ScheduledTask does not wait, and the
+    # task can still read Ready or Queued before the run begins, so this waits
+    # for a run that started after this point to leave both (#195 review).
+    $before = (Get-ScheduledTaskInfo -TaskName $TaskName).LastRunTime
+    Start-ScheduledTask -TaskName $TaskName
     $deadline = (Get-Date).AddMinutes(5)
     do {
         Start-Sleep -Seconds 2
         $state = (Get-ScheduledTask -TaskName $TaskName).State
-    } while ($state -eq 'Running' -and (Get-Date) -lt $deadline)
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName
+        $finished = $info.LastRunTime -gt $before -and $state -notin @('Running', 'Queued')
+    } while (-not $finished -and (Get-Date) -lt $deadline)
 
-    $result = (Get-ScheduledTaskInfo -TaskName $TaskName).LastTaskResult
+    $result = $info.LastTaskResult
     Write-Host "Registered '$TaskName', running every $Minutes minutes while you are logged on."
     Write-Host "Log: $LogPath"
     Write-Host ''
-    if ($state -eq 'Running') {
-        Write-Warning 'The first sync is still running. Check the log when it finishes.'
+    if (-not $finished) {
+        Write-Warning "The first sync has not finished (task state: $state). Check the log when it does."
     }
     elseif ($result -ne 0) {
         Write-Warning "The first sync failed (exit $result). The end of the log says why:"
@@ -122,7 +126,7 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register 'libris sync' every $Minutes mi
     if (Test-Path -LiteralPath $LogPath) {
         Get-Content -LiteralPath $LogPath -Tail 15
     }
-    elseif ($state -ne 'Running') {
+    elseif ($finished) {
         Write-Warning 'The task left no log, so libris never started. Check -LibrisPath.'
     }
 }
