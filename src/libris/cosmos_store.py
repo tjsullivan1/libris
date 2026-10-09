@@ -553,13 +553,22 @@ def _keys_as_stored(document: dict[str, Any]) -> StoredKeys:
     )
 
 
+# Kept documents are fetched this many to a query, not one each: a Shelf with
+# hundreds of broken notes would otherwise make hundreds of round trips every
+# sync (#195 review).
+_HELD_PER_QUERY = 100
+
+
 def _held_documents(books: Container, ids: set[str]) -> list[dict[str, Any]]:
+    wanted = sorted(ids)
     found: list[dict[str, Any]] = []
-    for libris_id in sorted(ids):
+    for start in range(0, len(wanted), _HELD_PER_QUERY):
         found.extend(
             books.query_items(
-                query="SELECT * FROM c WHERE c.id = @id",
-                parameters=[{"name": "@id", "value": libris_id}],
+                query="SELECT * FROM c WHERE ARRAY_CONTAINS(@ids, c.id)",
+                parameters=[
+                    {"name": "@ids", "value": wanted[start : start + _HELD_PER_QUERY]}
+                ],
                 enable_cross_partition_query=True,
             )
         )

@@ -610,6 +610,25 @@ def test_a_kept_document_is_counted_by_the_words_it_was_stored_with(
     assert weights["bookx"] == 2
 
 
+def test_kept_documents_are_fetched_in_batches_not_one_query_each(
+    tmp_path, monkeypatch
+):
+    # Given 150 pushed notes, all of which then become ones Cosmos cannot hold
+    books, counts = _pushed(tmp_path, 150)
+    for n in range(150):
+        _write(
+            tmp_path, f"book-{n:02}.md", f"title: B{n}\nlibris_id: 01B{n:02}\n1984: x\n"
+        )
+    books.queries.clear()
+
+    # When the Shelf is pushed, so all 150 documents are kept
+    push_shelf(tmp_path, books, counts)
+
+    # Then they are fetched in two queries, and all of them are counted
+    assert len(books.queries) == 2
+    assert CosmosStore(books, counts).word_counts(None).total == 150
+
+
 def test_a_recreated_remote_is_not_held_to_what_the_old_one_held(tmp_path):
     # Given a Shelf of 30 pushed to an account
     _pushed(tmp_path, 30)

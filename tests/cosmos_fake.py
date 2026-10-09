@@ -21,6 +21,7 @@ from typing import Any
 
 _EQUALS = re.compile(r"^c\.(\w+) = (@\w+|true)$")
 _ARRAY_HOLDS = re.compile(r"^ARRAY_CONTAINS\(c\.(\w+), (@\w+)\)$")
+_ONE_OF = re.compile(r"^ARRAY_CONTAINS\((@\w+), c\.(\w+)\)$")
 _ANY_WORD = re.compile(
     r"^EXISTS\(SELECT VALUE w FROM w IN c\.(\w+) WHERE ARRAY_CONTAINS\((@\w+), w\)\)$"
 )
@@ -107,6 +108,9 @@ def _clause(text: str, values: dict[str, Any]):
     if match := _ARRAY_HOLDS.match(text):
         name, value = match[1], values[match[2]]
         return lambda item: any(_same(held, value) for held in item.get(name, []))
+    if match := _ONE_OF.match(text):
+        wanted, name = values[match[1]], match[2]
+        return lambda item: name in item and any(_same(item[name], w) for w in wanted)
     if match := _ANY_WORD.match(text):
         name, wanted = match[1], values[match[2]]
         return lambda item: any(word in wanted for word in item.get(name, []))
