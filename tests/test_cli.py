@@ -3484,7 +3484,7 @@ def test_sync_reports_a_missing_sync_extra_clearly(monkeypatch):
 # --- libris sync pushes what changed (#174) ---
 
 
-def test_a_second_sync_says_nothing_changed(monkeypatch, tmp_path):
+def test_a_second_sync_summarises_what_it_kept_and_deleted(monkeypatch, tmp_path):
     # Given a Shelf already synced
     books, _, _ = _sync_to_fakes(monkeypatch, tmp_path)
     _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
@@ -3544,6 +3544,35 @@ def test_sync_says_when_deletions_waited_on_an_unreadable_note(
     assert _stopped_cleanly(result)
     assert "1 note(s) have left the Shelf but were not deleted" in result.output
     assert "01E" in books.items
+
+
+def test_sync_says_a_repush_that_kept_old_copies_is_not_finished(
+    monkeypatch, tmp_path, lock_note
+):
+    # Given a Shelf synced when words were split one way
+    _sync_to_fakes(monkeypatch, tmp_path)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+    runner.invoke(app, ["sync"])
+    from libris.store import SPLIT_VERSION
+
+    # When the splitting changes while one note cannot be read
+    monkeypatch.setattr("libris.cosmos_store.SPLIT_VERSION", SPLIT_VERSION + 1)
+    lock_note(tmp_path / "emma.md", reads=True)
+    result = runner.invoke(app, ["sync"])
+
+    # Then it says the re-push is unfinished, and that the note keeps its copy
+    assert _stopped_cleanly(result)
+    assert "The re-push is not finished" in result.output
+    assert "emma.md" in result.output
+    assert "the copy from the last sync that sent them" in result.output
+
+    # And once it can read every note, it says only that everything went again
+    lock_note(tmp_path / "emma.md", reads=False)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0, result.output
+    assert "pushed again" in result.output
+    assert "not finished" not in result.output
 
 
 def test_sync_with_a_log_appends_each_run_to_it(monkeypatch, tmp_path):

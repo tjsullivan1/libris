@@ -3159,8 +3159,15 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
     if report.repushed_all:
         typer.echo(
             "Words are split differently since the last sync, so every note "
-            "was pushed again."
+            "the Shelf could send was pushed again."
         )
+        if not report.complete:
+            # Some documents were kept rather than replaced, so the old split
+            # version stands and the re-push is not finished (#195 review).
+            typer.echo(
+                "The re-push is not finished: the notes named below keep their "
+                "old copies, and the next sync tries again."
+            )
     typer.echo(
         f"Pushed {report.pushed} note(s) to Cosmos; {report.unchanged} unchanged, "
         f"{report.deleted} deleted."
@@ -3172,7 +3179,12 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
         or report.not_storable
     ):
         _report_left_out(report)
-        typer.echo("\nThe remote Library cannot find these until they are pushed.")
+        # Not "cannot find": a note pushed before it became unreadable or
+        # unstorable keeps its last copy remotely (#195 review).
+        typer.echo(
+            "\nUntil these are pushed, the remote Library holds either nothing "
+            "for them or the copy from the last sync that sent them."
+        )
     if report.deletions_held:
         typer.echo(
             f"\n{report.deletions_held} note(s) have left the Shelf but were not "
