@@ -23,6 +23,12 @@ from .markdown import BookNote
 from .matching import normalize_for_match
 from .shelf import index_for
 
+# How words are split, as a number the remote records with its word counts.
+# Raise it with any change to `search_tokens`, `normalize_for_match` or which
+# fields `stored_keys` splits: every stored document holds words split the old
+# way, and a sync that finds a different number re-pushes them all (ADR 0033).
+SPLIT_VERSION = 1
+
 
 def search_tokens(text: str) -> set[str]:
     """Split text into the normalized words a search compares.

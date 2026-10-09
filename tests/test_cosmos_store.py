@@ -16,10 +16,12 @@ from libris.cosmos_store import (
     CosmosStore,
     CountsMissing,
     CountsNotRebuilt,
+    DeletionsRefused,
     SyncRefused,
     push_shelf,
 )
 from libris.shelf import index_for
+from libris.store import SPLIT_VERSION
 
 
 def _write(vault, name, frontmatter, body="\nMy notes.\n"):
@@ -277,3 +279,283 @@ def test_a_note_of_non_ascii_text_is_measured_as_the_sdk_escapes_it(tmp_path):
     ((path, why),) = report.not_storable
     assert path.name == "dune.md"
     assert "2 MB" in why
+
+
+# --- pushing only what changed (#174, ADR 0015) ---
+
+
+def _shelf_of(vault, count):
+    for n in range(count):
+        _write(vault, f"book-{n:02}.md", f"title: Book {n}\nlibris_id: 01B{n:02}\n")
+
+
+def _pushed(vault, count):
+    """A Shelf of `count` notes, pushed once, with the writes that took forgotten."""
+    _shelf_of(vault, count)
+    books, counts = FakeContainer(), FakeContainer()
+    push_shelf(vault, books, counts)
+    books.writes.clear()
+    counts.writes.clear()
+    return books, counts
+
+
+def test_a_second_push_with_nothing_changed_writes_nothing(tmp_path):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 3)
+
+    # When it is pushed again, unchanged
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then nothing is written to Cosmos at all - not a note, not the counts
+    assert books.writes == []
+    assert counts.writes == []
+    assert report.pushed == 0
+    assert report.unchanged == 3
+
+
+def test_editing_one_note_pushes_exactly_that_note(tmp_path):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 3)
+
+    # When one note is edited and the Shelf pushed again
+    _write(tmp_path, "book-01.md", "title: Book 1\nlibris_id: 01B01\nstatus: Read\n")
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then that note alone goes up, and the counts weigh its new Status
+    assert books.writes == [("upsert", "01B01")]
+    assert report.pushed == 1
+    assert CosmosStore(books, counts).word_counts("Read").total == 1
+
+
+def test_renaming_a_note_pushes_it_under_its_new_filename(tmp_path):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 3)
+
+    # When one note is renamed, its content untouched, and the Shelf pushed again
+    (tmp_path / "book-01.md").rename(tmp_path / "Book 1 - Someone.md")
+    push_shelf(tmp_path, books, counts)
+
+    # Then that note goes up again, carrying the name it now has
+    assert books.writes == [("upsert", "01B01")]
+    assert books.items["01B01"]["filename"] == "Book 1 - Someone.md"
+
+
+def test_a_note_that_left_the_shelf_has_its_remote_document_deleted(tmp_path):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 3)
+
+    # When one note is deleted and the Shelf pushed again
+    (tmp_path / "book-01.md").unlink()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then its document goes too, and the counts no longer weigh it
+    assert books.writes == [("delete", "01B01")]
+    assert sorted(books.items) == ["01B00", "01B02"]
+    assert report.deleted == 1
+    assert CosmosStore(books, counts).word_counts(None).total == 2
+
+
+def test_a_document_already_gone_from_the_remote_is_not_an_error(tmp_path):
+    # Given a pushed note whose document someone has since removed by hand
+    books, counts = _pushed(tmp_path, 2)
+    del books.items["01B01"]
+
+    # When the note leaves the Shelf too, and the Shelf is pushed
+    (tmp_path / "book-01.md").unlink()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then the sync finishes, and does not try to delete it again next time
+    assert report.deleted == 1
+    books.writes.clear()
+    push_shelf(tmp_path, books, counts)
+    assert books.writes == []
+
+
+def test_implausibly_many_deletions_stop_the_sync_before_any_write(tmp_path):
+    # Given a Shelf of 30 already pushed
+    books, counts = _pushed(tmp_path, 30)
+
+    # When 21 of them vanish - more than a tidy-up removes - beside one edit
+    for n in range(21):
+        (tmp_path / f"book-{n:02}.md").unlink()
+    _write(tmp_path, "book-29.md", "title: Book 29\nlibris_id: 01B29\nstatus: Read\n")
+
+    # Then the sync refuses, saying how many, and writes nothing at all
+    with pytest.raises(DeletionsRefused) as refused:
+        push_shelf(tmp_path, books, counts)
+    assert refused.value.deleting == 21
+    assert refused.value.held == 30
+    assert books.writes == []
+    assert counts.writes == []
+
+    # And being told they are meant lets them through
+    report = push_shelf(tmp_path, books, counts, allow_mass_deletion=True)
+    assert report.deleted == 21
+    assert len(books.items) == 9
+
+
+def test_as_many_deletions_as_a_tidy_up_makes_go_through(tmp_path):
+    # Given a Shelf of 30 already pushed
+    books, counts = _pushed(tmp_path, 30)
+
+    # When 20 of them are removed - the most the guard lets by unasked
+    for n in range(20):
+        (tmp_path / f"book-{n:02}.md").unlink()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then they are deleted without being confirmed
+    assert report.deleted == 20
+
+
+def test_a_shelf_that_scans_empty_deletes_nothing(tmp_path):
+    # Given a Shelf of two already pushed
+    books, counts = _pushed(tmp_path, 2)
+
+    # When it scans empty, as an unmounted drive or a half-finished sync would
+    for path in tmp_path.glob("*.md"):
+        path.unlink()
+
+    # Then the sync refuses, few as the deletions are, and the remote is kept
+    with pytest.raises(DeletionsRefused) as refused:
+        push_shelf(tmp_path, books, counts)
+    assert refused.value.scanned_empty
+    assert len(books.items) == 2
+    assert counts.writes == []
+
+
+def test_an_unreadable_note_holds_back_every_deletion(tmp_path, lock_note):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 3)
+    index_for(tmp_path).notes()
+
+    # When one note leaves, and another cannot be read - so whether it is still
+    # the note the remote holds, or has gone too, cannot be told
+    (tmp_path / "book-00.md").unlink()
+    lock_note(tmp_path / "book-02.md", reads=True)
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then nothing is deleted this time, and the report says deletions waited
+    assert books.writes == []
+    assert report.deletions_held == 1
+    assert not report.complete
+
+
+def test_a_lost_state_file_means_the_next_push_sends_everything(
+    tmp_path, mock_config_dir
+):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 3)
+
+    # When the state file is lost, and the Shelf pushed again
+    (mock_config_dir / "sync-state.json").unlink()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then every note goes up, and the state is rebuilt so the next sends none
+    assert report.pushed == 3
+    assert len(books.writes) == 3
+    books.writes.clear()
+    push_shelf(tmp_path, books, counts)
+    assert books.writes == []
+
+
+def test_the_state_file_is_kept_outside_the_shelf(tmp_path, mock_config_dir):
+    # Given a Shelf
+    _shelf_of(tmp_path, 1)
+
+    # When it is pushed
+    push_shelf(tmp_path, FakeContainer(), FakeContainer())
+
+    # Then the state lands in Libris's config directory, keyed by Libris ID
+    state = json.loads((mock_config_dir / "sync-state.json").read_text("utf-8"))
+    assert list(state["hashes"]) == ["01B00"]
+    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == ["book-00.md"]
+
+
+def test_a_push_to_another_account_sends_everything(tmp_path):
+    # Given a Shelf pushed to one account, whose counts are then copied to a
+    # second - so only the state could tell the second it holds no notes
+    _shelf_of(tmp_path, 2)
+    counts = FakeContainer()
+    push_shelf(tmp_path, FakeContainer(), counts, target="https://a#libris")
+
+    # When it is pushed to the second
+    books = FakeContainer()
+    report = push_shelf(tmp_path, books, counts, target="https://b#libris")
+
+    # Then the state of the first is not trusted for the second
+    assert report.pushed == 2
+    assert sorted(books.items) == ["01B00", "01B01"]
+
+
+def test_an_empty_remote_is_sent_everything_whatever_the_state_says(tmp_path):
+    # Given a Shelf already pushed
+    _pushed(tmp_path, 2)
+
+    # When it is pushed to a remote that holds nothing - recreated, say
+    books = FakeContainer()
+    report = push_shelf(tmp_path, books, FakeContainer())
+
+    # Then every note goes up: no counts means no sync finished there
+    assert report.pushed == 2
+    assert sorted(books.items) == ["01B00", "01B01"]
+
+
+def test_a_change_to_how_words_split_repushes_everything(tmp_path, monkeypatch):
+    # Given a Shelf pushed when words were split one way
+    books, counts = _pushed(tmp_path, 3)
+
+    # When the splitting changes, and the Shelf is pushed
+    monkeypatch.setattr("libris.cosmos_store.SPLIT_VERSION", SPLIT_VERSION + 1)
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then every note goes up again, and the new version is recorded
+    assert sorted(books.writes) == [("upsert", f"01B0{n}") for n in range(3)]
+    assert report.repushed_all
+    assert counts.items["word-counts"]["split_version"] == SPLIT_VERSION + 1
+
+
+def test_a_repush_that_fails_partway_is_retried_in_full(tmp_path, monkeypatch):
+    # Given a Shelf pushed when words were split one way
+    books, counts = _pushed(tmp_path, 3)
+
+    # When the splitting changes and the re-push fails before it finishes
+    monkeypatch.setattr("libris.cosmos_store.SPLIT_VERSION", SPLIT_VERSION + 1)
+    books.fail_writes = OSError("throttled")
+    with pytest.raises(OSError, match="throttled"):
+        push_shelf(tmp_path, books, counts)
+
+    # Then the old version stands, so the next sync re-pushes everything
+    assert counts.items["word-counts"]["split_version"] == SPLIT_VERSION
+    books.fail_writes = None
+    report = push_shelf(tmp_path, books, counts)
+    assert report.repushed_all
+    assert len(books.writes) == 3
+    assert counts.items["word-counts"]["split_version"] == SPLIT_VERSION + 1
+
+
+def test_a_push_that_fails_partway_keeps_what_did_go_up(tmp_path, monkeypatch):
+    # Given a Shelf, and a remote that fails on the third write
+    _shelf_of(tmp_path, 4)
+    books, counts = FakeContainer(), FakeContainer()
+    upsert = books.upsert_item
+
+    def _fails_third(body):
+        if len(books.writes) == 2:
+            raise OSError("throttled")
+        return upsert(body)
+
+    monkeypatch.setattr(books, "upsert_item", _fails_third)
+    with pytest.raises(OSError):
+        push_shelf(tmp_path, books, counts)
+
+    # When the counts are in place and the Shelf is pushed again
+    monkeypatch.setattr(books, "upsert_item", upsert)
+    counts.upsert_item(
+        {"id": "word-counts", "buckets": [], "split_version": SPLIT_VERSION}
+    )
+    books.writes.clear()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then only the two that never went up are sent
+    assert report.pushed == 2
+    assert len(books.writes) == 2

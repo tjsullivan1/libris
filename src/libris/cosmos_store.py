@@ -4,7 +4,10 @@ ADR 0006 puts the remote Library in Cosmos DB serverless, one document per Book
 Note in `books`, partitioned by Libris ID. ADR 0032 and ADR 0033 say what each
 document carries besides the note: the exact keys a store is queried on, and the
 words its title and authors split into. ADR 0033 adds one more document, the word
-counts per Status, rebuilt from scratch at the end of every push.
+counts per Status, rebuilt from scratch at the end of every push. ADR 0015 says
+which notes a push sends: those whose document changed since this PC last sent
+it, as a state file in the config directory records, with the remote documents
+of notes that left the Shelf deleted.
 
 Every key and every count is computed by `store.stored_keys` and
 `store.count_by_status`, the same functions `ReplicaStore` is built from, so
@@ -14,22 +17,23 @@ differently.
 The push and the store take container-shaped objects rather than reaching Azure
 themselves, so the tests run them against a fake. Only `connect_containers`
 imports the SDK, which is the `sync` extra; nothing else here needs it.
-
-This push is a full one. Change detection and deletions are #174.
 """
 
+import hashlib
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from .config import get_config_dir
 from .markdown import BookNote
 from .service import IdCollision, find_id_collisions
 from .shelf import index_for
 from .store import (
+    SPLIT_VERSION,
     Listing,
-    StoredKeys,
     WordCounts,
     count_by_status,
     stored_keys,
@@ -54,6 +58,8 @@ class Container(Protocol):
     """The container calls the push and the store make."""
 
     def upsert_item(self, body: dict[str, Any]) -> Any: ...
+
+    def delete_item(self, item: str, partition_key: Any) -> Any: ...
 
     def query_items(
         self,
@@ -95,6 +101,22 @@ class CountsMissing(Exception):
     """
 
 
+class DeletionsRefused(Exception):
+    """Sync would delete more of the remote than a Shelf plausibly loses at once.
+
+    An unmounted drive or a half-finished Obsidian Sync looks like every note
+    leaving, and would empty the remote Library (ADR 0015). Nothing is written.
+    """
+
+    def __init__(self, deleting: int, held: int, scanned_empty: bool) -> None:
+        self.deleting = deleting
+        self.held = held
+        self.scanned_empty = scanned_empty
+        super().__init__(
+            f"sync would delete {deleting} of the {held} notes the remote holds"
+        )
+
+
 class NotStorable(ValueError):
     """A note Cosmos cannot hold as it stands on the Shelf."""
 
@@ -108,14 +130,26 @@ class PushReport:
     """
 
     pushed: int = 0
+    unchanged: int = 0
+    deleted: int = 0
+    # Notes that left the Shelf but were not deleted, because a note that could
+    # not be read might have been any of them.
+    deletions_held: int = 0
+    # Every note went up because the remote's words were split another way.
+    repushed_all: bool = False
     without_id: list[Path] = field(default_factory=list)
     unreadable: list[Path] = field(default_factory=list)
     not_storable: list[tuple[Path, str]] = field(default_factory=list)
 
     @property
     def complete(self) -> bool:
-        """Whether the remote now holds every note the Shelf's search reads."""
-        return not (self.without_id or self.unreadable or self.not_storable)
+        """Whether the remote now holds exactly the notes the Shelf's search reads."""
+        return not (
+            self.without_id
+            or self.unreadable
+            or self.not_storable
+            or self.deletions_held
+        )
 
 
 def book_document(note: BookNote) -> dict[str, Any]:
@@ -198,32 +232,56 @@ def _code_point_order(title_key: str | None) -> str | None:
 
 
 def counts_document(buckets: dict[str | None, WordCounts]) -> dict[str, Any]:
-    """The word-counts document, one entry per Status bucket (ADR 0033)."""
+    """The word-counts document, one entry per Status bucket (ADR 0033).
+
+    Records the `SPLIT_VERSION` the words were split by. The buckets are in a
+    fixed order, so a Shelf that has not changed rebuilds a document equal to
+    the one stored, and a sync can tell it need not write it.
+    """
     return {
         "id": _COUNTS_ID,
+        "split_version": SPLIT_VERSION,
         "buckets": [
             {"status": status, "total": counts.total, "counts": counts.counts}
-            for status, counts in buckets.items()
+            for status, counts in sorted(
+                buckets.items(), key=lambda item: (item[0] is not None, item[0] or "")
+            )
         ],
     }
 
 
-def push_shelf(vault_path: Path, books: Container, counts: Container) -> PushReport:
-    """Push every Book Note on the Shelf, then rebuild the word counts.
+def push_shelf(
+    vault_path: Path,
+    books: Container,
+    counts: Container,
+    *,
+    target: str = "",
+    allow_mass_deletion: bool = False,
+) -> PushReport:
+    """Push the Book Notes that changed, delete those that left, rebuild the counts.
 
-    Pushes exactly the notes the local search reads - every note the Shelf's
-    index holds - so the remote answers as the Shelf does (ADR 0033).
+    The remote ends up holding exactly the notes the local search reads - every
+    note the Shelf's index holds - so it answers as the Shelf does (ADR 0033).
+    What it already holds is known from the state file (ADR 0015), unless the
+    remote's word counts record a different way of splitting words, or none,
+    and then every note goes up.
 
     Args:
         vault_path: The Shelf.
         books: The `books` container.
         counts: The `word_counts` container.
+        target: Names the account and database being pushed to. State recorded
+            for one is not trusted for another.
+        allow_mass_deletion: Delete however many notes have left the Shelf,
+            rather than refusing a number that looks like a missing drive.
 
     Returns:
-        How many notes went up, and which could not.
+        What went up, what was deleted, and every note that could not go up.
 
     Raises:
-        SyncRefused: If two notes share a Libris ID. Nothing is pushed.
+        SyncRefused: If two notes share a Libris ID. Nothing is written.
+        DeletionsRefused: If the Shelf scans empty or implausibly many notes
+            have left it. Nothing is written.
         CountsNotRebuilt: If the word counts could not be written.
     """
     collisions = find_id_collisions(vault_path)
@@ -238,7 +296,14 @@ def push_shelf(vault_path: Path, books: Container, counts: Container) -> PushRep
     index = index_for(vault_path)
     report = PushReport()
     documents: list[tuple[BookNote, dict[str, Any]]] = []
-    for listed in index.notes():
+    # Every Libris ID still on the Shelf, including notes that cannot go up:
+    # one Cosmos cannot hold now may be one it held before, and it has not left.
+    present: set[str] = set()
+    # Once: each call rescans the Shelf, and resets what it could not read.
+    on_shelf = index.notes()
+    for listed in on_shelf:
+        if listed.libris_id is not None:
+            present.add(listed.libris_id)
         # The index read every note, but one can be locked, denied or removed
         # since. That is the same race `ShelfIndex` reports rather than raises,
         # and a crash here would push nothing and name nothing (#185 review).
@@ -252,6 +317,7 @@ def push_shelf(vault_path: Path, books: Container, counts: Container) -> PushRep
         if note.libris_id is None:
             report.without_id.append(note.path)
             continue
+        present.add(note.libris_id)
         try:
             documents.append((note, book_document(note)))
         except NotStorable as error:
@@ -265,19 +331,144 @@ def push_shelf(vault_path: Path, books: Container, counts: Container) -> PushRep
     if collisions:
         raise SyncRefused(collisions)
 
-    pushed: list[StoredKeys] = []
-    for note, document in documents:
-        books.upsert_item(document)
-        pushed.append(stored_keys(note))
-        report.pushed += 1
+    state = SyncState.load(target)
+    remote = _counts_on_remote(counts)
+    # No counts means no sync has finished there (`CountsMissing`): a new or
+    # emptied account, which the state cannot speak for.
+    report.repushed_all = (
+        remote is not None and remote.get("split_version") != SPLIT_VERSION
+    )
+    if remote is None or report.repushed_all:
+        # Every document goes up, so no recorded hash may match. The IDs are
+        # kept: they are how a note that left the Shelf is found to delete.
+        state.hashes = dict.fromkeys(state.hashes, "")
 
-    # Over the notes pushed, not the Shelf: the counts describe what the remote
-    # holds, and a note that could not go up is not there to be weighed.
+    leaving = sorted(set(state.hashes) - present)
+    if leaving and not allow_mass_deletion:
+        scanned_empty = not on_shelf
+        if scanned_empty or len(leaving) > _plausible_deletions(len(state.hashes)):
+            raise DeletionsRefused(
+                deleting=len(leaving),
+                held=len(state.hashes),
+                scanned_empty=scanned_empty,
+            )
+    # A note that cannot be read may be any of the ones leaving, so none is
+    # deleted until every note on the Shelf can be.
+    if unreadable:
+        report.deletions_held = len(leaving)
+        leaving = []
+
     try:
-        counts.upsert_item(counts_document(count_by_status(pushed)))
-    except Exception as error:
-        raise CountsNotRebuilt(str(error)) from error
+        for note, document in documents:
+            digest = _digest(document)
+            if state.hashes.get(document["id"]) == digest:
+                report.unchanged += 1
+                continue
+            books.upsert_item(document)
+            state.hashes[document["id"]] = digest
+            report.pushed += 1
+        for libris_id in leaving:
+            _delete(books, libris_id)
+            del state.hashes[libris_id]
+            report.deleted += 1
+    finally:
+        # Whatever went up is recorded, so a sync that fails partway resends
+        # only what it did not get to.
+        state.save()
+
+    # Over the notes the remote now holds, not those this run sent: a note
+    # unchanged since the last sync is there to be weighed, and one that could
+    # not go up is not. Written only once every document is up, so a version
+    # recorded here means none still holds words split the old way.
+    rebuilt = counts_document(count_by_status(stored_keys(n) for n, _ in documents))
+    if remote is None or any(
+        remote.get(key) != value for key, value in rebuilt.items()
+    ):
+        try:
+            counts.upsert_item(rebuilt)
+        except Exception as error:
+            raise CountsNotRebuilt(str(error)) from error
     return report
+
+
+# Removing a few notes, or merging a run of duplicates, deletes a handful. A
+# Shelf that has lost a tenth of itself since the last sync is more likely an
+# unmounted drive or a half-finished Obsidian Sync (ADR 0015).
+_DELETIONS_ALWAYS_PLAUSIBLE = 20
+
+
+def _plausible_deletions(held: int) -> int:
+    return max(_DELETIONS_ALWAYS_PLAUSIBLE, held // 10)
+
+
+def _digest(document: dict[str, Any]) -> str:
+    # The document, not the file: it carries the filename, so a rename is a
+    # change, and the words, so a change to how they are split is one too.
+    text = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _counts_on_remote(counts: Container) -> dict[str, Any] | None:
+    found = list(
+        counts.query_items(
+            query="SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": _COUNTS_ID}],
+            enable_cross_partition_query=True,
+        )
+    )
+    return found[0] if found else None
+
+
+def _delete(books: Container, libris_id: str) -> None:
+    try:
+        books.delete_item(libris_id, partition_key=libris_id)
+    except Exception as error:
+        # Already gone is what a delete wants. The SDK's not-found error is
+        # known by its status alone here, so this module need not import it.
+        if getattr(error, "status_code", None) != 404:
+            raise
+
+
+@dataclass
+class SyncState:
+    """What the remote holds, as this PC last pushed it (ADR 0015).
+
+    Keyed by Libris ID, because paths move. Kept in Libris's config directory,
+    not the Vault: it describes one PC's syncs and has no business on a phone.
+    Lost or unreadable, it is empty, and the next sync pushes everything.
+    """
+
+    target: str
+    hashes: dict[str, str] = field(default_factory=dict)
+
+    @staticmethod
+    def path() -> Path:
+        return get_config_dir() / "sync-state.json"
+
+    @classmethod
+    def load(cls, target: str) -> "SyncState":
+        try:
+            recorded = json.loads(cls.path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return cls(target)
+        if not isinstance(recorded, dict) or recorded.get("target") != target:
+            return cls(target)
+        hashes = recorded.get("hashes")
+        if not isinstance(hashes, dict):
+            return cls(target)
+        return cls(target, {str(k): str(v) for k, v in hashes.items()})
+
+    def save(self) -> None:
+        path = self.path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Written beside and moved over, so a crash mid-write leaves the old
+        # state rather than half a file the next sync would read as none.
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps({"target": self.target, "hashes": self.hashes}, indent=1),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
 
 
 def _shared_ids(notes: Iterable[BookNote]) -> list[IdCollision]:

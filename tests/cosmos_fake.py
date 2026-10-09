@@ -31,12 +31,21 @@ _QUERY = re.compile(
 _ORDER_KEY = re.compile(r"^c\.(\w+) ASC$")
 
 
+class NotFound(Exception):
+    """What the SDK raises for a missing item: an error carrying a 404."""
+
+    status_code = 404
+
+
 class FakeContainer:
-    """The two container calls `push_shelf` and `CosmosStore` make."""
+    """The container calls `push_shelf` and `CosmosStore` make."""
 
     def __init__(self) -> None:
         self.items: dict[str, dict[str, Any]] = {}
         self.queries: list[str] = []
+        # Every write, in order, so a test can say what a sync sent - and that
+        # it sent nothing.
+        self.writes: list[tuple[str, str]] = []
         # Lets a test make a write fail, as an outage or a throttle would.
         self.fail_writes: Exception | None = None
 
@@ -44,10 +53,21 @@ class FakeContainer:
         if self.fail_writes is not None:
             raise self.fail_writes
         stored = json.loads(json.dumps(body, allow_nan=False))
+        self.writes.append(("upsert", stored["id"]))
         # Re-inserted, so the newest write comes back first.
         self.items.pop(stored["id"], None)
         self.items[stored["id"]] = stored
         return stored
+
+    def delete_item(self, item: str, partition_key: Any) -> None:
+        if self.fail_writes is not None:
+            raise self.fail_writes
+        # Every container here is partitioned on /id (infra/main.tf).
+        assert partition_key == item, "partition key must be the id"
+        self.writes.append(("delete", item))
+        if item not in self.items:
+            raise NotFound(item)
+        del self.items[item]
 
     def query_items(
         self,
