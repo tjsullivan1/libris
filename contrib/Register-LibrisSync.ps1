@@ -80,13 +80,14 @@ $action = New-ScheduledTaskAction -Execute $LibrisPath -Argument "sync --log `"$
 # would race it, leaving this script waiting on a run it never saw start
 # (#195 review).
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($Minutes) -RepetitionInterval (New-TimeSpan -Minutes $Minutes)
+$runLimit = New-TimeSpan -Minutes 15
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
     -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+    -ExecutionTimeLimit $runLimit
 
 if ($PSCmdlet.ShouldProcess($TaskName, "Register 'libris sync' every $Minutes minutes")) {
     Register-ScheduledTask `
@@ -105,7 +106,10 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register 'libris sync' every $Minutes mi
     # for a run that started after this point to leave both (#195 review).
     $before = (Get-ScheduledTaskInfo -TaskName $TaskName).LastRunTime
     Start-ScheduledTask -TaskName $TaskName
-    $deadline = (Get-Date).AddMinutes(5)
+    # As long as the task itself may run. A first sync after an upgrade can be
+    # a full re-push, which took five and a half minutes for 3,082 notes.
+    $deadline = (Get-Date).Add($runLimit)
+    Write-Host 'Waiting for the first sync. A full push can take several minutes...'
     do {
         Start-Sleep -Seconds 2
         $state = (Get-ScheduledTask -TaskName $TaskName).State
