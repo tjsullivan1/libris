@@ -25,7 +25,7 @@ server = [
 # needs no web stack, and optional for the same reason `server` is: the core
 # CLI installs without either, and cli.py imports this lazily too.
 mcp = [
-    "mcp>=2.1.1",
+    "mcp>=2.2.0",
 ]
 
 # `libris sync` (#173): pushes the Shelf to Cosmos, signed in as whoever
