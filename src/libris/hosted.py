@@ -230,6 +230,10 @@ def create_app(
         auth=AuthSettings(
             issuer_url=public_url,
             resource_server_url=provider.resource_url,
+            # load_access_token already refuses a token whose audience is not
+            # this resource; the SDK checking too (GHSA-w4fh-qvv9-3v23) means
+            # a change to that function cannot quietly open the door.
+            validate_token_resource=True,
             required_scopes=[SCOPE],
             client_registration_options=ClientRegistrationOptions(
                 enabled=True, valid_scopes=[SCOPE], default_scopes=[SCOPE]
