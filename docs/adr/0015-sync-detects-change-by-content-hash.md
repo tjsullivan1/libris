@@ -39,3 +39,43 @@ Sync refuses to propagate deletions when the count is implausible or the Shelf s
 stops and reports instead. An unmounted drive or a half-finished Obsidian Sync would otherwise
 present as 3,136 deletions and empty the remote Library, which is too much to lose to save a
 conditional.
+
+## As built (#174)
+
+**The hash is of the document sync sends, not of the file.** The document carries the note's
+filename, so a rename with no change to the content still goes up. A file hash would leave the
+remote naming the old file. The document also carries the words its title and authors split into
+(ADR 0033), so a change to how words are split changes every hash too.
+
+**"Implausible" is more than 20 deletions, and more than a tenth of what the remote holds.**
+Twenty covers removing a few books or merging a run of duplicates. On this Shelf a tenth is 313,
+so the guard only stops a loss on the scale of a drive going missing. Renames are not deletions:
+the ID stays, so the 132 that `clean --rename` moves are 132 pushes. A Shelf that scans empty is
+refused whatever the count. `--allow-deletions` lets a refused run through, once someone has checked.
+
+**A note that cannot be read holds back every deletion.** Its Libris ID may be unknown, so it
+could be any of the notes that seem to have left. Nothing is deleted until a sync can read every
+note, and the run exits non-zero and says why.
+
+**The state file names the account and database it describes.** State recorded for one account
+says nothing about another, and trusting it would leave a newly deployed account empty. A remote
+with no word counts gets a full push whatever the state says: no sync has finished there
+(`CountsMissing`), so the state cannot vouch for any document it holds.
+
+**Whenever everything goes up, the remote is asked what it holds.** A lost state file, one
+written for another account, a remote with no counts and a split-version change all push every
+note, and in each case the state alone cannot list what the remote holds. A note that left the
+Shelf meanwhile would keep its document forever, because nothing would remember to delete it. So
+those syncs also list the remote's IDs, at the cost of one query, and delete whatever the Shelf
+no longer has. The deletion guard applies to those deletions as to any other. An ordinary sync
+trusts the state and does not ask (#195 review).
+
+**A document kept rather than replaced is still counted, and still holds the version back.** A
+note that cannot be read or stored keeps its old document, and so does a note whose deletion
+waited. The word counts include those documents, because the remote can still return them. During
+a full re-push, a kept document still holds words split the old way. The old split version is
+then recorded rather than the new one, so the next sync tries the full re-push again.
+
+**A second sync with nothing changed writes nothing.** The word counts are still rebuilt every
+run (ADR 0033), but they are compared with the stored document and written only if they differ.
+That costs one read rather than a write of 150-190 KiB every half hour.
