@@ -262,7 +262,7 @@ Sync also stops, writing nothing, if the Shelf scans empty or more than a tenth 
 To keep the remote current without thinking about it, register a scheduled task on Windows:
 
 ```powershell
-.\contrib\Register-LibrisSync.ps1               # every 30 minutes; -Minutes changes it
+.\contrib\Register-LibrisSync.ps1               # every 6 hours; -Hours changes it
 .\contrib\Register-LibrisSync.ps1 -Remove
 ```
 

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Run `libris sync` every half hour, so the remote Library stays current with
+    Run `libris sync` every six hours, so the remote Library stays current with
     no one at the keyboard.
 
 .DESCRIPTION
@@ -21,8 +21,10 @@
 .PARAMETER TaskName
     The scheduled task to create. Re-running with the same name replaces it.
 
-.PARAMETER Minutes
-    How often to sync.
+.PARAMETER Hours
+    How often to sync. Six hours is four runs a day: the remote is read by
+    assistants asking what you have read, which a few hours of lag does not
+    hurt, and a sync you need sooner is one `libris sync` away.
 
 .PARAMETER LogPath
     The file each run appends to.
@@ -37,7 +39,7 @@
     .\Register-LibrisSync.ps1
 
 .EXAMPLE
-    .\Register-LibrisSync.ps1 -Minutes 60
+    .\Register-LibrisSync.ps1 -Hours 12
 
 .EXAMPLE
     .\Register-LibrisSync.ps1 -Remove
@@ -45,8 +47,8 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$TaskName = 'Libris sync',
-    [ValidateRange(5, 1440)]
-    [int]$Minutes = 30,
+    [ValidateRange(1, 24)]
+    [int]$Hours = 6,
     [string]$LogPath = (Join-Path $env:LOCALAPPDATA 'libris\sync.log'),
     [string]$LibrisPath,
     [switch]$Remove
@@ -79,7 +81,7 @@ $action = New-ScheduledTaskAction -Execute $LibrisPath -Argument "sync --log `"$
 # explicit start below is the first run, and a trigger firing at registration
 # would race it, leaving this script waiting on a run it never saw start
 # (#195 review).
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($Minutes) -RepetitionInterval (New-TimeSpan -Minutes $Minutes)
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours($Hours) -RepetitionInterval (New-TimeSpan -Hours $Hours)
 $runLimit = New-TimeSpan -Minutes 15
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
@@ -89,7 +91,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit $runLimit
 
-if ($PSCmdlet.ShouldProcess($TaskName, "Register 'libris sync' every $Minutes minutes")) {
+if ($PSCmdlet.ShouldProcess($TaskName, "Register 'libris sync' every $Hours hours")) {
     Register-ScheduledTask `
         -TaskName $TaskName `
         -Action $action `
@@ -100,8 +102,8 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register 'libris sync' every $Minutes mi
         -Force | Out-Null
 
     # Verified by waiting for the first run and reading how it ended, rather
-    # than by trusting the task started: a sync that cannot sign in fails every
-    # half hour in silence otherwise. Start-ScheduledTask does not wait, and the
+    # than by trusting the task started: a sync that cannot sign in fails on
+    # every run in silence otherwise. Start-ScheduledTask does not wait, and the
     # task can still read Ready or Queued before the run begins, so this waits
     # for a run that started after this point to leave both (#195 review).
     $before = (Get-ScheduledTaskInfo -TaskName $TaskName).LastRunTime
@@ -118,7 +120,7 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register 'libris sync' every $Minutes mi
     } while (-not $finished -and (Get-Date) -lt $deadline)
 
     $result = $info.LastTaskResult
-    Write-Host "Registered '$TaskName', running every $Minutes minutes while you are logged on."
+    Write-Host "Registered '$TaskName', running every $Hours hours while you are logged on."
     Write-Host "Log: $LogPath"
     Write-Host ''
     if (-not $finished) {
