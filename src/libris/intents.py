@@ -130,6 +130,21 @@ def apply_pending(vault_path: Path, intents: Container) -> IntentReport:
             # the comparison and holding up every Intent and the push (#211).
             key=lambda document: (_text(document.get("recorded_at")), document["id"]),
         )
+        # Two notes holding one Libris ID make "the note this Intent meant"
+        # ambiguous: absorbing it could set its fields on the other Book, and
+        # settle as done. The push refuses such a Shelf, so nothing is applied
+        # to it either; every Intent waits until the IDs are repaired (#211
+        # review). Checked under the lock, so no Intent is applied to a Shelf
+        # that was not checked.
+        collisions = service.find_id_collisions(vault_path) if pending else []
+        if collisions:
+            shared = ", ".join(sorted(c.libris_id for c in collisions))
+            reason = f"more than one note holds the Libris ID {shared}"
+            report.waiting.extend(
+                Settled(document["id"], _title_of(document), reason=reason)
+                for document in pending
+            )
+            return report
         for document in pending:
             _apply_add(vault_path, intents, document, report)
     return report
@@ -142,9 +157,7 @@ def _apply_add(
     report: IntentReport,
 ) -> None:
     raw = document.get("candidate")
-    title = _text(raw.get("title") if isinstance(raw, dict) else None) or (
-        "an unnamed book"
-    )
+    title = _title_of(document)
     try:
         # Everything an Intent holds is judged here, before any of it is used.
         # One this code cannot make sense of is rejected; one that crashed
@@ -234,6 +247,14 @@ def _apply_add(
         outcome,
         into,
         Settled(document["id"], result.title or title, libris_id=libris_id),
+    )
+
+
+def _title_of(document: dict[str, Any]) -> str:
+    """What an Intent calls its Book, however malformed the Intent."""
+    raw = document.get("candidate")
+    return _text(raw.get("title") if isinstance(raw, dict) else None) or (
+        "an unnamed book"
     )
 
 

@@ -232,6 +232,30 @@ def test_an_absorbed_intent_waits_rather_than_edit_a_file_replaced_since_the_mat
     assert [s.intent_id for s in report.waiting] == [intent_id]
 
 
+def test_no_intent_is_applied_while_two_notes_share_a_libris_id(tmp_path):
+    # Given an add-Intent for Mistborn, which the Shelf already holds - and
+    # another Book's note claiming Mistborn's Libris ID, sorting ahead of it
+    intents, intent_id = _queued(tmp_path, fields={"priority": "High"})
+    create_book_note(MISTBORN, tmp_path)
+    (mistborn,) = tmp_path.glob("*.md")
+    shared = BookNote.read(mistborn).libris_id
+    elantris = tmp_path / "A Elantris.md"
+    elantris.write_text(
+        f"---\ntitle: Elantris\nlibris_id: {shared}\n---\n", encoding="utf-8"
+    )
+    before = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.glob("*.md")}
+
+    # When sync applies the pending Intents
+    report = apply_pending(tmp_path, intents)
+
+    # Then neither note changes, and the Intent waits, saying why
+    after = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.glob("*.md")}
+    assert after == before
+    assert intents.items[intent_id]["pending"] is True
+    assert [s.intent_id for s in report.waiting] == [intent_id]
+    assert shared in report.waiting[0].reason
+
+
 def test_running_sync_again_does_not_apply_an_intent_twice(tmp_path):
     # Given an add-Intent sync has already applied
     intents, _ = _queued(tmp_path)
