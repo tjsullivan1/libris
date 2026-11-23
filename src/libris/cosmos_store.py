@@ -452,12 +452,29 @@ def _push_shelf(
         report.deletions_held = len(leaving)
         leaving = []
 
+    changed = [
+        (document, digest)
+        for _, document in documents
+        if state.hashes.get(document["id"]) != (digest := _digest(document))
+    ]
+    report.unchanged = len(documents) - len(changed)
+    # A write can reach Cosmos without its answer reaching here, or the process
+    # can die before the state is saved. Recording the old hash would then
+    # outlive the write, and a note put back to exactly that content would be
+    # skipped as unchanged, leaving the remote holding the edit, or missing a
+    # note whose delete took (#207). So everything about to be touched is first
+    # marked as matching nothing, and saved, and each mark is cleared only once
+    # its write is confirmed.
+    touching = [document["id"] for document, _ in changed] + leaving
+    # Overwriting an empty hash loses nothing: empty hashes exist only during a
+    # full push, and the remote's old split version makes the next sync one
+    # too, which blanks every hash again.
+    state.hashes.update(dict.fromkeys(touching, _UNCONFIRMED))
+    if touching:
+        state.save()
+
     try:
-        for note, document in documents:
-            digest = _digest(document)
-            if state.hashes.get(document["id"]) == digest:
-                report.unchanged += 1
-                continue
+        for document, digest in changed:
             books.upsert_item(document)
             state.hashes[document["id"]] = digest
             report.pushed += 1
@@ -502,6 +519,10 @@ def _push_shelf(
 # Shelf that has lost a tenth of itself since the last sync is more likely an
 # unmounted drive or a half-finished Obsidian Sync (ADR 0015).
 _DELETIONS_ALWAYS_PLAUSIBLE = 20
+
+# Recorded for a document while a write to it is unconfirmed. Not a digest, so
+# it never matches one, and not empty, which means something else (#207).
+_UNCONFIRMED = "unconfirmed"
 
 
 def _plausible_deletions(held: int) -> int:

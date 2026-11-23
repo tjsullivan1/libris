@@ -19,6 +19,7 @@ from libris.cosmos_store import (
     DeletionsRefused,
     SyncInProgress,
     SyncRefused,
+    SyncState,
     _sync_lock,
     push_shelf,
 )
@@ -820,3 +821,114 @@ def test_a_push_that_fails_partway_keeps_what_did_go_up(tmp_path, monkeypatch):
     # Then only the two that never went up are sent
     assert report.pushed == 2
     assert len(books.writes) == 2
+
+
+# --- a write Cosmos applied but never confirmed (#207) ---
+
+
+def _applies_then_raises(books, method, monkeypatch, *, killed=None):
+    """Make `books.<method>` apply its write and then fail, as a lost response does.
+
+    With `killed`, the state is not saved again either: the process died after
+    the write reached Cosmos, so no `finally` ran. Returns what undoes it.
+    """
+    real = getattr(books, method)
+
+    def _lost(*args, **kwargs):
+        real(*args, **kwargs)
+        if killed is not None:
+            killed.append(True)
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(books, method, _lost)
+    return lambda: monkeypatch.setattr(books, method, real)
+
+
+def _dies_with_the_process(monkeypatch, killed):
+
+    save = SyncState.save
+
+    def _save(self):
+        if not killed:
+            save(self)
+
+    monkeypatch.setattr(SyncState, "save", _save)
+    return lambda: monkeypatch.setattr(SyncState, "save", save)
+
+
+@pytest.mark.parametrize("hard_kill", [False, True], ids=["raised", "killed"])
+def test_an_unconfirmed_write_is_resent_after_the_note_reverts(
+    tmp_path, monkeypatch, hard_kill
+):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 2)
+    original = (tmp_path / "book-00.md").read_text("utf-8")
+
+    # When an edit goes up but its response is lost - or the process dies -
+    killed = [] if hard_kill else None
+    restore = _applies_then_raises(books, "upsert_item", monkeypatch, killed=killed)
+    revive = _dies_with_the_process(monkeypatch, killed) if hard_kill else None
+    _write(tmp_path, "book-00.md", "title: Book Zero Revised\nlibris_id: 01B00\n")
+    with pytest.raises(OSError):
+        push_shelf(tmp_path, books, counts)
+    assert books.items["01B00"]["frontmatter"]["title"] == "Book Zero Revised"
+    restore()
+    if revive:
+        revive()
+
+    # And the note goes back to exactly what it was before the next sync
+    (tmp_path / "book-00.md").write_text(original, encoding="utf-8")
+    books.writes.clear()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then it is sent again, and the remote holds what the Shelf holds
+    assert books.writes == [("upsert", "01B00")]
+    assert report.pushed == 1
+    assert books.items["01B00"]["frontmatter"]["title"] == "Book 0"
+
+
+@pytest.mark.parametrize("hard_kill", [False, True], ids=["raised", "killed"])
+def test_an_unconfirmed_delete_is_undone_when_the_note_returns(
+    tmp_path, monkeypatch, hard_kill
+):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 2)
+    note = tmp_path / "book-00.md"
+    original = note.read_text("utf-8")
+
+    # When the note leaves, and its delete applies but is never confirmed
+    killed = [] if hard_kill else None
+    restore = _applies_then_raises(books, "delete_item", monkeypatch, killed=killed)
+    revive = _dies_with_the_process(monkeypatch, killed) if hard_kill else None
+    note.unlink()
+    with pytest.raises(OSError):
+        push_shelf(tmp_path, books, counts)
+    assert "01B00" not in books.items
+    restore()
+    if revive:
+        revive()
+
+    # And it comes back to the Shelf byte for byte before the next sync
+    note.write_text(original, encoding="utf-8")
+    books.writes.clear()
+    report = push_shelf(tmp_path, books, counts)
+
+    # Then it is pushed back, so the remote is not missing a book the Shelf has
+    assert books.writes == [("upsert", "01B00")]
+    assert report.pushed == 1
+    assert "01B00" in books.items
+
+
+def test_a_sync_that_changes_nothing_does_not_rewrite_the_state(tmp_path, monkeypatch):
+    # Given a Shelf already pushed
+    books, counts = _pushed(tmp_path, 2)
+
+    saves = []
+    save = SyncState.save
+    monkeypatch.setattr(SyncState, "save", lambda self: saves.append(save(self)))
+
+    # When it is pushed again, unchanged
+    push_shelf(tmp_path, books, counts)
+
+    # Then the state is saved once, as before - not again ahead of no writes
+    assert len(saves) == 1
