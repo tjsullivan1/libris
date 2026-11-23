@@ -3138,11 +3138,6 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
             # says nothing about what another holds.
             target=f"{endpoint}#{database}",
             allow_mass_deletion=allow_deletions,
-            written_by_intents=(
-                [s.libris_id for s in intents.applied if s.libris_id]
-                if intents is not None
-                else ()
-            ),
         )
     except SyncRefused as refused:
         _report_id_collisions(refused.collisions)
@@ -3153,7 +3148,10 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
         raise typer.Exit(1) from None
     except DeletionsRefused as refused:
         if refused.scanned_empty:
-            typer.echo(f"The Shelf at {vault_path} has no notes in it.")
+            typer.echo(
+                f"The Shelf at {vault_path} holds none of the notes the remote "
+                "Library holds."
+            )
         typer.echo(
             f"Sync would delete {refused.deleting} of the {refused.held} notes "
             "the remote Library holds, which looks more like a missing or "

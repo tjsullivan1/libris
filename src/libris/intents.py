@@ -23,7 +23,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from types import UnionType
+from typing import Any, get_args, get_origin, get_type_hints
 
 from . import service
 from .api import BookCandidate
@@ -238,15 +239,31 @@ def _candidate(raw: object) -> BookCandidate:
     if not isinstance(raw, dict):
         raise TypeError(f"candidate is {type(raw).__name__}, not a mapping")
     candidate = BookCandidate(**raw)
-    # The two fields a note is named and matched by. Anything else wrong
-    # surfaces as a field of the note, not as a crash.
-    if not isinstance(candidate.title, str) or not candidate.title.strip():
+    # Every field, against the type the candidate declares for it: one of the
+    # wrong type crashes matching or the note's writing further on, where it
+    # would stay pending and stop every later sync (#211 review).
+    for name, hint in get_type_hints(BookCandidate).items():
+        value = getattr(candidate, name)
+        if not _conforms(value, hint):
+            raise ValueError(f"candidate {name} is {value!r}")
+    # The name a note is filed and matched under.
+    if not candidate.title.strip():
         raise ValueError(f"candidate title is {candidate.title!r}")
-    if not isinstance(candidate.authors, list) or not all(
-        isinstance(author, str) for author in candidate.authors
-    ):
-        raise ValueError(f"candidate authors are {candidate.authors!r}")
     return candidate
+
+
+def _conforms(value: object, hint: Any) -> bool:
+    """Whether `value` is of the type `hint` names, for the types a candidate
+    declares: plain classes, `X | None`, and `list[X]`."""
+    if isinstance(hint, UnionType):
+        return any(_conforms(value, option) for option in get_args(hint))
+    if hint is type(None):
+        return value is None
+    if get_origin(hint) is list:
+        (item,) = get_args(hint)
+        return isinstance(value, list) and all(_conforms(v, item) for v in value)
+    # A bool is an int to isinstance, but never a page count.
+    return isinstance(value, hint) and not (hint is int and isinstance(value, bool))
 
 
 def _fields(raw: object) -> dict[str, object]:

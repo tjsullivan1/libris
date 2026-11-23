@@ -426,6 +426,24 @@ def test_a_shelf_that_scans_empty_deletes_nothing(tmp_path):
     assert counts.writes == []
 
 
+def test_a_shelf_holding_only_new_notes_counts_as_scanning_empty(tmp_path):
+    # Given a Shelf of two already pushed
+    books, counts = _pushed(tmp_path, 2)
+
+    # When every note the remote holds is gone, and a note it has never seen
+    # is there instead - as a queued add applied to a missing drive writes
+    for path in tmp_path.glob("*.md"):
+        path.unlink()
+    _write(tmp_path, "mistborn.md", "title: Mistborn\nlibris_id: 01M\n")
+
+    # Then the new note does not vouch for the Shelf: the sync refuses, and
+    # the remote is kept
+    with pytest.raises(DeletionsRefused) as refused:
+        push_shelf(tmp_path, books, counts)
+    assert refused.value.scanned_empty
+    assert len(books.items) == 2
+
+
 def test_an_unreadable_note_holds_back_every_deletion(tmp_path, lock_note):
     # Given a Shelf already pushed
     books, counts = _pushed(tmp_path, 3)

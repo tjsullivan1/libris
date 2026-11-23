@@ -3479,13 +3479,15 @@ def test_a_queued_add_cannot_make_an_empty_shelf_look_full(monkeypatch, tmp_path
     (tmp_path / "emma.md").unlink()
     _queue_mistborn(intents)
 
-    # When the Shelf is synced
-    result = runner.invoke(app, ["sync"])
+    # When the Shelf is synced, and synced again as the scheduled task would
+    first = runner.invoke(app, ["sync"])
+    retried = runner.invoke(app, ["sync"])
 
-    # Then the note the add wrote does not count: the scan is still empty, and
-    # nothing the remote holds is deleted
-    assert _stopped_cleanly(result), result.output
-    assert "has no notes in it" in result.output
+    # Then the note the add wrote does not count, on either run: the scan is
+    # still empty, and nothing the remote holds is deleted (#211 review)
+    for result in (first, retried):
+        assert _stopped_cleanly(result), result.output
+        assert "holds none of the notes the remote" in result.output
     assert {"01D", "01E"} <= set(books.items)
 
 
@@ -3624,7 +3626,7 @@ def test_sync_stops_short_of_emptying_the_remote_and_says_how_to_go_on(
 
     # Then it stops, says why, names the way through, and deletes nothing
     assert _stopped_cleanly(result)
-    assert "has no notes in it" in result.output
+    assert "holds none of the notes the remote" in result.output
     assert "delete 1 of the 1 notes" in result.output
     assert "libris sync --allow-deletions" in result.output
     assert list(books.items) == ["01D"]

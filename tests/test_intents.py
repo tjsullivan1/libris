@@ -342,6 +342,9 @@ def test_a_book_added_remotely_is_found_remotely_after_one_sync(tmp_path):
 # --- what a malformed Intent or an unfinished write cannot do (#211 review) ---
 
 
+_MISTBORN = {"title": "Mistborn", "authors": ["Brandon Sanderson"]}
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [
@@ -351,6 +354,10 @@ def test_a_book_added_remotely_is_found_remotely_after_one_sync(tmp_path):
         ("candidate", "Mistborn"),
         ("candidate", {"title": 7, "authors": ["Brandon Sanderson"]}),
         ("candidate", {"title": "Mistborn", "authors": "Brandon Sanderson"}),
+        ("candidate", {**_MISTBORN, "google_books_id": {"id": "mist-1"}}),
+        ("candidate", {**_MISTBORN, "description": 42}),
+        ("candidate", {**_MISTBORN, "page_count": "541"}),
+        ("candidate", {**_MISTBORN, "genres": ["Fantasy", None]}),
         ("fields", ["status", "Read"]),
     ],
     ids=[
@@ -360,6 +367,10 @@ def test_a_book_added_remotely_is_found_remotely_after_one_sync(tmp_path):
         "candidate a string",
         "title not text",
         "authors not a list",
+        "volume id a mapping",
+        "description a number",
+        "page count text",
+        "a genre null",
         "fields a list",
     ],
 )
