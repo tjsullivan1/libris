@@ -33,6 +33,7 @@ from .cosmos_store import (
     SyncRefused,
     connect_container,
     push_shelf,
+    shelf_looks_missing,
 )
 from .importer import SUPPORTED_FORMATS, run_import
 from .intents import INTENTS, IntentReport, apply_pending
@@ -3128,15 +3129,27 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
         books, counts, queued = connect_container(
             endpoint, database, BOOKS, WORD_COUNTS, INTENTS
         )
-        # Intents first, so a note one writes goes up in this same sync.
-        intents = _apply_intents(vault_path, queued)
+        # The account and database together: the state recorded for one says
+        # nothing about what another holds.
+        target = f"{endpoint}#{database}"
+        # Intents first, so a note one writes goes up in this same sync - but
+        # never into a Shelf that looks like a missing drive, where the note
+        # would vanish when the drive came back and its Intent never be tried
+        # again (#211 review). They wait, and the push below refuses and says
+        # why. Asked to delete regardless, the person has said the Shelf is
+        # really there.
+        if not allow_deletions and shelf_looks_missing(
+            vault_path, books, target=target
+        ):
+            typer.echo("Nothing queued remotely was applied: the next sync tries.")
+            intents = None
+        else:
+            intents = _apply_intents(vault_path, queued)
         report = push_shelf(
             vault_path,
             books,
             counts,
-            # The account and database together: the state recorded for one
-            # says nothing about what another holds.
-            target=f"{endpoint}#{database}",
+            target=target,
             allow_mass_deletion=allow_deletions,
         )
     except SyncRefused as refused:

@@ -22,6 +22,7 @@ from libris.cosmos_store import (
     SyncState,
     _sync_lock,
     push_shelf,
+    shelf_looks_missing,
 )
 from libris.shelf import index_for
 from libris.store import SPLIT_VERSION
@@ -442,6 +443,22 @@ def test_a_shelf_holding_only_new_notes_counts_as_scanning_empty(tmp_path):
         push_shelf(tmp_path, books, counts)
     assert refused.value.scanned_empty
     assert len(books.items) == 2
+
+
+def test_a_shelf_looks_missing_only_without_any_note_the_remote_holds(tmp_path):
+    # Given a Shelf of two already pushed
+    books, counts = _pushed(tmp_path, 2)
+    shelf_notes = sorted(tmp_path.glob("*.md"))
+    assert not shelf_looks_missing(tmp_path, books, target="")
+
+    # When one of them is all that is left, it still answers for the Shelf
+    shelf_notes[0].unlink()
+    assert not shelf_looks_missing(tmp_path, books, target="")
+
+    # But once only a note new to the remote is there, the Shelf looks missing
+    shelf_notes[1].unlink()
+    _write(tmp_path, "mistborn.md", "title: Mistborn\nlibris_id: 01M\n")
+    assert shelf_looks_missing(tmp_path, books, target="")
 
 
 def test_an_unreadable_note_holds_back_every_deletion(tmp_path, lock_note):

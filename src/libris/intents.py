@@ -168,14 +168,21 @@ def _apply_add(
         result = service.add_book(
             vault_path, candidate, overrides=fields or None, added=added
         )
-        absorbed_into = (
-            result.path if result.outcome is service.Outcome.ALREADY_PRESENT else None
-        )
-        if absorbed_into is not None and fields:
+        libris_id = result.libris_id
+        if (
+            libris_id is not None
+            and result.outcome is service.Outcome.ALREADY_PRESENT
+            and fields
+        ):
             # Absorbed, and the Intent's fields still apply: they name only
             # what it changes, so setting them on the note it meant is what it
-            # asked for (ADR 0013).
-            service.update_note(absorbed_into, fields)
+            # asked for (ADR 0013). By identity, checked inside the write: a
+            # file replaced since the match is not the Book it meant, and that
+            # raises BookNotFound and waits rather than editing another Book
+            # (#211 review). The ID recorded is the note's that was written.
+            libris_id = service.update_book(
+                vault_path, libris_id, fields
+            ).note.libris_id
     # The Shelf, not the Intent: a locked note, a name another note holds,
     # frontmatter an edit broke. Rejecting would hand a person a decision that
     # fixing the Shelf makes for them, so it waits for the next sync. Caught
@@ -203,7 +210,7 @@ def _apply_add(
         )
         return
 
-    if result.libris_id is None:
+    if libris_id is None:
         # An outcome names the Libris ID the Intent made or meant (ADR 0013),
         # and a settled Intent is never looked at again. A note written but
         # locked before it could be read back, or a held note with no Libris
@@ -226,7 +233,7 @@ def _apply_add(
         document,
         outcome,
         into,
-        Settled(document["id"], result.title or title, libris_id=result.libris_id),
+        Settled(document["id"], result.title or title, libris_id=libris_id),
     )
 
 

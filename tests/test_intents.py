@@ -201,6 +201,37 @@ def test_an_intent_for_a_book_already_held_is_absorbed_into_it(tmp_path):
     assert BookNote.read(path).frontmatter["priority"] == "High"
 
 
+def test_an_absorbed_intent_waits_rather_than_edit_a_file_replaced_since_the_match(
+    tmp_path, monkeypatch
+):
+    # Given an add-Intent for Mistborn, which the Shelf already holds
+    intents, intent_id = _queued(tmp_path, fields={"priority": "High"})
+    create_book_note(MISTBORN, tmp_path)
+    (path,) = tmp_path.glob("*.md")
+
+    # And a writer that replaces that file with another Book's note just after
+    # the duplicate check matched it
+    add_book = service.add_book
+
+    def _matched_then_replaced(*args, **kwargs):
+        result = add_book(*args, **kwargs)
+        path.write_text(
+            "---\ntitle: Elantris\nlibris_id: 01ELANTRIS\n---\n", encoding="utf-8"
+        )
+        return result
+
+    monkeypatch.setattr(service, "add_book", _matched_then_replaced)
+
+    # When sync applies the Intent
+    report = apply_pending(tmp_path, intents)
+
+    # Then the Book now in that file is not given Mistborn's fields
+    assert "priority" not in BookNote.read(path).frontmatter
+    # And the Intent waits for the next sync rather than settling
+    assert intents.items[intent_id]["pending"] is True
+    assert [s.intent_id for s in report.waiting] == [intent_id]
+
+
 def test_running_sync_again_does_not_apply_an_intent_twice(tmp_path):
     # Given an add-Intent sync has already applied
     intents, _ = _queued(tmp_path)

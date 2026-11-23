@@ -3465,30 +3465,46 @@ def test_sync_says_a_queued_add_must_wait_and_exits_non_zero(
     assert "Mistborn" in result.output
 
 
-def test_a_queued_add_cannot_make_an_empty_shelf_look_full(monkeypatch, tmp_path):
+def _shelve_dune_and_emma(vault):
+    _shelved(vault, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(vault, "emma.md", "title: Emma\nlibris_id: 01E\n")
+
+
+def test_a_queued_add_waits_out_a_missing_shelf_and_lands_when_it_returns(
+    monkeypatch, tmp_path
+):
     # Given a remote holding two books pushed from a Shelf that now scans
-    # empty, as an unmounted drive does - and an add queued remotely
+    # empty, as an unmounted drive's folder does - and an add queued remotely
     from cosmos_fake import FakeContainer
 
     intents = FakeContainer()
     books, _, _ = _sync_to_fakes(monkeypatch, tmp_path, intents=intents)
-    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
-    _shelved(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+    _shelve_dune_and_emma(tmp_path)
     assert runner.invoke(app, ["sync"]).exit_code == 0
     (tmp_path / "dune.md").unlink()
     (tmp_path / "emma.md").unlink()
-    _queue_mistborn(intents)
+    intent_id = _queue_mistborn(intents)
 
     # When the Shelf is synced, and synced again as the scheduled task would
     first = runner.invoke(app, ["sync"])
     retried = runner.invoke(app, ["sync"])
 
-    # Then the note the add wrote does not count, on either run: the scan is
-    # still empty, and nothing the remote holds is deleted (#211 review)
+    # Then on neither run is the add written into the empty folder, or settled,
+    # and nothing the remote holds is deleted (#211 review)
     for result in (first, retried):
         assert _stopped_cleanly(result), result.output
+        assert "Nothing queued remotely was applied" in result.output
         assert "holds none of the notes the remote" in result.output
+    assert list(tmp_path.glob("*.md")) == []
+    assert intents.items[intent_id]["pending"] is True
     assert {"01D", "01E"} <= set(books.items)
+
+    # And once the drive is back, the next sync applies it
+    _shelve_dune_and_emma(tmp_path)
+    returned = runner.invoke(app, ["sync"])
+    assert returned.exit_code == 0, returned.output
+    assert intents.items[intent_id]["outcome"] == "applied"
+    assert intents.items[intent_id]["libris_id"] in books.items
 
 
 def test_sync_without_an_intents_container_still_pushes(monkeypatch, tmp_path):
