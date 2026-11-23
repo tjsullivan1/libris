@@ -23,15 +23,19 @@ from .config import (
     set_config,
 )
 from .cosmos_store import (
+    BOOKS,
+    WORD_COUNTS,
+    Container,
     CountsNotRebuilt,
     DeletionsRefused,
     PushReport,
     SyncInProgress,
     SyncRefused,
-    connect_containers,
+    connect_container,
     push_shelf,
 )
 from .importer import SUPPORTED_FORMATS, run_import
+from .intents import INTENTS, IntentReport, apply_pending
 from .markdown import (
     EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
@@ -3121,7 +3125,11 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
     vault_path = _require_vault_path()
 
     try:
-        books, counts = connect_containers(endpoint, database)
+        books, counts, queued = connect_container(
+            endpoint, database, BOOKS, WORD_COUNTS, INTENTS
+        )
+        # Intents first, so a note one writes goes up in this same sync.
+        intents = _apply_intents(vault_path, queued)
         report = push_shelf(
             vault_path,
             books,
@@ -3197,8 +3205,48 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
             "might be one of them. The next sync that reads every note deletes "
             "them."
         )
-    if not report.complete:
+    if not report.complete or (intents is not None and intents.waiting):
         raise typer.Exit(1)
+
+
+def _apply_intents(vault_path: Path, container: Container) -> IntentReport | None:
+    """Apply what remote Surfaces queued, and say what became of it.
+
+    None when the account has no `intents` container: one deployed before
+    remote writes existed. The push still runs, since nothing can have queued.
+    """
+    from azure.core.exceptions import AzureError
+
+    try:
+        report = apply_pending(vault_path, container)
+    except AzureError as error:
+        if getattr(error, "status_code", None) != 404:
+            raise
+        typer.echo(
+            "The remote Library has no intents container, so nothing queued "
+            "remotely was applied. `terraform apply` in infra/ creates it."
+        )
+        return None
+
+    for settled in report.applied:
+        typer.echo(f"Added {settled.title} ({settled.libris_id}), queued remotely.")
+    for settled in report.absorbed:
+        typer.echo(
+            f"Already held: {settled.title} ({settled.libris_id}); the queued "
+            "add was absorbed."
+        )
+    if report.rejected:
+        typer.echo(f"\n{len(report.rejected)} queued change(s) were rejected:")
+        for settled in report.rejected:
+            typer.echo(f"  {settled.title}: {settled.reason}")
+    if report.waiting:
+        typer.echo(
+            f"\n{len(report.waiting)} queued change(s) could not be applied yet, "
+            "and the next sync tries again:"
+        )
+        for settled in report.waiting:
+            typer.echo(f"  {settled.title}: {settled.reason}")
+    return report
 
 
 @app.command()

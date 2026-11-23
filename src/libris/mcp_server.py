@@ -22,7 +22,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from . import config, installed_version, service
-from .api import GoogleBooksClient
+from .api import BookCandidate, GoogleBooksClient
 from .cosmos_store import CountsMissing
 from .markdown import BookNote, NoteNameTaken, NoteWriteFailed
 from .note_format import (
@@ -189,12 +189,23 @@ class WriteAnswer(BaseModel):
     """What a write did, and what stands behind it."""
 
     outcome: str = Field(
-        description=("created, already_present, needs_confirmation, or updated.")
+        description=(
+            "created, already_present, needs_confirmation, updated, or queued. "
+            "Queued means recorded for the computer holding the Library to "
+            "apply at its next sync: say it was queued, not added."
+        )
     )
     book: Book | None = None
     guarantee: str = Field(
-        default="live_shelf",
-        description="What the duplicate check was made against.",
+        default=service.Guarantee.LIVE_SHELF.value,
+        description=(
+            "What the duplicate check was made against: live_shelf, or replica "
+            "- a copy no fresher than the last sync."
+        ),
+    )
+    intent_id: str | None = Field(
+        default=None,
+        description="Names a queued change until sync gives the book a libris_id.",
     )
     near_matches: list[Book] = Field(
         default=[],
@@ -215,8 +226,8 @@ class WriteAnswer(BaseModel):
 
 
 REMOTE_WRITES_UNAVAILABLE = (
-    "This Library is a read-only copy, kept up to date from the computer that "
-    "holds the Shelf. Changes can't be made from here yet. Nothing was written. "
+    "This Library is a copy, kept up to date from the computer that "
+    "holds the Shelf. This change can't be made from here yet. Nothing was written. "
     "Make the change on that computer instead."
 )
 
@@ -230,6 +241,7 @@ def create_server(
     *,
     store_provider: Callable[[], LibraryStore] = _shelf_store,
     shelf_provider: Callable[[], Path] | None = _shelf,
+    intent_recorder: Callable[[], service.IntentRecorder] | None = None,
     auth_server_provider: "OAuthAuthorizationServerProvider | None" = None,
     auth: AuthSettings | None = None,
 ) -> "MCPServer":
@@ -252,6 +264,9 @@ def create_server(
         shelf_provider: Called per write, returning the Shelf to write to. None where
             there is no Shelf, and then the writing tools say so and write
             nothing.
+        intent_recorder: Called per write where there is no Shelf, returning
+            where to record an Intent for sync to apply (ADR 0002). With it,
+            `add_book` queues rather than refusing.
         auth_server_provider: Who signs clients in, on the hosted server
             (ADR 0035). None over stdio, where the client is the person.
         auth: How the hosted server's sign-in is advertised. Given with
@@ -365,8 +380,18 @@ def create_server(
         Stops and returns near_matches when the Library may already hold this
         book, because a duplicate found afterwards is a cleanup task rather than
         a question. Show them to the person, then call again with confirm.
+
+        Where the Library is a remote copy, the add is queued and reaches the
+        Library at its next sync: the outcome is queued, and there is no
+        libris_id yet.
         """
-        vault = writable_shelf()
+        # Decided before Google Books is asked, so a server that can do nothing
+        # with the volume does not fetch it.
+        queue = None
+        if shelf_provider is None:
+            if intent_recorder is None:
+                raise ToolError(REMOTE_WRITES_UNAVAILABLE)
+            queue = intent_recorder
         try:
             candidate = GoogleBooksClient().get_volume(google_books_id)
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
@@ -395,6 +420,10 @@ def create_server(
         if format is not None:
             overrides["format"] = list(format)
 
+        if queue is not None:
+            return _queue_add(store_provider(), queue(), candidate, overrides, confirm)
+
+        vault = writable_shelf()
         try:
             result = service.add_book(
                 vault,
@@ -479,6 +508,43 @@ def create_server(
         )
 
     return mcp
+
+
+def _queue_add(
+    store: LibraryStore,
+    intents: service.IntentRecorder,
+    candidate: BookCandidate,
+    overrides: dict[str, object],
+    confirm: bool,
+) -> WriteAnswer:
+    """`add_book` where there is no Shelf: an Intent for sync, or why not."""
+    try:
+        result = service.queue_add(
+            store,
+            intents,
+            candidate,
+            overrides=overrides or None,
+            stop_on_near_match=not confirm,
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from None
+    book = None
+    if result.outcome is not service.Outcome.NEEDS_CONFIRMATION:
+        book = Book(
+            libris_id=result.libris_id,
+            title=result.title,
+            authors=result.authors,
+        )
+    return WriteAnswer(
+        outcome=result.outcome.value,
+        book=book,
+        guarantee=result.guarantee.value,
+        intent_id=result.intent_id,
+        near_matches=[Book.of(n) for n in result.near_matches],
+        near_match_check=(
+            result.near_match_check.value if result.near_match_check else None
+        ),
+    )
 
 
 def _written(vault_path: Path, result: "service.AddResult") -> Book | None:

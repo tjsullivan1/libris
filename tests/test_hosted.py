@@ -32,6 +32,7 @@ from starlette.testclient import TestClient  # noqa: E402
 from libris.api import BookCandidate  # noqa: E402
 from libris.cosmos_store import CosmosStore, push_shelf  # noqa: E402
 from libris.hosted import HostedConfigError, HostedSettings, create_app  # noqa: E402
+from libris.intents import IntentQueue  # noqa: E402
 from libris.markdown import create_book_note  # noqa: E402
 from libris.oauth import (  # noqa: E402
     CONSENT_COOKIE,
@@ -1611,8 +1612,47 @@ def test_a_hosted_write_is_declined_and_says_so(
     # Then it is told remote writes are not available, and nothing was written
     assert result["isError"]
     message = result["content"][0]["text"]
-    assert "Changes can't be made from here yet" in message
+    assert "This change can't be made from here yet" in message
     assert "Nothing was written" in message
+
+
+def test_a_hosted_add_is_queued_for_the_next_sync(
+    google: FakeGoogle,
+    store: MemoryAuthStore,
+    library: CosmosStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given a hosted server with an intents container, and a volume Google
+    # Books knows that the Library does not hold
+    class _Volume:
+        def get_volume(self, volume_id: str) -> BookCandidate:
+            return BookCandidate(
+                title="Elantris", authors=["Brandon Sanderson"], google_books_id="el-1"
+            )
+
+    monkeypatch.setattr("libris.mcp_server.GoogleBooksClient", _Volume)
+    intents = FakeContainer()
+    app = create_app(
+        settings(),
+        store=store,
+        identity=google,
+        library=library,
+        intents=IntentQueue(intents),
+    )
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        _, issued = tokens(client)
+
+        # When a signed-in client adds it
+        result = call_tool(
+            client, issued["access_token"], "add_book", {"google_books_id": "el-1"}
+        )
+
+    # Then it is queued rather than declined, and the Intent is recorded
+    assert not result["isError"], result
+    answer = result["structuredContent"]
+    assert answer["outcome"] == "queued"
+    assert answer["guarantee"] == "replica"
+    assert intents.items[answer["intent_id"]]["candidate"]["title"] == "Elantris"
 
 
 def test_find_book_reaches_google_books_from_the_hosted_server(

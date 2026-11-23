@@ -17,12 +17,14 @@ import pytest
 pytest.importorskip("mcp")
 
 import anyio  # noqa: E402
+from cosmos_fake import FakeContainer  # noqa: E402
 from mcp import Client  # noqa: E402
 from mcp.server import MCPServer  # noqa: E402
 from mcp.types import CallToolResult  # noqa: E402
 
 from libris import config, shelf  # noqa: E402
 from libris.api import UNKNOWN_AUTHOR, BookCandidate, GoogleBooksClient  # noqa: E402
+from libris.intents import IntentQueue  # noqa: E402
 from libris.markdown import BookNote, create_book_note  # noqa: E402
 from libris.mcp_server import create_server  # noqa: E402
 from libris.store import ReplicaStore  # noqa: E402
@@ -545,6 +547,72 @@ def test_without_a_shelf_an_add_writes_nothing_and_says_why(
     assert result.is_error
     assert "Nothing was written" in text(result)
     assert sorted(Path(shelved).glob("*.md")) == before
+
+
+def queuing(replica: ReplicaStore) -> tuple[MCPServer, FakeContainer]:
+    """The server as the Container App builds it with an `intents` container."""
+    intents = FakeContainer()
+    queue = IntentQueue(intents)
+    server = create_server(
+        store_provider=lambda: replica,
+        shelf_provider=None,
+        intent_recorder=lambda: queue,
+    )
+    return server, intents
+
+
+def test_a_remote_add_is_queued_and_says_so(
+    shelved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a remote server that can queue, and a volume Google Books knows
+    item = {
+        "id": "mist-1",
+        "volumeInfo": {"title": "Mistborn", "authors": ["Brandon Sanderson"]},
+    }
+    monkeypatch.setattr("libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(item))
+    server, intents = queuing(ReplicaStore.from_shelf(shelved))
+    before = sorted(shelved.glob("*.md"))
+
+    # When the model adds it, Reading
+    answer = payload(
+        call(
+            "add_book",
+            {"google_books_id": "mist-1", "status": "Reading"},
+            server=server,
+        )
+    )
+
+    # Then it is told the add is queued, on the replica's guarantee, and given
+    # the Intent's identity - no Libris ID exists until sync mints one
+    assert answer["outcome"] == "queued"
+    assert answer["guarantee"] == "replica"
+    assert answer["book"]["libris_id"] is None
+    assert answer["book"]["title"] == "Mistborn"
+    assert answer["intent_id"] in intents.items
+    assert intents.items[answer["intent_id"]]["fields"] == {"status": "Reading"}
+    # And the Shelf is untouched
+    assert sorted(shelved.glob("*.md")) == before
+
+
+def test_a_remote_add_of_a_book_held_is_answered_from_the_replica(
+    shelved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a replica that holds Dune, and Google Books' Dune
+    item = {
+        "id": "v-dune",
+        "volumeInfo": {"title": "Dune", "authors": ["Frank Herbert"]},
+    }
+    monkeypatch.setattr("libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(item))
+    server, intents = queuing(ReplicaStore.from_shelf(shelved))
+
+    # When the model adds it remotely
+    answer = payload(call("add_book", {"google_books_id": "v-dune"}, server=server))
+
+    # Then it is held, the answer says how fresh that is, and nothing is queued
+    assert answer["outcome"] == "already_present"
+    assert answer["guarantee"] == "replica"
+    assert answer["book"]["libris_id"]
+    assert intents.items == {}
 
 
 def test_without_a_shelf_an_update_writes_nothing_and_says_why(shelved: Path) -> None:

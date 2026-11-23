@@ -14,11 +14,13 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from pathlib import Path
+from typing import Protocol
 
 import yaml
 
 from .api import UNKNOWN_AUTHOR, UNKNOWN_TITLE, BookCandidate, GoogleBooksClient
 from .markdown import (
+    DEFAULT_FRONTMATTER,
     EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
     FrontmatterUnreadable,
@@ -73,6 +75,19 @@ class Outcome(Enum):
     # Nothing was written, and will not be until a person answers. Only a
     # Surface that asked to stop can receive this (ADR 0026).
     NEEDS_CONFIRMATION = "needs_confirmation"
+    # Recorded as an Intent for the next sync to apply, by a Surface with no
+    # Shelf to write to (ADR 0002). Not "created": what sync makes of it is an
+    # Intent Outcome, and it may yet be absorbed (ADR 0013).
+    QUEUED = "queued"
+
+
+class Guarantee(Enum):
+    """What a write's duplicate check was made against (ADR 0010, ADR 0020)."""
+
+    LIVE_SHELF = "live_shelf"
+    # No fresher than the last sync. A Book added on the Shelf since then is
+    # not seen, and sync absorbs the Intent when it meets it.
+    REPLICA = "replica"
 
 
 class NearMatchCheck(Enum):
@@ -121,6 +136,18 @@ class AddResult:
     # Whether the Near Match check ran. None when it was not asked for, or the
     # exact check answered before it was reached.
     near_match_check: NearMatchCheck | None = None
+    guarantee: Guarantee = Guarantee.LIVE_SHELF
+    # The Intent a queued add recorded, which is all there is to name it by
+    # until sync mints a Libris ID for it.
+    intent_id: str | None = None
+
+
+class IntentRecorder(Protocol):
+    """Where a Surface with no Shelf records the changes sync will apply."""
+
+    def record_add(self, candidate: BookCandidate, fields: dict[str, object]) -> str:
+        """Record an add-Intent and return its identity."""
+        ...
 
 
 # Amazon states the ASIN in the product URL itself, in one of two shapes. A
@@ -589,6 +616,7 @@ def add_book(
     candidate: BookCandidate,
     overrides: dict | None = None,
     stop_on_near_match: bool = False,
+    added: date | None = None,
 ) -> AddResult:
     """Add a Book to the Library, unless it is already held.
 
@@ -606,6 +634,7 @@ def add_book(
             to be a question (ADR 0026). Off by default, because the extension
             shows Near Matches to a person before they press the button and
             asking twice would be asking nobody.
+        added: The day the Book joined the Library. Today unless given.
 
     Returns:
         The identity of the Book Note and what happened to it, or the Near
@@ -654,18 +683,9 @@ def add_book(
 
     check: NearMatchCheck | None = None
     if stop_on_near_match:
-        near = find_similar(store, title=candidate.title, authors=candidate.authors)
-        check = near.check
-        if near.notes:
-            return AddResult(
-                libris_id=None,
-                path=None,
-                outcome=Outcome.NEEDS_CONFIRMATION,
-                title=candidate.title,
-                authors=candidate.authors,
-                near_matches=near.notes,
-                near_match_check=check,
-            )
+        check, stopped = _near_match_stop(store, candidate)
+        if stopped is not None:
+            return stopped
 
     # Asked again just before writing: the near-match lookup scanned the Shelf
     # once more, and a note that could not be read then has not been ruled out
@@ -678,7 +698,9 @@ def add_book(
     # Near Match there is to show, and there is none. The result says the check
     # did not run, so the Surface can tell the person rather than imply that
     # nothing resembled this Book.
-    path = create_book_note(candidate, vault_path, overrides=overrides or None)
+    path = create_book_note(
+        candidate, vault_path, overrides=overrides or None, added=added
+    )
     try:
         note = BookNote.read(path)
     except OSError:
@@ -697,6 +719,112 @@ def add_book(
         authors=note.authors if note else candidate.authors,
         near_match_check=check,
     )
+
+
+def _near_match_stop(
+    store: LibraryStore, candidate: BookCandidate
+) -> tuple[NearMatchCheck, AddResult | None]:
+    """Whether the Near Match check ran, and the answer that stops the write if one does."""
+    near = find_similar(store, title=candidate.title, authors=candidate.authors)
+    if not near.notes:
+        return near.check, None
+    return near.check, AddResult(
+        libris_id=None,
+        path=None,
+        outcome=Outcome.NEEDS_CONFIRMATION,
+        title=candidate.title,
+        authors=candidate.authors,
+        near_matches=near.notes,
+        near_match_check=near.check,
+    )
+
+
+def queue_add(
+    store: LibraryStore,
+    intents: IntentRecorder,
+    candidate: BookCandidate,
+    overrides: dict[str, object] | None = None,
+    stop_on_near_match: bool = False,
+) -> AddResult:
+    """Record an add-Intent for sync to apply, unless the Library already holds the Book.
+
+    `add_book` for a Surface with no Shelf (ADR 0002). The same exact check
+    runs, and the same stop on a Near Match (ADR 0026), but against a replica
+    no fresher than the last sync, and every answer says so (ADR 0020). A Book
+    added on the Shelf since then is not seen here; sync absorbs the Intent
+    when it meets it (ADR 0013).
+
+    Args:
+        store: The replica to check against.
+        intents: Where the Intent is recorded.
+        candidate: The Book Candidate accepted by whoever chose it.
+        overrides: Frontmatter fields to set when the note is written.
+        stop_on_near_match: Refuse to record when the replica holds a Near
+            Match, returning the candidates instead.
+
+    Returns:
+        The Intent recorded, the Book already held, or the Near Matches that
+        stopped it. A queued answer carries no Libris ID: sync mints that.
+
+    Raises:
+        InvalidFieldValue: If an override carries a value the Library does not
+            define. Refused now rather than rejected at sync, while someone is
+            still there to correct it.
+        ValueError: If an override names a field the canonical schema has no
+            place for.
+    """
+    fields = _checked_overrides(overrides or {})
+    existing = find_existing(
+        store,
+        isbn=candidate.isbn,
+        google_books_id=candidate.google_books_id or None,
+        title=candidate.title,
+        authors=candidate.authors,
+    )
+    if existing is not None:
+        return AddResult(
+            libris_id=existing.libris_id,
+            # A path on the replica is a filename only, and the Surface asking
+            # holds no Shelf to open it on.
+            path=None,
+            outcome=Outcome.ALREADY_PRESENT,
+            title=existing.title,
+            authors=existing.authors,
+            guarantee=Guarantee.REPLICA,
+        )
+
+    check: NearMatchCheck | None = None
+    if stop_on_near_match:
+        check, stopped = _near_match_stop(store, candidate)
+        if stopped is not None:
+            stopped.guarantee = Guarantee.REPLICA
+            return stopped
+
+    return AddResult(
+        libris_id=None,
+        path=None,
+        outcome=Outcome.QUEUED,
+        title=candidate.title,
+        authors=candidate.authors,
+        near_match_check=check,
+        guarantee=Guarantee.REPLICA,
+        intent_id=intents.record_add(candidate, fields),
+    )
+
+
+def _checked_overrides(overrides: dict[str, object]) -> dict[str, object]:
+    """Overrides as `create_book_note` will write them, judged as it judges them."""
+    checked: dict[str, object] = {}
+    for key, value in overrides.items():
+        if key not in DEFAULT_FRONTMATTER:
+            raise ValueError(
+                f"Unknown frontmatter field: '{key}'. "
+                f"Valid fields: {', '.join(DEFAULT_FRONTMATTER.keys())}"
+            )
+        value = normalize_field_value(key, value)
+        validate_field_value(key, value)
+        checked[key] = value
+    return checked
 
 
 class ShelfUnreadable(Exception):

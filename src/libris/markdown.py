@@ -287,6 +287,7 @@ def create_book_note(
     vault_path: Path,
     status: str = "To Read",
     overrides: Dict[str, Any] | None = None,
+    added: date | None = None,
 ) -> Path:
     """Creates a Markdown note for a book in the specified vault path.
 
@@ -300,6 +301,9 @@ def create_book_note(
         status: Default reading status (overridden if 'status' is in overrides).
         overrides: Optional dict of frontmatter fields to set/override.
             Keys must exist in DEFAULT_FRONTMATTER.
+        added: The day the book joined the Library, which the Libris ID is
+            minted from (ADR 0011). Today unless given: an add queued remotely
+            joined on the day it was asked for, not the day sync applied it.
 
     Raises:
         NoteNameTaken: If a file already has the note's name. Nothing is written.
@@ -312,7 +316,7 @@ def create_book_note(
         overrides = {k: v for k, v in overrides.items() if k != "status"}
 
     validate_field_value("status", status)
-    added = date.today()
+    added = added or date.today()
     frontmatter = {
         **DEFAULT_FRONTMATTER,
         "libris_id": mint_libris_id(added),

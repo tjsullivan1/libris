@@ -2,8 +2,9 @@
 
 The hosted MCP server (#171, ADR 0035): a Container App that signs people in through Google and
 lets one account in. It serves the same tools as `libris mcp`, answered from what `libris sync`
-pushed to Cosmos (#175). The Library is read-only from here: `add_book` and `update_book` say
-that changes can't be made remotely yet, and write nothing.
+pushed to Cosmos (#175). `add_book` records an Intent in the `intents` container for the next
+`libris sync` to apply (#176); `update_book` says changes can't be made remotely yet, and writes
+nothing.
 
 ## What you need
 

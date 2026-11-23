@@ -803,9 +803,19 @@ def connect_containers(endpoint: str, database: str) -> tuple[Container, Contain
     Raises:
         ImportError: If the `sync` extra is not installed.
     """
+    books, counts = connect_container(endpoint, database, BOOKS, WORD_COUNTS)
+    return books, counts
+
+
+def connect_container(endpoint: str, database: str, *names: str) -> list[Container]:
+    """Reach the named containers as `connect_containers` reaches its two.
+
+    Raises:
+        ImportError: If the `sync` extra is not installed.
+    """
     from azure.cosmos import CosmosClient
     from azure.identity import DefaultAzureCredential
 
     client = CosmosClient(endpoint, credential=DefaultAzureCredential())
     db = client.get_database_client(database)
-    return db.get_container_client(BOOKS), db.get_container_client(WORD_COUNTS)
+    return [db.get_container_client(name) for name in names]

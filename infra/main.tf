@@ -249,6 +249,19 @@ resource "azurerm_cosmosdb_sql_container" "word_counts" {
   }
 }
 
+# Changes a Surface with no Shelf records for `libris sync` to apply (ADR 0002,
+# #176): pending until sync settles them, then kept as a record of what each
+# Surface did (ADR 0006). A handful of small documents, queried by kind and
+# whether they are pending, so the default index costs nothing worth trimming.
+# The app and the owner reach it through the account-wide roles below.
+resource "azurerm_cosmosdb_sql_container" "intents" {
+  name                = "intents"
+  resource_group_name = azurerm_resource_group.main.name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.libris.name
+  partition_key_paths = ["/id"]
+}
+
 locals {
   cosmos_data_contributor = "${azurerm_cosmosdb_account.main.id}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002"
 }
