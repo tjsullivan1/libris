@@ -23,7 +23,7 @@ import contextlib
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -264,6 +264,7 @@ def push_shelf(
     *,
     target: str = "",
     allow_mass_deletion: bool = False,
+    written_by_intents: Collection[str] = (),
 ) -> PushReport:
     """Push the Book Notes that changed, delete those that left, rebuild the counts.
 
@@ -281,6 +282,10 @@ def push_shelf(
             for one is not trusted for another.
         allow_mass_deletion: Delete however many notes have left the Shelf,
             rather than refusing a number that looks like a missing drive.
+        written_by_intents: The Libris IDs of notes this sync's Intents just
+            wrote. They go up like any other, but they say nothing about
+            whether the Shelf is really there: a queued add applied to a Shelf
+            that scanned empty must not make it look full (#211).
 
     Returns:
         What went up, what was deleted, and every note that could not go up.
@@ -305,6 +310,7 @@ def push_shelf(
             counts,
             target=target,
             allow_mass_deletion=allow_mass_deletion,
+            written_by_intents=frozenset(written_by_intents),
         )
 
 
@@ -360,6 +366,7 @@ def _push_shelf(
     *,
     target: str,
     allow_mass_deletion: bool,
+    written_by_intents: frozenset[str],
 ) -> PushReport:
     collisions = find_id_collisions(vault_path)
     if collisions:
@@ -437,7 +444,9 @@ def _push_shelf(
         # A scan that found files it could not read or parse is not empty: it
         # is incomplete, and the hold below names those files (#195 review).
         incomplete = bool(unreadable or report.unparseable)
-        scanned_empty = not on_shelf and not incomplete and bool(state.hashes)
+        # Counting only the notes sync did not write itself this run (#211).
+        found = any(n.libris_id not in written_by_intents for n in on_shelf)
+        scanned_empty = not found and not incomplete and bool(state.hashes)
         if scanned_empty or len(leaving) > _plausible_deletions(len(state.hashes)):
             raise DeletionsRefused(
                 deleting=len(leaving),

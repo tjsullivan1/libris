@@ -124,7 +124,10 @@ def apply_pending(vault_path: Path, intents: Container) -> IntentReport:
                 parameters=[{"name": "@kind", "value": _ADD}],
                 enable_cross_partition_query=True,
             ),
-            key=lambda document: (document.get("recorded_at", ""), document["id"]),
+            # Whatever an Intent holds, it sorts: one whose time is not text
+            # goes first and is rejected by `_apply_add`, rather than failing
+            # the comparison and holding up every Intent and the push (#211).
+            key=lambda document: (_text(document.get("recorded_at")), document["id"]),
         )
         for document in pending:
             _apply_add(vault_path, intents, document, report)
@@ -137,10 +140,16 @@ def _apply_add(
     document: dict[str, Any],
     report: IntentReport,
 ) -> None:
-    title = str((document.get("candidate") or {}).get("title") or "an unnamed book")
+    raw = document.get("candidate")
+    title = _text(raw.get("title") if isinstance(raw, dict) else None) or (
+        "an unnamed book"
+    )
     try:
-        candidate = BookCandidate(**document["candidate"])
-        fields = dict(document.get("fields") or {})
+        # Everything an Intent holds is judged here, before any of it is used.
+        # One this code cannot make sense of is rejected; one that crashed
+        # further on would stay pending and stop every later sync (#211).
+        candidate = _candidate(raw)
+        fields = _fields(document.get("fields"))
         added = _local_day(document.get("recorded_at"))
     except (KeyError, TypeError, ValueError) as error:
         # Written by a server this code does not match. Nothing here can make
@@ -193,6 +202,20 @@ def _apply_add(
         )
         return
 
+    if result.libris_id is None:
+        # An outcome names the Libris ID the Intent made or meant (ADR 0013),
+        # and a settled Intent is never looked at again. A note written but
+        # locked before it could be read back, or a held note with no Libris
+        # ID yet, has none to give, so it waits: the next sync finds the note
+        # and absorbs the Intent into it (#211).
+        report.waiting.append(
+            Settled(
+                document["id"],
+                result.title or title,
+                reason="the note it means has no Libris ID that could be read yet",
+            )
+        )
+        return
     if result.outcome is service.Outcome.CREATED:
         outcome, into = IntentOutcome.APPLIED, report.applied
     else:
@@ -204,6 +227,34 @@ def _apply_add(
         into,
         Settled(document["id"], result.title or title, libris_id=result.libris_id),
     )
+
+
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _candidate(raw: object) -> BookCandidate:
+    """The candidate an Intent carries, or why it is not one."""
+    if not isinstance(raw, dict):
+        raise TypeError(f"candidate is {type(raw).__name__}, not a mapping")
+    candidate = BookCandidate(**raw)
+    # The two fields a note is named and matched by. Anything else wrong
+    # surfaces as a field of the note, not as a crash.
+    if not isinstance(candidate.title, str) or not candidate.title.strip():
+        raise ValueError(f"candidate title is {candidate.title!r}")
+    if not isinstance(candidate.authors, list) or not all(
+        isinstance(author, str) for author in candidate.authors
+    ):
+        raise ValueError(f"candidate authors are {candidate.authors!r}")
+    return candidate
+
+
+def _fields(raw: object) -> dict[str, object]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise TypeError(f"fields are {type(raw).__name__}, not a mapping")
+    return dict(raw)
 
 
 def _local_day(recorded_at: object) -> date:

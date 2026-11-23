@@ -337,3 +337,106 @@ def test_a_book_added_remotely_is_found_remotely_after_one_sync(tmp_path):
     found = service.search_library(replica, query="mistborn")
     assert found.total == 1
     assert found.books[0].libris_id == intents.items[result.intent_id]["libris_id"]
+
+
+# --- what a malformed Intent or an unfinished write cannot do (#211 review) ---
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("recorded_at", None),
+        ("recorded_at", 1732400000),
+        ("candidate", ["Mistborn"]),
+        ("candidate", "Mistborn"),
+        ("candidate", {"title": 7, "authors": ["Brandon Sanderson"]}),
+        ("candidate", {"title": "Mistborn", "authors": "Brandon Sanderson"}),
+        ("fields", ["status", "Read"]),
+    ],
+    ids=[
+        "time null",
+        "time a number",
+        "candidate a list",
+        "candidate a string",
+        "title not text",
+        "authors not a list",
+        "fields a list",
+    ],
+)
+def test_a_malformed_intent_is_rejected_without_holding_up_the_others(
+    tmp_path, key, value
+):
+    # Given a well-formed add-Intent, and a malformed one beside it
+    intents, good = _queued(tmp_path)
+    elantris = BookCandidate(title="Elantris", authors=["Brandon Sanderson"])
+    bad = IntentQueue(intents).record_add(elantris, {})
+    intents.items[bad][key] = value
+
+    # When sync applies them
+    apply_pending(tmp_path, intents)
+
+    # Then the malformed one is rejected and the other still applies
+    assert intents.items[bad]["outcome"] == "rejected"
+    assert intents.items[good]["outcome"] == "applied"
+    assert _notes(tmp_path) == ["Mistborn - Brandon Sanderson.md"]
+
+
+def test_a_note_written_but_not_read_back_leaves_its_intent_waiting(
+    tmp_path, monkeypatch
+):
+    # Given an add-Intent, and a note that is locked the moment it is written,
+    # so its Libris ID cannot be read back
+    intents, intent_id = _queued(tmp_path)
+    read = BookNote.read
+
+    def _locked(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("libris.service.BookNote.read", _locked)
+
+    # When sync applies it
+    report = apply_pending(tmp_path, intents)
+
+    # Then it is not settled without the Libris ID it made
+    assert intents.items[intent_id]["pending"] is True
+    assert [s.intent_id for s in report.waiting] == [intent_id]
+
+    # And once the note can be read, the next sync absorbs it into that note
+    monkeypatch.setattr("libris.service.BookNote.read", read)
+    shelf.forget_indexes()
+    apply_pending(tmp_path, intents)
+    (path,) = tmp_path.glob("*.md")
+    assert intents.items[intent_id]["outcome"] == "absorbed"
+    assert intents.items[intent_id]["libris_id"] == BookNote.read(path).libris_id
+
+
+def test_an_empty_field_is_not_recorded_so_absorbing_cannot_reject_it(tmp_path):
+    # Given an add queued with an empty format beside a status
+    intents, intent_id = _queued(tmp_path, fields={"format": [], "status": "Reading"})
+    assert intents.items[intent_id]["fields"] == {"status": "Reading"}
+
+    # When the Book reaches the Shelf before sync, which then absorbs the add
+    create_book_note(MISTBORN, tmp_path)
+    apply_pending(tmp_path, intents)
+
+    # Then the status it did name is set, and nothing is rejected
+    assert intents.items[intent_id]["outcome"] == "absorbed"
+    (path,) = tmp_path.glob("*.md")
+    assert BookNote.read(path).frontmatter["status"] == "Reading"
+
+
+def test_a_remote_add_naming_a_field_absorbing_could_not_set_is_refused(tmp_path):
+    # Given an empty Shelf
+    intents = FakeContainer()
+
+    # When an add arrives setting a field that is not the reader's
+    with pytest.raises(ValueError, match="series"):
+        service.queue_add(
+            ReplicaStore.from_shelf(tmp_path),
+            IntentQueue(intents),
+            MISTBORN,
+            {"series": "Mistborn"},
+        )
+
+    # Then nothing is queued
+    assert intents.items == {}

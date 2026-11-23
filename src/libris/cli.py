@@ -3138,6 +3138,11 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
             # says nothing about what another holds.
             target=f"{endpoint}#{database}",
             allow_mass_deletion=allow_deletions,
+            written_by_intents=(
+                [s.libris_id for s in intents.applied if s.libris_id]
+                if intents is not None
+                else ()
+            ),
         )
     except SyncRefused as refused:
         _report_id_collisions(refused.collisions)

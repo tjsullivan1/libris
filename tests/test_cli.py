@@ -3465,8 +3465,33 @@ def test_sync_says_a_queued_add_must_wait_and_exits_non_zero(
     assert "Mistborn" in result.output
 
 
+def test_a_queued_add_cannot_make_an_empty_shelf_look_full(monkeypatch, tmp_path):
+    # Given a remote holding two books pushed from a Shelf that now scans
+    # empty, as an unmounted drive does - and an add queued remotely
+    from cosmos_fake import FakeContainer
+
+    intents = FakeContainer()
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path, intents=intents)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(tmp_path, "emma.md", "title: Emma\nlibris_id: 01E\n")
+    assert runner.invoke(app, ["sync"]).exit_code == 0
+    (tmp_path / "dune.md").unlink()
+    (tmp_path / "emma.md").unlink()
+    _queue_mistborn(intents)
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the note the add wrote does not count: the scan is still empty, and
+    # nothing the remote holds is deleted
+    assert _stopped_cleanly(result), result.output
+    assert "has no notes in it" in result.output
+    assert {"01D", "01E"} <= set(books.items)
+
+
 def test_sync_without_an_intents_container_still_pushes(monkeypatch, tmp_path):
     # Given an account deployed before remote writes, with no intents container
+    pytest.importorskip("azure.core")
     from azure.core.exceptions import ResourceNotFoundError
     from cosmos_fake import FakeContainer
 

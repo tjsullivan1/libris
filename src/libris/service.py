@@ -20,7 +20,6 @@ import yaml
 
 from .api import UNKNOWN_AUTHOR, UNKNOWN_TITLE, BookCandidate, GoogleBooksClient
 from .markdown import (
-    DEFAULT_FRONTMATTER,
     EXCLUDED_GOOGLE_BOOKS_IDS,
     BookNote,
     FrontmatterUnreadable,
@@ -813,15 +812,25 @@ def queue_add(
 
 
 def _checked_overrides(overrides: dict[str, object]) -> dict[str, object]:
-    """Overrides as `create_book_note` will write them, judged as it judges them."""
+    """The fields an add-Intent records, judged now so sync can apply them either way.
+
+    Sync writes them into a new note, or, when the Library already holds the
+    Book, sets them on that note through `update_note` (ADR 0013). So they are
+    held to the stricter of the two: reader fields only, and never empty. An
+    empty value asks for nothing, and is dropped rather than recorded as a
+    null `update_note` would refuse, which rejected an accepted add only
+    because the Book was held by then (#211).
+    """
     checked: dict[str, object] = {}
     for key, value in overrides.items():
-        if key not in DEFAULT_FRONTMATTER:
+        if key not in READER_FIELDS:
             raise ValueError(
-                f"Unknown frontmatter field: '{key}'. "
-                f"Valid fields: {', '.join(DEFAULT_FRONTMATTER.keys())}"
+                f"{key} is not a field this Surface may set. "
+                f"Settable fields: {', '.join(sorted(READER_FIELDS))}."
             )
         value = normalize_field_value(key, value)
+        if value is None or (isinstance(value, (str, list, dict)) and not value):
+            continue
         validate_field_value(key, value)
         checked[key] = value
     return checked
