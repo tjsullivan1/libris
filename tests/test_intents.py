@@ -933,3 +933,72 @@ def test_a_book_updated_remotely_reads_updated_remotely_after_one_sync(tmp_path)
     # Then the replica holds the change
     (found,) = CosmosStore(books, counts).with_libris_id(held.libris_id)
     assert found.frontmatter["status"] == "Reading"
+
+
+def test_a_later_update_waits_behind_an_earlier_one_so_it_is_not_undone(
+    tmp_path, monkeypatch
+):
+    # Given two updates to Mistborn's status, the earlier of which the Shelf
+    # cannot take on this sync
+    held = _held(tmp_path, status="To Read")
+    intents = FakeContainer()
+    queue = IntentQueue(intents)
+    replica = ReplicaStore.from_shelf(tmp_path)
+    first = service.queue_update(replica, queue, held.libris_id, {"status": "Reading"})
+    second = service.queue_update(
+        replica, queue, held.libris_id, {"status": "Not To Read"}
+    )
+    intents.items[first.intent_id]["recorded_at"] = "2026-03-14T12:00:00+00:00"
+    intents.items[second.intent_id]["recorded_at"] = "2026-03-15T12:00:00+00:00"
+    update_book = service.update_book
+
+    def busy_for_the_first(vault, libris_id, fields, **kwargs):
+        if fields == {"status": "Reading"}:
+            raise service.NoteMoved("No Book Note is at mistborn.md.")
+        return update_book(vault, libris_id, fields, **kwargs)
+
+    # When one sync runs while the earlier cannot apply
+    monkeypatch.setattr(service, "update_book", busy_for_the_first)
+    report = apply_pending(tmp_path, intents)
+
+    # Then the later one waits behind it, and the note is unchanged
+    assert [s.intent_id for s in report.waiting] == [first.intent_id, second.intent_id]
+    assert "must apply first" in report.waiting[1].reason
+    assert BookNote.read(held.path).frontmatter["status"] == "To Read"
+
+    # And when the next sync can apply both, the later one is what stands
+    monkeypatch.setattr(service, "update_book", update_book)
+    shelf.forget_indexes()
+    apply_pending(tmp_path, intents)
+    assert intents.items[first.intent_id]["outcome"] == "applied"
+    assert intents.items[second.intent_id]["outcome"] == "applied"
+    assert BookNote.read(held.path).frontmatter["status"] == "Not To Read"
+
+
+def test_an_update_reaching_a_note_with_no_libris_id_of_its_own_waits(tmp_path):
+    # Given an update queued for one note, which is then merged into a note
+    # that has no Libris ID of its own, so sync would not push it
+    from libris.markdown import set_frontmatter_fields
+
+    merged_away = _held(
+        tmp_path, BookCandidate(title="Mistborn (copy)", authors=["Brandon Sanderson"])
+    )
+    survivor = _held(tmp_path, status="To Read")
+    intents, result = _queued_update(
+        tmp_path, merged_away.libris_id, {"status": "Reading"}
+    )
+    merged_away.path.unlink()
+    set_frontmatter_fields(
+        survivor.path,
+        lambda _: {"libris_id": None, "superseded_ids": [merged_away.libris_id]},
+    )
+    shelf.forget_indexes()
+    assert BookNote.read(survivor.path).libris_id is None
+
+    # When sync applies the update
+    report = apply_pending(tmp_path, intents)
+
+    # Then it is not settled under an identity the remote will never hold
+    assert intents.items[result.intent_id]["pending"] is True
+    assert [s.intent_id for s in report.waiting] == [result.intent_id]
+    assert report.applied == []

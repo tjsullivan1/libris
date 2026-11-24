@@ -140,7 +140,8 @@ def apply_pending(vault_path: Path, intents: Container) -> IntentReport:
     Under the sync lock, so two syncs cannot both apply one Intent. Oldest
     first, across adds and updates alike, so of two Intents for one Book the
     first is applied and the second absorbed, and of two updates to one field
-    the later one stands - as they would have on the Shelf.
+    the later one stands - as they would have on the Shelf. One that has to
+    wait holds back every Intent after it, so the order holds across syncs too.
 
     An Intent is settled after its note is written. A sync that dies in
     between leaves it pending, and the next sync finds the note it wrote and
@@ -186,7 +187,27 @@ def apply_pending(vault_path: Path, intents: Container) -> IntentReport:
                 for document in pending
             )
             return report
-        for document in pending:
+        for position, document in enumerate(pending):
+            if report.waiting:
+                # An earlier Intent could not apply yet. Everything after it
+                # waits too: applied now, a later one would be overwritten by
+                # the earlier when it finally applies, undoing what was asked
+                # last (#218 review). Which notes an Intent touches is not known
+                # before applying it - an add may be absorbed into any note, an
+                # update follow a Superseded ID - so order is kept wholesale.
+                # It costs little: what makes one Intent wait is usually the
+                # Shelf, and the Shelf makes most of the rest wait anyway.
+                behind = report.waiting[0].title
+                report.waiting.extend(
+                    Settled(
+                        later["id"],
+                        _title_of(later),
+                        reason=f"queued after a change to {behind} that must apply first",
+                        kind=_text(later.get("kind")),
+                    )
+                    for later in pending[position:]
+                )
+                break
             kind = document.get("kind")
             if kind == _ADD:
                 _apply_add(vault_path, intents, document, report)
@@ -282,6 +303,17 @@ def _apply_update(
         )
         return
 
+    if result.note.libris_id is None:
+        # Reached through a Superseded ID, by a note with no Libris ID of its
+        # own. The push skips such a note, so the change goes nowhere remote,
+        # and settled it would never be looked at again. It waits, as an add
+        # with no Libris ID to name does; applying it again is harmless, since
+        # it sets the same values and a stamped date only fills an empty field
+        # (#218 review).
+        report.waiting.append(
+            settled(reason="the note it means has no Libris ID of its own yet")
+        )
+        return
     _settle(
         intents,
         document,
@@ -292,7 +324,7 @@ def _apply_update(
         Settled(
             document["id"],
             result.note.title or title,
-            libris_id=result.note.libris_id or target,
+            libris_id=result.note.libris_id,
             kind=_UPDATE,
         ),
     )
