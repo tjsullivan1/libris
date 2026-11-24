@@ -13,7 +13,7 @@ from libris import shelf
 from libris.api import BookCandidate
 from libris.intents import IntentQueue, apply_pending
 from libris.markdown import BookNote, create_book_note, list_books
-from libris.sync_note import NOTE_NAME, update_note
+from libris.sync_note import _MARKER, NOTE_NAME, NoteRefused, update_note
 
 
 @pytest.fixture(autouse=True)
@@ -182,7 +182,7 @@ def test_a_tick_on_anything_but_a_rejection_acknowledges_nothing(vault):
         held.libris_id, {"status": "Read"}, "Dune"
     )
     (vault.parent / NOTE_NAME).write_text(
-        f"- [x] **Dune** %%intent:{applied}%%\n", encoding="utf-8"
+        f"{_MARKER}\n- [x] **Dune** %%intent:{applied}%%\n", encoding="utf-8"
     )
 
     # When sync runs
@@ -276,17 +276,48 @@ def test_a_line_break_anywhere_in_an_intent_keeps_its_task_on_one_line(
     assert _sync(vault, intents).acknowledged == ["0a1b2c"]
 
 
-def test_a_note_that_is_not_utf8_is_rewritten_rather_than_stopping_sync(vault):
-    # Given a rejection, and a note whose bytes are not UTF-8
+@pytest.mark.parametrize(
+    "held",
+    [
+        "# Libris sync\n\nMy own notes on syncing.\n- [x] done %%intent:{id}%%\n",
+        b"- [x] \xff\xfe not text %%intent:{id}%%",
+    ],
+    ids=["a note of the person's own", "bytes that are not UTF-8"],
+)
+def test_a_file_libris_did_not_write_is_left_alone_and_its_ticks_ignored(vault, held):
+    # Given a rejection, and a file with the note's name that libris did not
+    # write, or that cannot be read to tell
+    intents = FakeContainer()
+    intent_id = _rejected_update(intents)
+    apply_pending(vault, intents)
+    path = vault.parent / NOTE_NAME
+    if isinstance(held, str):
+        path.write_text(held.format(id=intent_id), encoding="utf-8")
+    else:
+        path.write_bytes(held.replace(b"{id}", intent_id.encode()))
+    before = path.read_bytes()
+
+    # When sync tries to update the note
+    with pytest.raises(NoteRefused, match="not written by libris"):
+        _sync(vault, intents)
+
+    # Then the file is as it was, and nothing is acknowledged from it
+    assert path.read_bytes() == before
+    assert "acknowledged_at" not in intents.items[intent_id]
+
+
+def test_a_shelf_at_its_vaults_root_gets_no_note_outside_the_vault(tmp_path):
+    # Given a Shelf that is its Vault's root, and a rejection. The Vault is a
+    # folder of this test's, so "beside it" is this test's directory too.
+    root = tmp_path / "Vault"
+    (root / ".obsidian").mkdir(parents=True)
     intents = FakeContainer()
     _rejected_update(intents)
-    (vault.parent / NOTE_NAME).write_bytes(b"- [x] \xff\xfe broken")
 
-    # When sync runs
-    report = _sync(vault, intents)
+    # When sync tries to update the note
+    with pytest.raises(NoteRefused, match="root of its Vault"):
+        _sync(root, intents)
 
-    # Then the note is rewritten, listing the rejection, and nothing is
-    # acknowledged from text that could not be read
-    assert report.written
-    assert report.acknowledged == []
-    assert len(_rejected_lines(vault)) == 1
+    # Then nothing is written beside the Shelf, outside the Vault, or on it
+    assert not (tmp_path / NOTE_NAME).exists()
+    assert not (root / NOTE_NAME).exists()

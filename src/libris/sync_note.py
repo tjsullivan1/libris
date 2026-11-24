@@ -33,6 +33,18 @@ _SURFACES = {HOSTED_MCP: "the hosted MCP server"}
 # such as `[/]` for "in progress", and those are not a person saying "done".
 _TICKED = re.compile(r"^\s*[-*+] \[[xX]\] .*%%\s*intent:([0-9A-Za-z_-]+)\s*%%")
 
+# The line that says libris wrote the note, and so may replace it. A comment,
+# so Obsidian shows it only while the cursor is on it.
+_MARKER = "%% libris:sync-note - written by libris sync %%"
+
+
+class NoteRefused(Exception):
+    """The note cannot be written where it belongs, and is left as it is.
+
+    Never a reason for sync to stop: the rejections are still on the remote,
+    and the push goes ahead without the note.
+    """
+
 
 @dataclass
 class NoteReport:
@@ -67,10 +79,37 @@ def update_note(
 
     Returns:
         Where the note is, what was acknowledged, and whether it was written.
+
+    Raises:
+        NoteRefused: The Shelf is its Vault's root, so beside it is outside
+            the Vault, or a file libris did not write already has the note's
+            name. Nothing is acknowledged or written.
     """
     path = note_path(vault_path)
     result = NoteReport(path)
+    if (vault_path / ".obsidian").is_dir():
+        # Beside the Shelf is outside the Vault, where Obsidian neither shows
+        # nor syncs it. Not inside the Shelf either: anything that lists Book
+        # Notes would find it, and a Bases view's folder filter takes in
+        # subfolders too (ADR 0013, #219 review).
+        raise NoteRefused(
+            f"the Shelf {vault_path} is the root of its Vault, so the note would "
+            "sit outside the Vault where Obsidian cannot show it. Move the Book "
+            "Notes into a folder of the Vault, and set that folder as the Shelf "
+            "with `libris config --vault`"
+        )
     with _sync_lock():
+        # Read once, so the ticks and the comparison below agree on what the
+        # note holds.
+        exists, current = _read(path)
+        if exists and not _owned(current):
+            # A note of the person's own, or one that cannot be read to tell.
+            # Its ticks are not ours to act on, and it is not ours to replace
+            # (#219 review).
+            raise NoteRefused(
+                f"{path} was not written by libris, so it was left alone. "
+                "Rename or move it, and the next sync writes its own"
+            )
         rejected = [
             document
             for document in intents.query_items(
@@ -82,10 +121,6 @@ def update_note(
             )
             if not document.get("acknowledged_at")
         ]
-        # Read once, so the ticks and the comparison below agree on what the
-        # note holds. Unreadable as text is the same as absent: rewritten, and
-        # never the reason a sync stops before its push (#219 review).
-        current = _read(path)
         ticked = _ticked(current or "")
         outstanding = []
         for document in rejected:
@@ -114,6 +149,7 @@ def update_note(
 def render(rejected: list[dict[str, Any]], waiting: list[Settled]) -> str:
     """The note's text, for these rejected Intents and these waiting ones."""
     lines = [
+        _MARKER,
         "# Libris: queued changes that did not apply",
         "",
         "`libris sync` rewrites this note on every run. Ticking a box is the "
@@ -200,12 +236,23 @@ def _fields_text(fields: dict[str, Any]) -> str:
     return "; ".join(f"{k} to {value(v)}" for k, v in fields.items())
 
 
-def _read(path: Path) -> str | None:
-    """The note's text, or None when there is none to read as text."""
+def _read(path: Path) -> tuple[bool, str | None]:
+    """Whether the note exists, and its text when it can be read as text.
+
+    Bytes that are not UTF-8 are a note that exists but cannot be read: never
+    an error that stops a sync before its push (#219 review).
+    """
     try:
-        return path.read_text(encoding="utf-8")
-    except (FileNotFoundError, UnicodeDecodeError):
-        return None
+        return True, path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False, None
+    except UnicodeDecodeError:
+        return True, None
+
+
+def _owned(text: str | None) -> bool:
+    """Whether libris wrote this note, so may replace it."""
+    return text is not None and _MARKER in text.splitlines()
 
 
 def _ticked(text: str) -> set[str]:

@@ -68,3 +68,9 @@ note once they apply. Their reasons are this run's, not stored on the remote.
 The note is rewritten only when its text changes. Obsidian Sync carries every write, and a
 tick made on the phone that has not reached the PC yet is lost to a rewrite in between; it
 then has to be ticked again, which is the cost of keeping the remote authoritative.
+
+Libris replaces the note only when the file carries the marker line it writes. A file of
+the person's own with that name, or one that cannot be read as text to tell, is left alone
+and its ticks ignored. A Shelf that is its Vault's root gets no note at all: beside it is
+outside the Vault, and inside it is where Book Notes are listed. In both cases the push
+still runs and sync exits non-zero, saying why.

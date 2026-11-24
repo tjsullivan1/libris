@@ -3298,11 +3298,11 @@ def _update_sync_note(
     """
     from azure.core.exceptions import AzureError
 
-    from .sync_note import update_note
+    from .sync_note import NoteRefused, update_note
 
     try:
         note = update_note(vault_path, container, report)
-    except (OSError, AzureError) as error:
+    except (NoteRefused, OSError, AzureError) as error:
         typer.echo(f"\nThe note listing what did not apply was not updated: {error}")
         return False
     if note.acknowledged:

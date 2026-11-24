@@ -3591,6 +3591,23 @@ def test_a_note_that_cannot_be_written_still_lets_the_push_run(monkeypatch, tmp_
     assert result.exit_code == 1
 
 
+def test_sync_leaves_a_note_of_your_own_alone_and_still_pushes(monkeypatch, tmp_path):
+    # Given a rejection to list, and a note of the person's own with its name
+    books = _rejection_queued_beside(monkeypatch, tmp_path)
+    mine = tmp_path / "Libris sync.md"
+    mine.write_text("My own notes.\n", encoding="utf-8")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the note is untouched, the Shelf is pushed, and the run says why it
+    # left the note and exits non-zero
+    assert mine.read_text(encoding="utf-8") == "My own notes.\n"
+    assert "01D" in books.items
+    assert "was not written by libris" in result.output
+    assert result.exit_code == 1
+
+
 def _shelve_dune_and_emma(vault):
     _shelved(vault, "dune.md", "title: Dune\nlibris_id: 01D\n")
     _shelved(vault, "emma.md", "title: Emma\nlibris_id: 01E\n")
