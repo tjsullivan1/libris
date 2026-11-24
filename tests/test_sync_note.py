@@ -141,8 +141,10 @@ def test_once_the_last_rejection_is_ticked_the_note_says_nothing_to_act_on(vault
     # When sync runs
     _sync(vault, intents)
 
-    # Then the note has nothing left on it
+    # Then the note has nothing left on it, and does not claim the change it
+    # never made was applied
     assert "Nothing to act on" in _note(vault)
+    assert "applied" not in _note(vault)
 
 
 def test_a_waiting_intent_is_listed_untickable_until_the_shelf_lets_it_apply(

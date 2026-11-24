@@ -122,7 +122,10 @@ def render(rejected: list[dict[str, Any]], waiting: list[Settled]) -> str:
     ]
     if not rejected and not waiting:
         lines.append(
-            "Nothing to act on: every change queued remotely has been applied."
+            # Not "everything applied": a rejection ticked off is still one
+            # that did not (#219 review).
+            "Nothing to act on: no queued change is waiting, and every "
+            "rejected one has been ticked off."
         )
         return "\n".join(lines) + "\n"
 
