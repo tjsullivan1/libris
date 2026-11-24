@@ -8,6 +8,7 @@ missing, as each already does for a note that could not be read (#168 review).
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from cosmos_fake import FakeContainer
@@ -146,6 +147,46 @@ def test_a_match_whose_note_breaks_after_the_lookup_is_not_reported_held(
     with pytest.raises(service.ShelfUnreadable, match=held.name):
         service.add_book(tmp_path, DUNE)
     assert _notes(tmp_path) == [held.name]
+
+
+def test_the_shelf_is_judged_complete_on_everything_its_check_saw(
+    tmp_path, monkeypatch
+):
+    # Given a Shelf where each scan finds another note locked and another
+    # broken - edits and a sync client landing while the check runs
+    from libris import store as store_module
+
+    handed_out: list[Path] = []
+
+    class _Busy:
+        scans = 0
+
+        def notes(self):
+            _Busy.scans += 1
+            return []
+
+        @property
+        def unreadable(self):
+            path = tmp_path / f"locked-{_Busy.scans}.md"
+            handed_out.append(path)
+            return [path]
+
+        @property
+        def unparseable(self):
+            path = tmp_path / f"broken-{_Busy.scans}.md"
+            handed_out.append(path)
+            return [path]
+
+    monkeypatch.setattr(store_module, "index_for", lambda _vault: _Busy())
+    shelf_store = store_module.ShelfStore(tmp_path)
+
+    # When the store is asked what it could not answer for
+    unanswered = shelf_store.unanswered()
+
+    # Then every failure any scan in that check saw is in the answer: one
+    # seen after an earlier list was copied would let a write go ahead that
+    # the store itself knew was unchecked (#216 review)
+    assert unanswered.paths == set(handed_out)
 
 
 def test_an_update_by_id_is_not_called_a_miss_while_a_note_will_not_parse(tmp_path):

@@ -661,8 +661,7 @@ def add_book(
         title=candidate.title,
         authors=candidate.authors,
     )
-    unsettled = {*store.unreadable(), *store.unparseable()}
-    if existing is not None and existing.path not in unsettled:
+    if existing is not None and existing.path not in store.unanswered().paths:
         # The exact check answers first, so a Book the Library provably holds is
         # reported as held rather than raised as a question with no useful answer.
         # Not when the match is a note that could not be read or no longer
@@ -881,10 +880,11 @@ def _check_shelf_complete(store: ShelfStore, question: str) -> None:
     parse. Where "nothing" would be acted on - a second note written, an
     update reported as a miss - the rest have to be ruled out too.
     """
-    unread = store.unreadable()
-    unparsed = store.unparseable()
-    if unread or unparsed:
-        raise ShelfUnreadable(unread, question, unparseable=unparsed)
+    unanswered = store.unanswered()
+    if unanswered.paths:
+        raise ShelfUnreadable(
+            unanswered.unreadable, question, unparseable=unanswered.unparseable
+        )
 
 
 class BookNotFound(Exception):
