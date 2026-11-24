@@ -187,11 +187,13 @@ class ShelfStore:
 
     vault_path: Path
     _unread: set[Path] = field(default_factory=set, repr=False, compare=False)
+    _unparsed: set[Path] = field(default_factory=set, repr=False, compare=False)
 
     def _notes(self) -> list[BookNote]:
         index = index_for(self.vault_path)
         notes = index.notes()
         self._unread.update(index.unreadable)
+        self._unparsed.update(index.unparseable)
         return notes
 
     def unreadable(self) -> list[Path]:
@@ -208,6 +210,19 @@ class ShelfStore:
         """
         self._notes()
         return sorted(self._unread, key=lambda path: path.name)
+
+    def unparseable(self) -> list[Path]:
+        """The `.md` files this store's questions read but could not parse.
+
+        Remembered and rescanned as `unreadable` is, and for the same reason:
+        a note whose frontmatter an edit broke is still a Book someone owns,
+        and no question answered without it has ruled it out (#212).
+
+        Returns:
+            Their paths, in name order.
+        """
+        self._notes()
+        return sorted(self._unparsed, key=lambda path: path.name)
 
     def _titled(self, status: str | None) -> list[BookNote]:
         return [n for n in self._notes() if n.title and _in_status(n, status)]

@@ -2802,15 +2802,25 @@ def import_cmd(
         )
         for path in result.unreadable_notes:
             typer.echo(f"  ! {path.name}")
-        if result.held_books:
-            typer.echo(
-                f"{len(result.held_books)} book(s) matched no note and were not "
-                f"{'added' if apply else 'counted as new'} - each may be one of "
-                "those notes. Fix what stops them being read and run the import "
-                "again:"
-            )
-            for book in result.held_books:
-                typer.echo(f"  ? {book.title} by {', '.join(book.authors)}")
+
+    if result.unparseable_notes:
+        # A note whose frontmatter an edit broke may be any of the books
+        # matched against nothing, just as an unreadable one may (#212).
+        typer.echo(
+            f"\n{len(result.unparseable_notes)} file(s) on the Shelf have "
+            "frontmatter that will not parse, so could not be checked for a match:"
+        )
+        for path in result.unparseable_notes:
+            typer.echo(f"  ! {path.name}")
+
+    if result.held_books:
+        typer.echo(
+            f"{len(result.held_books)} book(s) matched no note and were not "
+            f"{'added' if apply else 'counted as new'} - each may be one of "
+            "those notes. Fix them and run the import again:"
+        )
+        for book in result.held_books:
+            typer.echo(f"  ? {book.title} by {', '.join(book.authors)}")
 
     if not apply and (result.new_books or result.updated_books):
         typer.echo("\nRun with --apply to execute these changes.")
