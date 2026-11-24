@@ -17,7 +17,9 @@ An Intent is pending until sync settles it, and then carries its Intent Outcome:
   turned out to mean, and the fields it named are set on that note.
 - **rejected** - it cannot apply, and a person has to decide: an update naming
   a Libris ID the Shelf no longer holds, or a value the Library does not
-  accept. An update is never absorbed.
+  accept. An update is never absorbed. Sync lists it in a note beside the
+  Shelf until a person ticks it there, and then marks it `acknowledged_at`
+  (`sync_note`, #178).
 
 One that cannot apply *yet* - the Shelf could not be read, say - stays pending
 and is tried again by the next sync. That is not an outcome, only a delay.
