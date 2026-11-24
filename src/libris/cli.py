@@ -3311,10 +3311,14 @@ def _update_sync_note(
             "were acknowledged."
         )
     if note.changed_while_writing:
+        # Not "listed": the note holds what the last sync wrote, not this one's
+        # rejections. Not written, as far as the exit code goes (#219 review).
         typer.echo(
-            f"{note.path.name} changed while sync was writing it, so it was left "
-            "as it is; the next sync updates it."
+            f"\n{note.path.name} changed while sync was writing it, so it was "
+            f"left as it is. {note.rejected} rejected change(s) will be listed "
+            "there by the next sync."
         )
+        return False
     if note.rejected:
         typer.echo(f"{note.rejected} rejected change(s) are listed in {note.path}.")
     return True

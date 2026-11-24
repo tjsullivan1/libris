@@ -3591,6 +3591,35 @@ def test_a_note_that_cannot_be_written_still_lets_the_push_run(monkeypatch, tmp_
     assert result.exit_code == 1
 
 
+def test_a_note_left_for_the_next_sync_is_not_reported_as_listing_anything(
+    monkeypatch, tmp_path
+):
+    # Given a rejection to list, and a note that changes while sync writes it
+    from libris import sync_note
+
+    books = _rejection_queued_beside(monkeypatch, tmp_path)
+    real_render = sync_note.render
+
+    def _render_then_edit(*args, **kwargs):
+        text = real_render(*args, **kwargs)
+        (tmp_path / sync_note.NOTE_NAME).write_text(
+            f"{sync_note._MARKER}\nedited meanwhile\n", encoding="utf-8"
+        )
+        return text
+
+    monkeypatch.setattr(sync_note, "render", _render_then_edit)
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the Shelf is pushed, but the run does not claim the rejection is
+    # listed, says when it will be, and exits non-zero
+    assert "01D" in books.items
+    assert "are listed in" not in result.output
+    assert "1 rejected change(s) will be listed there by the next sync" in result.output
+    assert result.exit_code == 1
+
+
 def test_sync_leaves_a_note_of_your_own_alone_and_still_pushes(monkeypatch, tmp_path):
     # Given a rejection to list, and a note of the person's own with its name
     books = _rejection_queued_beside(monkeypatch, tmp_path)
