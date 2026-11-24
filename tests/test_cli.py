@@ -3496,6 +3496,48 @@ def test_sync_says_a_queued_add_must_wait_and_exits_non_zero(
     assert "Mistborn" in result.output
 
 
+def test_sync_applies_a_queued_update_and_pushes_it_in_the_same_run(
+    monkeypatch, tmp_path
+):
+    # Given Dune on the Shelf, and an update to it queued remotely
+    from cosmos_fake import FakeContainer
+
+    from libris.intents import IntentQueue
+
+    intents = FakeContainer()
+    intent_id = IntentQueue(intents).record_update("01D", {"status": "Read"}, "Dune")
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path, intents=intents)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\nstatus: Reading\n")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the note is changed, the Intent applied, and the change pushed
+    assert result.exit_code == 0, result.output
+    assert intents.items[intent_id]["outcome"] == "applied"
+    assert "Updated Dune (01D), queued remotely." in result.output
+    assert books.items["01D"]["frontmatter"]["status"] == "Read"
+
+
+def test_sync_names_a_rejected_queued_update(monkeypatch, tmp_path):
+    # Given an update queued remotely for a note no longer on the Shelf
+    from cosmos_fake import FakeContainer
+
+    from libris.intents import IntentQueue
+
+    intents = FakeContainer()
+    IntentQueue(intents).record_update("01X", {"status": "Read"}, "Emma")
+    _sync_to_fakes(monkeypatch, tmp_path, intents=intents)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the rejection is named, with the Book and why
+    assert "1 queued change(s) were rejected" in result.output
+    assert "Emma: no note on the Shelf holds the Libris ID 01X" in result.output
+
+
 def _shelve_dune_and_emma(vault):
     _shelved(vault, "dune.md", "title: Dune\nlibris_id: 01D\n")
     _shelved(vault, "emma.md", "title: Emma\nlibris_id: 01E\n")

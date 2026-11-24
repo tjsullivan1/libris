@@ -192,7 +192,7 @@ class WriteAnswer(BaseModel):
         description=(
             "created, already_present, needs_confirmation, updated, or queued. "
             "Queued means recorded for the computer holding the Library to "
-            "apply at its next sync: say it was queued, not added."
+            "apply at its next sync: say it was queued, not done."
         )
     )
     book: Book | None = None
@@ -266,7 +266,7 @@ def create_server(
             nothing.
         intent_recorder: Called per write where there is no Shelf, returning
             where to record an Intent for sync to apply (ADR 0002). With it,
-            `add_book` queues rather than refusing.
+            `add_book` and `update_book` queue rather than refusing.
         auth_server_provider: Who signs clients in, on the hosted server
             (ADR 0035). None over stdio, where the client is the person.
         auth: How the hosted server's sign-in is advertised. Given with
@@ -480,6 +480,9 @@ def create_server(
         Marking a book Read dates it today unless you say otherwise, and says so
         in `derived` - relay that, because a person who finished it last week
         can only correct it now.
+
+        Where the Library is a remote copy, the change is queued and reaches
+        the Library at its next sync: the outcome is queued, not updated.
         """
         fields: dict[str, object] = {}
         for name, value in (
@@ -495,6 +498,11 @@ def create_server(
 
         if not fields:
             raise ToolError("No fields were given, so there is nothing to change.")
+
+        if shelf_provider is None:
+            if intent_recorder is None:
+                raise ToolError(REMOTE_WRITES_UNAVAILABLE)
+            return _queue_update(store_provider(), intent_recorder(), libris_id, fields)
 
         try:
             result = service.update_book(writable_shelf(), libris_id, fields)
@@ -556,6 +564,32 @@ def _queue_add(
         near_match_check=(
             result.near_match_check.value if result.near_match_check else None
         ),
+        derived={k: str(v) for k, v in result.derived.items()},
+    )
+
+
+def _queue_update(
+    store: LibraryStore,
+    intents: service.IntentRecorder,
+    libris_id: str,
+    fields: dict[str, object],
+) -> WriteAnswer:
+    """`update_book` where there is no Shelf: an Intent for sync, or why not."""
+    try:
+        result = service.queue_update(store, intents, libris_id, fields)
+    except service.BookNotFound as exc:
+        raise ToolError(f"{exc} Nothing was queued.") from None
+    except ValueError as exc:
+        raise ToolError(f"{exc} Nothing was queued.") from None
+    return WriteAnswer(
+        outcome=service.Outcome.QUEUED.value,
+        book=Book(
+            libris_id=result.libris_id,
+            title=result.title,
+            authors=result.authors,
+        ),
+        guarantee=service.Guarantee.REPLICA.value,
+        intent_id=result.intent_id,
         derived={k: str(v) for k, v in result.derived.items()},
     )
 

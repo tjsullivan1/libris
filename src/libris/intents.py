@@ -6,13 +6,18 @@ replica; only Intents travel down. The hosted server records one in the
 applies it to the Shelf and records what became of it (ADR 0013). Settled
 Intents stay in the container as a record of what each Surface did (ADR 0006).
 
+Two kinds so far: an add carries a whole Book Candidate, and an update a Libris
+ID and only the fields it changes (#177).
+
 An Intent is pending until sync settles it, and then carries its Intent Outcome:
 
 - **applied** - the Shelf changed as it asked, and it names the Libris ID it
-  made.
+  made or changed.
 - **absorbed** - the Library already held the Book. It names the Libris ID it
   turned out to mean, and the fields it named are set on that note.
-- **rejected** - it cannot apply, and a person has to decide.
+- **rejected** - it cannot apply, and a person has to decide: an update naming
+  a Libris ID the Shelf no longer holds, or a value the Library does not
+  accept. An update is never absorbed.
 
 One that cannot apply *yet* - the Shelf could not be read, say - stays pending
 and is tried again by the next sync. That is not an outcome, only a delay.
@@ -38,6 +43,7 @@ INTENTS = "intents"
 HOSTED_MCP = "hosted_mcp"
 
 _ADD = "add"
+_UPDATE = "update"
 
 
 class IntentOutcome(Enum):
@@ -76,6 +82,34 @@ class IntentQueue:
         )
         return intent_id
 
+    def record_update(
+        self, libris_id: str, fields: dict[str, object], title: str | None
+    ) -> str:
+        """Record an update-Intent and return its identity.
+
+        Only the fields it changes travel (ADR 0002), so applying it cannot
+        touch a field the Surface knew nothing about. The title is the
+        replica's, for telling a person which Book an Intent meant when it does
+        not apply; sync goes by the Libris ID alone.
+        """
+        intent_id = uuid.uuid4().hex
+        self._container.upsert_item(
+            {
+                "id": intent_id,
+                "kind": _UPDATE,
+                "pending": True,
+                "surface": self._surface,
+                "recorded_at": datetime.now(UTC).isoformat(),
+                # Not `libris_id`: that is the outcome's, the identity the
+                # Intent turned out to mean, written when it settles. A
+                # rejected update would lose the one it asked for.
+                "target": libris_id,
+                "title": title,
+                "fields": fields,
+            }
+        )
+        return intent_id
+
 
 @dataclass
 class Settled:
@@ -85,6 +119,8 @@ class Settled:
     title: str
     libris_id: str | None = None
     reason: str | None = None
+    # What the Intent asked for: an add or an update.
+    kind: str = _ADD
 
 
 @dataclass
@@ -99,11 +135,12 @@ class IntentReport:
 
 
 def apply_pending(vault_path: Path, intents: Container) -> IntentReport:
-    """Apply every pending add-Intent to the Shelf, oldest first, and settle each.
+    """Apply every pending Intent to the Shelf, oldest first, and settle each.
 
     Under the sync lock, so two syncs cannot both apply one Intent. Oldest
-    first, so of two Intents for one Book the first is applied and the second
-    absorbed, as they would have been on the Shelf.
+    first, across adds and updates alike, so of two Intents for one Book the
+    first is applied and the second absorbed, and of two updates to one field
+    the later one stands - as they would have on the Shelf.
 
     An Intent is settled after its note is written. A sync that dies in
     between leaves it pending, and the next sync finds the note it wrote and
@@ -121,8 +158,7 @@ def apply_pending(vault_path: Path, intents: Container) -> IntentReport:
     with _sync_lock():
         pending = sorted(
             intents.query_items(
-                query="SELECT * FROM c WHERE c.kind = @kind AND c.pending = true",
-                parameters=[{"name": "@kind", "value": _ADD}],
+                query="SELECT * FROM c WHERE c.pending = true",
                 enable_cross_partition_query=True,
             ),
             # Whatever an Intent holds, it sorts: one whose time is not text
@@ -141,13 +177,125 @@ def apply_pending(vault_path: Path, intents: Container) -> IntentReport:
             shared = ", ".join(sorted(c.libris_id for c in collisions))
             reason = f"more than one note holds the Libris ID {shared}"
             report.waiting.extend(
-                Settled(document["id"], _title_of(document), reason=reason)
+                Settled(
+                    document["id"],
+                    _title_of(document),
+                    reason=reason,
+                    kind=_text(document.get("kind")),
+                )
                 for document in pending
             )
             return report
         for document in pending:
-            _apply_add(vault_path, intents, document, report)
+            kind = document.get("kind")
+            if kind == _ADD:
+                _apply_add(vault_path, intents, document, report)
+            elif kind == _UPDATE:
+                _apply_update(vault_path, intents, document, report)
+            else:
+                # Recorded by a newer server than this sync. Rejecting it would
+                # throw away a change nothing here understood; it waits, and
+                # the reason says what fixes it.
+                report.waiting.append(
+                    Settled(
+                        document["id"],
+                        _title_of(document),
+                        reason=(
+                            f"this libris cannot apply a {kind!r} change; "
+                            "update libris on this computer"
+                        ),
+                        kind=_text(kind),
+                    )
+                )
     return report
+
+
+def _apply_update(
+    vault_path: Path,
+    intents: Container,
+    document: dict[str, Any],
+    report: IntentReport,
+) -> None:
+    """Apply an update-Intent to the note its Libris ID means, or settle why not.
+
+    Applied when the note is found, following a Superseded ID to the note that
+    absorbed it (ADR 0014). Rejected when the Shelf holds no note for the ID, or
+    a value is not one the Library accepts (ADR 0013). Waits on anything the
+    Shelf could fix by itself.
+    """
+    title = _title_of(document)
+
+    def settled(**kwargs: Any) -> Settled:
+        return Settled(document["id"], title, kind=_UPDATE, **kwargs)
+
+    try:
+        target = _target(document.get("target"))
+        fields = _fields(document.get("fields"))
+        if not fields:
+            raise ValueError("it names no field to change")
+        asked = _local_day(document.get("recorded_at"))
+    except (TypeError, ValueError) as error:
+        _settle(
+            intents,
+            document,
+            IntentOutcome.REJECTED,
+            report.rejected,
+            settled(reason=f"it cannot be read: {error}"),
+        )
+        return
+
+    try:
+        # Dated the day it was asked, as a queued add is (#214).
+        result = service.update_book(vault_path, target, fields, today=asked)
+    # Before BookNotFound, which it is: the note was found, then renamed or
+    # replaced before the write. It is likely still there, so this waits.
+    except (
+        service.NoteMoved,
+        service.ShelfUnreadable,
+        FrontmatterUnreadable,
+        NoteWriteFailed,
+        OSError,
+    ) as error:
+        report.waiting.append(settled(reason=str(error)))
+        return
+    except service.BookNotFound:
+        # The Shelf, read whole, holds no note for it, and no note supersedes
+        # it. Only a person can say which Book was meant (ADR 0013).
+        _settle(
+            intents,
+            document,
+            IntentOutcome.REJECTED,
+            report.rejected,
+            settled(reason=f"no note on the Shelf holds the Libris ID {target}"),
+        )
+        return
+    except ValueError as error:
+        # A value the Library does not accept. Judged when it was recorded, so
+        # only a vocabulary changed since can reach here. Nothing is written:
+        # the fields are judged before the note is opened.
+        _settle(
+            intents,
+            document,
+            IntentOutcome.REJECTED,
+            report.rejected,
+            settled(reason=str(error)),
+        )
+        return
+
+    _settle(
+        intents,
+        document,
+        IntentOutcome.APPLIED,
+        report.applied,
+        # The note's own identity, which for a superseded target is the
+        # survivor's: what the replica should have called it.
+        Settled(
+            document["id"],
+            result.note.title or title,
+            libris_id=result.note.libris_id or target,
+            kind=_UPDATE,
+        ),
+    )
 
 
 def _apply_add(
@@ -253,11 +401,25 @@ def _apply_add(
 
 
 def _title_of(document: dict[str, Any]) -> str:
-    """What an Intent calls its Book, however malformed the Intent."""
+    """What an Intent calls its Book, however malformed the Intent.
+
+    An add carries its candidate's title; an update, the replica's title for
+    the note it named, and failing that the Libris ID it named.
+    """
     raw = document.get("candidate")
-    return _text(raw.get("title") if isinstance(raw, dict) else None) or (
-        "an unnamed book"
+    return (
+        _text(raw.get("title") if isinstance(raw, dict) else None)
+        or _text(document.get("title"))
+        or _text(document.get("target"))
+        or "an unnamed book"
     )
+
+
+def _target(raw: object) -> str:
+    """The Libris ID an update-Intent names, or why it names none."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"target is {raw!r}, not a Libris ID")
+    return raw.strip()
 
 
 def _text(value: object) -> str:

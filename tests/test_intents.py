@@ -601,3 +601,335 @@ def test_a_remote_add_naming_a_field_absorbing_could_not_set_is_refused(tmp_path
 
     # Then nothing is queued
     assert intents.items == {}
+
+
+# --- updates (#177) ---
+
+
+def _held(vault, candidate=MISTBORN, **overrides):
+    """A note on the Shelf, read back."""
+    path = create_book_note(candidate, vault, overrides=overrides or None)
+    return BookNote.read(path)
+
+
+def _queued_update(vault, libris_id, fields):
+    """An update-Intent recorded against the Shelf's replica; the container."""
+    intents = FakeContainer()
+    result = service.queue_update(
+        ReplicaStore.from_shelf(vault), IntentQueue(intents), libris_id, fields
+    )
+    return intents, result
+
+
+def test_a_remote_update_is_queued_with_only_the_fields_it_changes(tmp_path):
+    # Given a Shelf holding Mistborn, To Read
+    held = _held(tmp_path, status="To Read")
+    before = held.path.read_bytes()
+
+    # When it is marked Reading where there is no Shelf
+    intents, result = _queued_update(tmp_path, held.libris_id, {"status": "Reading"})
+
+    # Then the answer names the Book and the Intent, and says the date is
+    # set at sync rather than inventing one now
+    assert result.libris_id == held.libris_id
+    assert result.title == "Mistborn"
+    assert result.derived == {"date_started": service.QUEUED_STAMP_DISCLOSURE}
+    # And the Intent holds the identity and the one field, nothing else
+    document = intents.items[result.intent_id]
+    assert document["kind"] == "update"
+    assert document["pending"] is True
+    assert document["target"] == held.libris_id
+    assert document["fields"] == {"status": "Reading"}
+    # And the Shelf is untouched
+    assert held.path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"status": "Finished"}, {"status": ""}, {"series": "Mistborn"}],
+    ids=["illegal value", "empty value", "not the reader's field"],
+)
+def test_a_remote_update_the_library_would_refuse_is_refused_not_queued(
+    tmp_path, fields
+):
+    # Given a Shelf holding Mistborn
+    held = _held(tmp_path)
+
+    # When an update arrives that a local update would refuse
+    intents = FakeContainer()
+    with pytest.raises(ValueError):
+        service.queue_update(
+            ReplicaStore.from_shelf(tmp_path),
+            IntentQueue(intents),
+            held.libris_id,
+            fields,
+        )
+
+    # Then nothing is queued: it is refused while someone can still correct it
+    assert intents.items == {}
+
+
+def test_a_remote_update_naming_an_id_the_replica_lacks_is_refused(tmp_path):
+    # Given a Shelf holding Mistborn
+    _held(tmp_path)
+
+    # When an update names an identity nothing answers for
+    intents = FakeContainer()
+    with pytest.raises(service.BookNotFound):
+        service.queue_update(
+            ReplicaStore.from_shelf(tmp_path),
+            IntentQueue(intents),
+            "01J0000000000000000000000Z",
+            {"status": "Read"},
+        )
+
+    # Then nothing is queued
+    assert intents.items == {}
+
+
+def test_sync_changes_only_the_field_a_remote_update_named(tmp_path):
+    # Given Mistborn on the Shelf, with a priority and some notes of its own
+    held = _held(tmp_path, status="To Read", priority="High")
+    held.path.write_text(
+        held.path.read_text(encoding="utf-8") + "\nMy notes on it.\n",
+        encoding="utf-8",
+    )
+    shelf.forget_indexes()
+    before = BookNote.read(held.path)
+    intents, result = _queued_update(
+        tmp_path, held.libris_id, {"status": "Not To Read"}
+    )
+
+    # When sync applies it
+    report = apply_pending(tmp_path, intents)
+
+    # Then the status changed, and no other field did, nor the body
+    after = BookNote.read(held.path)
+    changed = {
+        key
+        for key in before.frontmatter.keys() | after.frontmatter.keys()
+        if before.frontmatter.get(key) != after.frontmatter.get(key)
+    }
+    assert changed == {"status"}
+    assert after.frontmatter["status"] == "Not To Read"
+    assert "My notes on it." in held.path.read_text(encoding="utf-8")
+    # And the Intent is applied, naming the note it changed
+    settled = intents.items[result.intent_id]
+    assert settled["pending"] is False
+    assert settled["outcome"] == "applied"
+    assert settled["libris_id"] == held.libris_id
+    assert [(s.kind, s.libris_id) for s in report.applied] == [
+        ("update", held.libris_id)
+    ]
+
+
+def test_a_remote_update_to_read_is_dated_the_day_it_was_asked(tmp_path):
+    # Given Mistborn being read, and an update to Read recorded days ago
+    held = _held(tmp_path, status="Reading")
+    intents, result = _queued_update(tmp_path, held.libris_id, {"status": "Read"})
+    asked = datetime(2026, 3, 14, 12, 0, tzinfo=UTC)
+    intents.items[result.intent_id]["recorded_at"] = asked.isoformat()
+
+    # When sync applies it
+    apply_pending(tmp_path, intents)
+
+    # Then it is finished on the day it was asked, not the day sync ran
+    assert BookNote.read(held.path).frontmatter["date_finished"] == (
+        asked.astimezone().date().isoformat()
+    )
+
+
+def test_an_update_naming_a_superseded_id_applies_to_the_surviving_note(tmp_path):
+    # Given two notes, and an update queued for one of them
+    from libris.markdown import set_frontmatter_fields
+
+    merged_away = _held(
+        tmp_path, BookCandidate(title="Mistborn (copy)", authors=["Brandon Sanderson"])
+    )
+    survivor = _held(tmp_path, status="To Read")
+    intents, result = _queued_update(
+        tmp_path, merged_away.libris_id, {"status": "Reading"}
+    )
+
+    # And before sync, the first is merged into the second (ADR 0014)
+    merged_away.path.unlink()
+    set_frontmatter_fields(
+        survivor.path, lambda _: {"superseded_ids": [merged_away.libris_id]}
+    )
+    shelf.forget_indexes()
+
+    # When sync applies the update
+    apply_pending(tmp_path, intents)
+
+    # Then the surviving note carries it, and the outcome names the survivor
+    assert BookNote.read(survivor.path).frontmatter["status"] == "Reading"
+    settled = intents.items[result.intent_id]
+    assert settled["outcome"] == "applied"
+    assert settled["libris_id"] == survivor.libris_id
+    assert settled["target"] == merged_away.libris_id
+
+
+def test_an_update_naming_an_id_the_shelf_no_longer_holds_is_rejected(tmp_path):
+    # Given an update queued for Mistborn, and Mistborn deleted before sync
+    held = _held(tmp_path)
+    intents, result = _queued_update(tmp_path, held.libris_id, {"status": "Read"})
+    held.path.unlink()
+    shelf.forget_indexes()
+
+    # When sync applies it
+    report = apply_pending(tmp_path, intents)
+
+    # Then it is rejected, not dropped: settled, with the reason and what it
+    # asked for kept, so a person can act on it
+    settled = intents.items[result.intent_id]
+    assert settled["pending"] is False
+    assert settled["outcome"] == "rejected"
+    assert held.libris_id in settled["reason"]
+    assert settled["target"] == held.libris_id
+    assert settled["fields"] == {"status": "Read"}
+    assert [(s.kind, s.title) for s in report.rejected] == [("update", "Mistborn")]
+    assert _notes(tmp_path) == []
+
+
+def test_an_update_carrying_an_illegal_value_is_rejected_without_touching_the_note(
+    tmp_path,
+):
+    # Given an update whose status the Library does not define, as one
+    # recorded before a vocabulary changed would be
+    held = _held(tmp_path)
+    before = held.path.read_bytes()
+    intents, result = _queued_update(tmp_path, held.libris_id, {"status": "Read"})
+    intents.items[result.intent_id]["fields"] = {"status": "Finished"}
+
+    # When sync applies it
+    apply_pending(tmp_path, intents)
+
+    # Then it is rejected with the reason, and the note is byte for byte as it was
+    settled = intents.items[result.intent_id]
+    assert settled["outcome"] == "rejected"
+    assert "Finished" in settled["reason"]
+    assert held.path.read_bytes() == before
+
+
+def test_an_update_whose_note_moved_mid_write_waits_rather_than_rejects(
+    tmp_path, monkeypatch
+):
+    # Given an update queued for Mistborn, and a note that is renamed between
+    # being found and being written
+    held = _held(tmp_path)
+    intents, result = _queued_update(tmp_path, held.libris_id, {"status": "Read"})
+
+    def moved(*args, **kwargs):
+        raise service.NoteMoved(f"No Book Note is at {held.path.name}.")
+
+    monkeypatch.setattr(service, "update_book", moved)
+
+    # When sync applies it
+    report = apply_pending(tmp_path, intents)
+
+    # Then it waits for the next sync rather than being rejected
+    assert intents.items[result.intent_id]["pending"] is True
+    assert [s.intent_id for s in report.waiting] == [result.intent_id]
+    assert report.rejected == []
+
+
+def test_an_update_the_shelf_cannot_take_yet_stays_pending(tmp_path, lock_note):
+    # Given an update queued for Mistborn, whose note is then locked
+    held = _held(tmp_path)
+    intents, result = _queued_update(tmp_path, held.libris_id, {"status": "Read"})
+    lock_note(held.path, reads=True)
+    shelf.forget_indexes()
+
+    # When sync applies it
+    report = apply_pending(tmp_path, intents)
+
+    # Then it waits, rather than being rejected for a note it could not read
+    assert intents.items[result.intent_id]["pending"] is True
+    assert [s.intent_id for s in report.waiting] == [result.intent_id]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("target", None), ("target", "  "), ("fields", {}), ("fields", ["status"])],
+    ids=["no target", "blank target", "no fields", "fields not a mapping"],
+)
+def test_an_update_that_cannot_be_read_is_rejected(tmp_path, key, value):
+    # Given an update-Intent this code cannot make sense of
+    held = _held(tmp_path)
+    before = held.path.read_bytes()
+    intents, result = _queued_update(tmp_path, held.libris_id, {"status": "Read"})
+    intents.items[result.intent_id][key] = value
+
+    # When sync applies it
+    apply_pending(tmp_path, intents)
+
+    # Then it is rejected rather than retried forever, and nothing is written
+    assert intents.items[result.intent_id]["outcome"] == "rejected"
+    assert held.path.read_bytes() == before
+
+
+def test_of_two_updates_to_one_field_the_later_one_stands(tmp_path):
+    # Given two updates to Mistborn's status, recorded in order
+    held = _held(tmp_path, status="To Read")
+    intents = FakeContainer()
+    queue = IntentQueue(intents)
+    replica = ReplicaStore.from_shelf(tmp_path)
+    # Recorded in order; the fake container lists them newest first, as a
+    # query is free to
+    first = service.queue_update(replica, queue, held.libris_id, {"status": "Reading"})
+    second = service.queue_update(
+        replica, queue, held.libris_id, {"status": "Not To Read"}
+    )
+    intents.items[first.intent_id]["recorded_at"] = "2026-03-14T12:00:00+00:00"
+    intents.items[second.intent_id]["recorded_at"] = "2026-03-15T12:00:00+00:00"
+
+    # When sync applies them
+    apply_pending(tmp_path, intents)
+
+    # Then both apply, and the later one is what the note says
+    assert intents.items[first.intent_id]["outcome"] == "applied"
+    assert intents.items[second.intent_id]["outcome"] == "applied"
+    assert BookNote.read(held.path).frontmatter["status"] == "Not To Read"
+
+
+def test_an_intent_of_a_kind_this_sync_does_not_know_waits(tmp_path):
+    # Given an Intent of a kind a newer server might record
+    intents = FakeContainer()
+    intents.upsert_item(
+        {
+            "id": "future",
+            "kind": "delete",
+            "pending": True,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "title": "Mistborn",
+        }
+    )
+
+    # When sync applies the pending Intents
+    report = apply_pending(tmp_path, intents)
+
+    # Then it is neither applied nor thrown away, and says what fixes it
+    assert intents.items["future"]["pending"] is True
+    (waiting,) = report.waiting
+    assert "update libris" in waiting.reason
+
+
+def test_a_book_updated_remotely_reads_updated_remotely_after_one_sync(tmp_path):
+    # Given a Shelf pushed to the replica, and an update queued against it
+    held = _held(tmp_path, status="To Read")
+    books, counts = FakeContainer(), FakeContainer()
+    push_shelf(tmp_path, books, counts)
+    remote = CosmosStore(books, counts)
+    intents = FakeContainer()
+    service.queue_update(
+        remote, IntentQueue(intents), held.libris_id, {"status": "Reading"}
+    )
+
+    # When sync applies Intents and then pushes, as `libris sync` does
+    apply_pending(tmp_path, intents)
+    shelf.forget_indexes()
+    push_shelf(tmp_path, books, counts)
+
+    # Then the replica holds the change
+    (found,) = CosmosStore(books, counts).with_libris_id(held.libris_id)
+    assert found.frontmatter["status"] == "Reading"

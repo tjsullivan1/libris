@@ -29,6 +29,7 @@ from mcp.server.auth.provider import TokenError  # noqa: E402
 from mcp.shared.auth import OAuthClientInformationFull  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
+from libris import service  # noqa: E402
 from libris.api import BookCandidate  # noqa: E402
 from libris.cosmos_store import CosmosStore, push_shelf  # noqa: E402
 from libris.hosted import HostedConfigError, HostedSettings, create_app  # noqa: E402
@@ -1653,6 +1654,40 @@ def test_a_hosted_add_is_queued_for_the_next_sync(
     assert answer["outcome"] == "queued"
     assert answer["guarantee"] == "replica"
     assert intents.items[answer["intent_id"]]["candidate"]["title"] == "Elantris"
+
+
+def test_a_hosted_update_is_queued_for_the_next_sync(
+    google: FakeGoogle, store: MemoryAuthStore, library: CosmosStore
+) -> None:
+    # Given a hosted server with an intents container, and Dune on its replica
+    (dune,) = service.search_library(library, query="dune").books
+    intents = FakeContainer()
+    app = create_app(
+        settings(),
+        store=store,
+        identity=google,
+        library=library,
+        intents=IntentQueue(intents),
+    )
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        _, issued = tokens(client)
+
+        # When a signed-in client says Dune is finished
+        result = call_tool(
+            client,
+            issued["access_token"],
+            "update_book",
+            {"libris_id": dune.libris_id, "status": "Read"},
+        )
+
+    # Then it is queued rather than declined, naming only that field
+    assert not result["isError"], result
+    answer = result["structuredContent"]
+    assert answer["outcome"] == "queued"
+    assert answer["guarantee"] == "replica"
+    document = intents.items[answer["intent_id"]]
+    assert document["target"] == dune.libris_id
+    assert document["fields"] == {"status": "Read"}
 
 
 def test_find_book_reaches_google_books_from_the_hosted_server(
