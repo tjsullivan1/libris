@@ -301,7 +301,8 @@ def test_adding_a_book_to_read_dates_nothing(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "given", ["last week", "13/11/2026", "20261113", "2026-02-30", "2026-11-13T09:00"]
+    "given",
+    ["last week", "13/11/2026", "20261113", "2026-02-30", "2026-11-13T09:00", ""],
 )
 def test_adding_refuses_a_finish_date_that_is_not_a_day(tmp_path, given):
     # Given a finish date that is not a calendar day written YYYY-MM-DD

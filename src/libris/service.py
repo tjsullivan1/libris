@@ -736,7 +736,10 @@ def _stamp_status_date(overrides: dict, day: date) -> tuple[dict, dict[str, obje
     do not give one. For a new note, so there is never a held value to keep.
     """
     stamp = _STATUS_STAMPS.get(str(overrides.get("status", "")))
-    if not stamp or overrides.get(stamp):
+    # Given at all, it is not stamped over: an empty or malformed date goes on
+    # to be refused by validation, not quietly replaced with today (#217
+    # review). The update path is the same, testing `in`, not truthiness.
+    if not stamp or overrides.get(stamp) is not None:
         return overrides, {}
     derived: dict[str, object] = {stamp: day.isoformat()}
     return {**overrides, **derived}, derived
