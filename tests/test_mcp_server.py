@@ -594,6 +594,102 @@ def test_a_remote_add_is_queued_and_says_so(
     assert sorted(shelved.glob("*.md")) == before
 
 
+_MISTBORN_VOLUME = {
+    "id": "mist-1",
+    "volumeInfo": {"title": "Mistborn", "authors": ["Brandon Sanderson"]},
+}
+
+
+def test_a_remote_add_carries_the_day_the_book_was_finished(
+    shelved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a remote server that can queue
+    monkeypatch.setattr(
+        "libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(_MISTBORN_VOLUME)
+    )
+    server, intents = queuing(ReplicaStore.from_shelf(shelved))
+
+    # When the model adds a book someone already finished, saying when
+    answer = payload(
+        call(
+            "add_book",
+            {
+                "google_books_id": "mist-1",
+                "status": "Read",
+                "date_finished": "2026-11-13",
+            },
+            server=server,
+        )
+    )
+
+    # Then the date travels in the Intent, and nothing is reported as derived.
+    # Without it, finishing a book took a second call the hosted server could
+    # not make (#214).
+    assert answer["outcome"] == "queued"
+    assert intents.items[answer["intent_id"]]["fields"] == {
+        "status": "Read",
+        "date_finished": "2026-11-13",
+    }
+    assert answer["derived"] == {}
+
+
+def test_a_remote_add_as_read_with_no_date_says_how_it_will_be_dated(
+    shelved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a remote server that can queue
+    monkeypatch.setattr(
+        "libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(_MISTBORN_VOLUME)
+    )
+    server, _ = queuing(ReplicaStore.from_shelf(shelved))
+
+    # When the model adds a book as Read, naming no date
+    answer = payload(
+        call("add_book", {"google_books_id": "mist-1", "status": "Read"}, server=server)
+    )
+
+    # Then it is told a finish date will be set, so it can ask whether that
+    # is right while the person is still there (ADR 0024)
+    assert list(answer["derived"]) == ["date_finished"]
+
+
+def test_a_local_add_as_read_reports_the_date_it_set(
+    shelved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a volume Google Books knows, and a Shelf to write to
+    monkeypatch.setattr(
+        "libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(_MISTBORN_VOLUME)
+    )
+
+    # When the model adds it as Read, naming no date
+    answer = payload(call("add_book", {"google_books_id": "mist-1", "status": "Read"}))
+
+    # Then the note is dated, and the answer says the Library chose the date
+    assert answer["outcome"] == "created"
+    assert answer["book"]["date_finished"] == answer["derived"]["date_finished"]
+
+
+def test_an_add_with_a_date_that_is_not_a_day_is_refused_readably(
+    shelved: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a remote server that can queue
+    monkeypatch.setattr(
+        "libris.mcp_server.GoogleBooksClient", lambda: _OneVolume(_MISTBORN_VOLUME)
+    )
+    server, intents = queuing(ReplicaStore.from_shelf(shelved))
+
+    # When the model passes a finish date in prose
+    result = call(
+        "add_book",
+        {"google_books_id": "mist-1", "status": "Read", "date_finished": "last week"},
+        server=server,
+    )
+
+    # Then it is told the shape a date takes, and nothing is queued
+    assert result.is_error
+    assert "YYYY-MM-DD" in text(result)
+    assert intents.items == {}
+
+
 def test_a_remote_add_of_a_book_held_is_answered_from_the_replica(
     shelved: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

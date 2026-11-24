@@ -180,6 +180,101 @@ def test_the_note_is_dated_the_day_the_add_was_asked_for(tmp_path):
     )
 
 
+@pytest.mark.parametrize("held", [False, True], ids=["new note", "absorbed"])
+def test_a_book_added_as_read_is_dated_the_day_it_was_asked_either_way(tmp_path, held):
+    # Given an add-Intent for a Book added as Read with no finish date, asked
+    # on an earlier day - and, for the absorbed case, Mistborn already on the
+    # Shelf with no finish date by the time sync runs
+    intents, intent_id = _queued(tmp_path, fields={"status": "Read"})
+    asked = datetime(2026, 3, 14, 12, 0, tzinfo=UTC)
+    intents.items[intent_id]["recorded_at"] = asked.isoformat()
+    if held:
+        create_book_note(MISTBORN, tmp_path)
+
+    # When sync applies it some days later
+    apply_pending(tmp_path, intents)
+
+    # Then the finish date is the day it was asked, whichever path it took.
+    # A new note was left with none, and an absorbed one got the day sync ran
+    # (#214).
+    (path,) = tmp_path.glob("*.md")
+    frontmatter = BookNote.read(path).frontmatter
+    assert frontmatter["status"] == "Read"
+    assert frontmatter["date_finished"] == asked.astimezone().date().isoformat()
+    assert intents.items[intent_id]["outcome"] == ("absorbed" if held else "applied")
+
+
+def test_an_absorbed_read_add_keeps_the_finish_date_the_note_has(tmp_path):
+    # Given an add-Intent for Mistborn as Read, and Mistborn already on the
+    # Shelf, finished on a day of its own
+    intents, intent_id = _queued(tmp_path, fields={"status": "Read"})
+    create_book_note(
+        MISTBORN, tmp_path, overrides={"status": "Read", "date_finished": "2019-07-04"}
+    )
+
+    # When sync absorbs it
+    apply_pending(tmp_path, intents)
+
+    # Then the date the note had is kept: a stamp only fills an empty field
+    (path,) = tmp_path.glob("*.md")
+    assert BookNote.read(path).frontmatter["date_finished"] == "2019-07-04"
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["new note", "absorbed"])
+def test_a_finish_date_given_with_a_remote_add_reaches_the_note(tmp_path, held):
+    # Given an add-Intent that names the day the Book was finished
+    intents, intent_id = _queued(
+        tmp_path, fields={"status": "Read", "date_finished": "2026-11-13"}
+    )
+    assert intents.items[intent_id]["fields"]["date_finished"] == "2026-11-13"
+    if held:
+        create_book_note(MISTBORN, tmp_path)
+
+    # When sync applies it
+    apply_pending(tmp_path, intents)
+
+    # Then the note carries that day, not the day it was asked or applied
+    (path,) = tmp_path.glob("*.md")
+    assert BookNote.read(path).frontmatter["date_finished"] == "2026-11-13"
+
+
+def test_a_remote_add_as_read_says_it_will_be_dated(tmp_path):
+    # Given an empty Shelf
+    intents = FakeContainer()
+
+    # When a Book is added remotely as Read, with no finish date
+    result = service.queue_add(
+        ReplicaStore.from_shelf(tmp_path),
+        IntentQueue(intents),
+        MISTBORN,
+        {"status": "Read"},
+    )
+
+    # Then the answer discloses the date sync will set (ADR 0024)
+    assert list(result.derived) == ["date_finished"]
+    # And the Intent records only what was asked: a date written into it would
+    # overwrite the one a held note already has
+    assert intents.items[result.intent_id]["fields"] == {"status": "Read"}
+
+
+@pytest.mark.parametrize("given", ["last week", "13/11/2026", "2026-02-30"])
+def test_a_remote_add_with_a_date_that_is_not_a_day_is_refused(tmp_path, given):
+    # Given an empty Shelf
+    intents = FakeContainer()
+
+    # When an add arrives with a finish date that is not YYYY-MM-DD
+    with pytest.raises(ValueError, match="date_finished"):
+        service.queue_add(
+            ReplicaStore.from_shelf(tmp_path),
+            IntentQueue(intents),
+            MISTBORN,
+            {"status": "Read", "date_finished": given},
+        )
+
+    # Then nothing is queued, so it is never written into a note at sync
+    assert intents.items == {}
+
+
 def test_an_intent_for_a_book_already_held_is_absorbed_into_it(tmp_path):
     # Given an add-Intent queued before Mistborn reached the Shelf another way
     intents, intent_id = _queued(tmp_path, fields={"priority": "High"})

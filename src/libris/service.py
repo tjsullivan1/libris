@@ -139,6 +139,9 @@ class AddResult:
     # The Intent a queued add recorded, which is all there is to name it by
     # until sync mints a Libris ID for it.
     intent_id: str | None = None
+    # Fields the Library set that the caller did not ask for (ADR 0024): the
+    # finish date of a Book added as Read, say. A Surface relays them.
+    derived: dict[str, object] = field(default_factory=dict)
 
 
 class IntentRecorder(Protocol):
@@ -691,6 +694,13 @@ def add_book(
     # either (#168 review).
     _check_shelf_complete(store, "whether the Library already holds this book")
 
+    # Stamped as an update stamps it (ADR 0024), so a Book added as Read and
+    # one marked Read later are dated alike. It used to be left empty here,
+    # and a queued add that sync absorbed into a held note got the day sync
+    # ran instead, so one request dated two ways (#214).
+    added = added or date.today()
+    overrides, derived = _stamp_status_date(overrides or {}, added)
+
     # A check that could not run does not stop the write: ADR 0026 stops on a
     # Near Match there is to show, and there is none. The result says the check
     # did not run, so the Surface can tell the person rather than imply that
@@ -715,7 +725,24 @@ def add_book(
         title=note.title if note else candidate.title,
         authors=note.authors if note else candidate.authors,
         near_match_check=check,
+        derived=derived,
     )
+
+
+def _stamp_status_date(overrides: dict, day: date) -> tuple[dict, dict[str, object]]:
+    """The fields a new note is written with, and the date its status stamped.
+
+    A status that implies a date fills that date with `day` when the fields
+    do not give one. For a new note, so there is never a held value to keep.
+    """
+    stamp = _STATUS_STAMPS.get(str(overrides.get("status", "")))
+    # Given at all, it is not stamped over: an empty or malformed date goes on
+    # to be refused by validation, not quietly replaced with today (#217
+    # review). The update path is the same, testing `in`, not truthiness.
+    if not stamp or overrides.get(stamp) is not None:
+        return overrides, {}
+    derived: dict[str, object] = {stamp: day.isoformat()}
+    return {**overrides, **derived}, derived
 
 
 def _near_match_stop(
@@ -797,6 +824,14 @@ def queue_add(
             stopped.guarantee = Guarantee.REPLICA
             return stopped
 
+    # Not stamped into the Intent: a date recorded there would be a stated
+    # one, and absorbed into a held note it would overwrite the date that note
+    # has. Sync stamps the day this was asked instead, only where the date is
+    # empty, as any add does. Which calendar day that is is the Shelf
+    # computer's to say (ADR 0024), so it is disclosed as a rule, not a date.
+    _, stamped = _stamp_status_date(fields, date.today())
+    derived: dict[str, object] = {name: QUEUED_STAMP_DISCLOSURE for name in stamped}
+
     return AddResult(
         libris_id=None,
         path=None,
@@ -806,7 +841,13 @@ def queue_add(
         near_match_check=check,
         guarantee=Guarantee.REPLICA,
         intent_id=intents.record_add(candidate, fields),
+        derived=derived,
     )
+
+
+QUEUED_STAMP_DISCLOSURE = (
+    "the day this was asked, set at sync unless the Library's note has one"
+)
 
 
 def _checked_overrides(overrides: dict[str, object]) -> dict[str, object]:
@@ -921,6 +962,7 @@ def update_book(
     vault_path: Path,
     libris_id: str,
     fields: dict[str, object],
+    today: date | None = None,
 ) -> UpdateResult:
     """Set fields on the Book Note holding an identity.
 
@@ -935,6 +977,9 @@ def update_book(
             note that absorbed it (ADR 0014), so an id picked up before a merge
             still applies.
         fields: Field names and the values to set them to.
+        today: The day a status stamps its date with. Today unless given: a
+            queued change is dated the day it was asked, not the day sync
+            applied it (#214).
 
     Returns:
         The updated Book Note, what was written, and anything the Library
@@ -957,7 +1002,7 @@ def update_book(
         # miss would be rejected rather than wait for the note to be fixed.
         _check_shelf_complete(store, f"whether one of them holds the id {libris_id!r}")
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
-    return _set_reader_fields(note.path, fields, holding=libris_id.strip())
+    return _set_reader_fields(note.path, fields, holding=libris_id.strip(), today=today)
 
 
 def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
@@ -997,7 +1042,10 @@ def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
 
 
 def _set_reader_fields(
-    path: Path, fields: dict[str, object], holding: str | None = None
+    path: Path,
+    fields: dict[str, object],
+    holding: str | None = None,
+    today: date | None = None,
 ) -> UpdateResult:
     """What an update means, however the note was reached (ADR 0008).
 
@@ -1017,6 +1065,7 @@ def _set_reader_fields(
         holding: The identity the note was resolved by, when it was. A file at
             that path that no longer answers for it is a different note, and is
             not written.
+        today: The day a status stamps its date with. Today unless given.
 
     Returns:
         The updated Book Note, what was written, and anything the Library
@@ -1090,7 +1139,7 @@ def _set_reader_fields(
             # Only ever fills an empty field, so re-marking a dated book Read
             # leaves the original date alone. A re-read is not something the
             # Library models.
-            derived[stamp] = date.today().isoformat()
+            derived[stamp] = (today or date.today()).isoformat()
             written[stamp] = derived[stamp]
         return written
 

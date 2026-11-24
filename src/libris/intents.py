@@ -193,8 +193,10 @@ def _apply_add(
             # file replaced since the match is not the Book it meant, and that
             # raises BookNotFound and waits rather than editing another Book
             # (#211 review). The ID recorded is the note's that was written.
+            # Dated the day it was asked, as a new note is: the day sync ran
+            # is not a day anyone finished anything (#214).
             libris_id = service.update_book(
-                vault_path, libris_id, fields
+                vault_path, libris_id, fields, today=added
             ).note.libris_id
     # The Shelf, not the Intent: a locked note, a name another note holds,
     # frontmatter an edit broke. Rejecting would hand a person a decision that

@@ -248,6 +248,99 @@ def test_adding_applies_overrides(tmp_path):
     assert "rating: 5" in text
 
 
+@pytest.mark.parametrize(
+    ("status", "stamp"), [("Read", "date_finished"), ("Reading", "date_started")]
+)
+def test_adding_a_book_as_read_dates_it_and_says_so(tmp_path, status, stamp):
+    # Given a book added as Read (or Reading), naming no date
+    # When it is added
+    result = add_book(tmp_path, _candidate(), overrides={"status": status})
+
+    # Then the date its status implies is today, as an update would set it
+    # (ADR 0024), and the answer says it was set rather than asked for (#214)
+    today = date.today().isoformat()
+    assert BookNote.read(result.path).frontmatter[stamp] == today
+    assert result.derived == {stamp: today}
+
+
+def test_adding_a_book_as_read_on_an_earlier_day_dates_it_that_day(tmp_path):
+    # Given a book whose add was asked for on an earlier day
+    asked = date(2026, 3, 14)
+
+    # When it is added for that day
+    result = add_book(tmp_path, _candidate(), overrides={"status": "Read"}, added=asked)
+
+    # Then it was finished, as far as anyone said, on the day it was added
+    assert BookNote.read(result.path).frontmatter["date_finished"] == "2026-03-14"
+
+
+def test_adding_a_book_with_its_finish_date_keeps_that_date(tmp_path):
+    # Given a book added as Read, with the day it was finished
+    # When it is added
+    result = add_book(
+        tmp_path,
+        _candidate(),
+        overrides={"status": "Read", "date_finished": "2026-11-13"},
+    )
+
+    # Then the stated date is written, and nothing is reported as derived
+    assert BookNote.read(result.path).frontmatter["date_finished"] == "2026-11-13"
+    assert result.derived == {}
+
+
+def test_adding_a_book_to_read_dates_nothing(tmp_path):
+    # Given a book added with no status, so To Read
+    # When it is added
+    result = add_book(tmp_path, _candidate())
+
+    # Then no reading date is set
+    frontmatter = BookNote.read(result.path).frontmatter
+    assert frontmatter.get("date_started") is None
+    assert frontmatter.get("date_finished") is None
+    assert result.derived == {}
+
+
+@pytest.mark.parametrize(
+    "given",
+    ["last week", "13/11/2026", "20261113", "2026-02-30", "2026-11-13T09:00", ""],
+)
+def test_adding_refuses_a_finish_date_that_is_not_a_day(tmp_path, given):
+    # Given a finish date that is not a calendar day written YYYY-MM-DD
+    # When it is added
+    # Then it is refused rather than written into the note as given (#214)
+    with pytest.raises(InvalidFieldValue, match="YYYY-MM-DD"):
+        add_book(
+            tmp_path,
+            _candidate(),
+            overrides={"status": "Read", "date_finished": given},
+        )
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_an_update_refuses_a_start_date_that_is_not_a_day(tmp_path, update):
+    # Given a book on the Shelf
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="To Read")
+
+    # When it is given a start date in prose
+    # Then it is refused, and the note keeps no such date
+    with pytest.raises(InvalidFieldValue, match="date_started"):
+        update(note, {"date_started": "yesterday"})
+    assert _read_back(tmp_path, note.libris_id).frontmatter.get("date_started") is None
+
+
+def test_an_update_stamps_the_day_it_is_given(tmp_path):
+    # Given a book on the Shelf, and a change asked for on an earlier day
+    note = _shelve(tmp_path, "Dune", ["Frank Herbert"], status="Reading")
+
+    # When it is marked Read for that day
+    result = update_book(
+        tmp_path, note.libris_id, {"status": "Read"}, today=date(2026, 3, 14)
+    )
+
+    # Then it is dated that day, not the day the change was applied (#214)
+    assert result.derived == {"date_finished": "2026-03-14"}
+
+
 def test_adding_refuses_a_status_the_library_does_not_define(tmp_path):
     # Given an override carrying a value from off this machine
     # When it is added

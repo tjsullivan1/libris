@@ -542,6 +542,8 @@ def add(
             validate_field_value(
                 "format", normalize_field_value("format", list(medium))
             )
+        validate_field_value("date_started", date_started)
+        validate_field_value("date_finished", date_finished)
     except InvalidFieldValue as exc:
         typer.echo(str(exc))
         raise typer.Exit(code=1) from None
@@ -624,6 +626,9 @@ def add(
         typer.echo(f"Already on the Shelf: {result.path}")
         return
     typer.echo(f"Added: {result.path}")
+    # ADR 0024: a stamped date reads as a stated one once it is in the note.
+    for name, value in result.derived.items():
+        typer.echo(f"Set {name} to {value}; edit the note if that is not the day.")
 
 
 @app.command()
