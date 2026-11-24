@@ -832,6 +832,26 @@ class CosmosStore:
         )
 
 
+# How long `az` gets to hand over a token. azure-identity's default is 10 s, and
+# `az` on a Windows PC can take 20-30 s for it, which failed every sync with
+# "Failed to invoke the Azure CLI" while `az login` itself was fine (#213).
+AZ_CLI_TIMEOUT_SECONDS = 60
+
+
+def azure_credential() -> Any:
+    """The `DefaultAzureCredential` every Cosmos connection signs in with.
+
+    Built in this one place so no connection is left on the SDK's 10-second
+    timeout for the Azure CLI.
+
+    Raises:
+        ImportError: If neither the `sync` nor the `server` extra is installed.
+    """
+    from azure.identity import DefaultAzureCredential
+
+    return DefaultAzureCredential(process_timeout=AZ_CLI_TIMEOUT_SECONDS)
+
+
 def connect_containers(endpoint: str, database: str) -> tuple[Container, Container]:
     """Reach `books` and `word_counts` as whoever `DefaultAzureCredential` finds.
 
@@ -852,8 +872,7 @@ def connect_container(endpoint: str, database: str, *names: str) -> list[Contain
         ImportError: If the `sync` extra is not installed.
     """
     from azure.cosmos import CosmosClient
-    from azure.identity import DefaultAzureCredential
 
-    client = CosmosClient(endpoint, credential=DefaultAzureCredential())
+    client = CosmosClient(endpoint, credential=azure_credential())
     db = client.get_database_client(database)
     return [db.get_container_client(name) for name in names]
