@@ -1086,8 +1086,11 @@ def test_an_unknown_identity_is_not_found(tmp_path):
 
     # When an identity nothing answers for is updated
     # Then it fails rather than creating anything (ADR 0003)
-    with pytest.raises(BookNotFound):
+    with pytest.raises(BookNotFound) as raised:
         update_book(tmp_path, "01J0000000000000000000000A", {"status": "Read"})
+    # A plain miss, not a note that moved: sync rejects a queued update on
+    # this, and would wait on it forever as NoteMoved (#218 review)
+    assert type(raised.value) is BookNotFound
     assert len(list(tmp_path.glob("*.md"))) == 1
 
 
@@ -1196,7 +1199,7 @@ def test_a_note_gone_before_the_write_is_not_found(tmp_path, monkeypatch, update
     # Then it is a miss rather than a raw FileNotFoundError, which neither
     # `libris status` nor the MCP tool catches (#127 review), and nothing is
     # created in its place (ADR 0003)
-    with pytest.raises(BookNotFound):
+    with pytest.raises(service.NoteMoved):
         update(note, {"status": "Reading"})
     assert list(tmp_path.glob("*.md")) == []
 
@@ -1237,7 +1240,7 @@ def test_a_note_removed_during_its_write_is_not_recreated(
     # Then it is a miss, and the note is not put back. Opening the path for
     # writing created it again under its old name and reported success (#127
     # review).
-    with pytest.raises(BookNotFound):
+    with pytest.raises(service.NoteMoved):
         update(note, {"status": "Reading"})
     assert list(tmp_path.glob("*.md")) == []
 
@@ -1252,7 +1255,7 @@ def test_a_note_renamed_during_its_write_is_not_written(tmp_path, monkeypatch, u
     # When it is updated
     # Then it is a miss with nothing written, rather than a success reported for
     # a filename that no longer exists (#127 review)
-    with pytest.raises(BookNotFound):
+    with pytest.raises(service.NoteMoved):
         update(note, {"status": "Reading"})
     assert BookNote.read(renamed).frontmatter["status"] == "To Read"
     assert not note.path.exists()
@@ -1280,7 +1283,7 @@ def test_a_note_replaced_during_its_write_leaves_the_replacement_alone(
     # Then neither note is written. What the update decided came from the note
     # it read; writing it into a file it never read would put one book's status
     # on another (#127 review).
-    with pytest.raises(BookNotFound):
+    with pytest.raises(service.NoteMoved):
         update(note, {"status": "Reading"})
     assert note.path.read_text(encoding="utf-8") == replacement
     renamed = BookNote.read(tmp_path / "Dune (renamed).md")
@@ -1308,7 +1311,7 @@ def test_an_update_by_identity_refuses_a_file_that_no_longer_holds_it(
     # When the identity is updated
     # Then the other note is not written. The path was only ever where that
     # identity lived; the identity is what was asked for.
-    with pytest.raises(BookNotFound):
+    with pytest.raises(service.NoteMoved):
         update_book(tmp_path, note.libris_id, {"status": "Reading"})
     assert note.path.read_text(encoding="utf-8") == replacement
 

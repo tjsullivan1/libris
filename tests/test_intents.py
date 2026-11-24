@@ -811,18 +811,29 @@ def test_an_update_carrying_an_illegal_value_is_rejected_without_touching_the_no
     assert held.path.read_bytes() == before
 
 
+@pytest.mark.parametrize("race", ["renamed", "replaced"])
 def test_an_update_whose_note_moved_mid_write_waits_rather_than_rejects(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, race
 ):
-    # Given an update queued for Mistborn, and a note that is renamed between
-    # being found and being written
+    # Given an update queued for Mistborn, whose note is - after sync finds it
+    # and before it writes - renamed away by Obsidian, or replaced by another
+    # Book's note under the same name. Driven through the real update path, so
+    # the miss it raises is the one the service really raises (#218 review).
     held = _held(tmp_path)
     intents, result = _queued_update(tmp_path, held.libris_id, {"status": "Read"})
+    write = service.set_frontmatter_fields
 
-    def moved(*args, **kwargs):
-        raise service.NoteMoved(f"No Book Note is at {held.path.name}.")
+    def moved_first(path, decide):
+        if race == "renamed":
+            path.rename(path.with_name("Mistborn (renamed).md"))
+        else:
+            path.unlink()
+            create_book_note(
+                BookCandidate(title=held.title, authors=["Someone Else"]), tmp_path
+            )
+        return write(path, decide)
 
-    monkeypatch.setattr(service, "update_book", moved)
+    monkeypatch.setattr(service, "set_frontmatter_fields", moved_first)
 
     # When sync applies it
     report = apply_pending(tmp_path, intents)
