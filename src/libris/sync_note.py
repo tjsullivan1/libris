@@ -199,7 +199,7 @@ def render(rejected: list[dict[str, Any]], waiting: list[Settled]) -> str:
             "",
         ]
         lines += [
-            _one_line(f"- **{s.title}** ({s.kind}): {s.reason or ''}") for s in waiting
+            _shown(f"- **{s.title}** ({s.kind}): {s.reason or ''}") for s in waiting
         ]
         lines.append("")
     return "\n".join(lines)
@@ -215,11 +215,11 @@ def _rejected_line(document: dict[str, Any]) -> str:
     # Intent carries, and a line break in any of them - a target, a field's
     # name, a Surface - parts the box from its marker, so a tick would never
     # be found (#219 review).
-    return _one_line(
+    shown = _shown(
         f"- [ ] **{_title_of(document)}**: {_asked_for(document)}, "
-        f"{origin}. Rejected because {_reason(document)}. "
-        f"%%intent:{document['id']}%%"
+        f"{origin}. Rejected because {_reason(document)}."
     )
+    return f"{shown} %%intent:{_one_line(str(document['id']))}%%"
 
 
 def _reason(document: dict[str, Any]) -> str:
@@ -292,6 +292,26 @@ def _local_day(recorded_at: object) -> str:
 def _one_line(text: str) -> str:
     # One line per Intent, or the tick on it would not be found again.
     return " ".join(text.split())
+
+
+# A zero-width space, splitting a sequence Obsidian would read as markup while
+# leaving it looking the same.
+_ZWSP = "​"
+
+
+def _shown(text: str) -> str:
+    """Text an Intent carries, made safe to show as one line of the note.
+
+    Flattened onto one line, and with every way of opening a comment broken
+    up: a title holding `%%` or `<!--` would otherwise hide the rest of its
+    line, and through the marker's own `%%`, every task listed after it
+    (#219 review).
+    """
+    # Every `%` followed by another, not every `%%`: replacing pairs leaves
+    # `%%%` holding one.
+    return re.sub(r"%(?=%)", f"%{_ZWSP}", _one_line(text)).replace(
+        "<!--", f"<{_ZWSP}!--"
+    )
 
 
 def _text(value: object) -> str:

@@ -323,6 +323,42 @@ def test_a_shelf_at_its_vaults_root_gets_no_note_outside_the_vault(tmp_path):
     assert not (root / NOTE_NAME).exists()
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"title": "50%% Off"},
+        {"title": "Odd %%% Book"},
+        {"reason": "it cannot be read: <!-- hidden"},
+        {"fields": {"status": "%%Read"}},
+    ],
+    ids=["title %%", "title %%%", "reason <!--", "field value %%"],
+)
+def test_text_that_opens_a_comment_cannot_hide_the_tasks_after_it(vault, overrides):
+    # Given a rejection whose text would open an Obsidian or HTML comment, and
+    # another rejection listed after it
+    intents = FakeContainer()
+    intents.upsert_item(_settled_rejection(**overrides))
+    later = _settled_rejection(
+        id="9z8y7x", title="Persuasion", recorded_at="2026-11-21T15:00:00+00:00"
+    )
+    intents.upsert_item(later)
+
+    # When sync lists them
+    _sync(vault, intents)
+
+    # Then no text outside a task's own marker opens a comment
+    lines = _rejected_lines(vault)
+    assert len(lines) == 2
+    for line in lines:
+        shown, marker = line.rsplit(" %%intent:", 1)
+        assert "%%" not in shown and "<!--" not in shown
+        assert marker.endswith("%%") and "%" not in marker[:-2]
+    # And both can still be ticked off
+    _tick(vault, "0a1b2c")
+    _tick(vault, "9z8y7x")
+    assert sorted(_sync(vault, intents).acknowledged) == ["0a1b2c", "9z8y7x"]
+
+
 def test_a_tick_made_while_sync_runs_is_kept_and_acknowledged_next_run(
     vault, monkeypatch
 ):
