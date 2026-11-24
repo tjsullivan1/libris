@@ -645,7 +645,7 @@ def add_book(
         ValueError: If an override names a field the canonical schema has no
             place for.
         ShelfUnreadable: If no note it could read holds the Book, and some
-            notes could not be read. Nothing is written.
+            notes could not be read or will not parse. Nothing is written.
         NoteNameTaken: If the Book is not held, but a note that is not it
             already has its filename. Nothing is written (#169).
         NoteWriteFailed: If the new note's write failed and the partial note
@@ -661,12 +661,12 @@ def add_book(
         title=candidate.title,
         authors=candidate.authors,
     )
-    unread = store.unreadable()
-    if existing is not None and existing.path not in unread:
+    if existing is not None and existing.path not in store.unanswered().paths:
         # The exact check answers first, so a Book the Library provably holds is
         # reported as held rather than raised as a question with no useful answer.
-        # Not when the match is a note that could not be read: that is an
-        # earlier parse of it, and the note may no longer say this (#168 review).
+        # Not when the match is a note that could not be read or no longer
+        # parses: that is an earlier parse of it, and the note may no longer
+        # say this (#168 review, #212).
         return AddResult(
             libris_id=existing.libris_id,
             path=existing.path,
@@ -675,10 +675,10 @@ def add_book(
             authors=existing.authors,
         )
 
-    if unread:
-        # The duplicate check did not see these, and any of them may be this
-        # Book: written now, it would be a second note for it (#168 review).
-        raise ShelfUnreadable(unread, "whether the Library already holds this book")
+    # The duplicate check did not see these, and any of them may be this Book:
+    # written now, it would be a second note for it. A note that could not be
+    # read (#168 review), or one whose frontmatter an edit broke (#212).
+    _check_shelf_complete(store, "whether the Library already holds this book")
 
     check: NearMatchCheck | None = None
     if stop_on_near_match:
@@ -687,11 +687,9 @@ def add_book(
             return stopped
 
     # Asked again just before writing: the near-match lookup scanned the Shelf
-    # once more, and a note that could not be read then has not been ruled out
+    # once more, and a note it could not read or parse has not been ruled out
     # either (#168 review).
-    unread = store.unreadable()
-    if unread:
-        raise ShelfUnreadable(unread, "whether the Library already holds this book")
+    _check_shelf_complete(store, "whether the Library already holds this book")
 
     # A check that could not run does not stop the write: ADR 0026 stops on a
     # Near Match there is to show, and there is none. The result says the check
@@ -841,18 +839,51 @@ class ShelfUnreadable(Exception):
 
     Raised where an answer of "none" would be acted on: an update reporting a
     Book absent that a locked note holds, or an add creating a second note for
-    it (#168 review).
+    it (#168 review). A note whose frontmatter will not parse is the same gap:
+    read, but not understood, and it may be the Book in question (#212).
 
     Attributes:
         paths: The notes that could not be read.
+        unparseable: The files that were read but whose frontmatter will not
+            parse.
     """
 
-    def __init__(self, paths: list[Path], question: str) -> None:
+    def __init__(
+        self,
+        paths: list[Path],
+        question: str,
+        unparseable: list[Path] | None = None,
+    ) -> None:
         self.paths = paths
-        names = ", ".join(path.name for path in paths)
-        super().__init__(
-            f"{len(paths)} note(s) on the Shelf could not be read, so {question} "
-            f"is not known: {names}."
+        self.unparseable = unparseable or []
+        reasons = []
+        if paths:
+            reasons.append(
+                f"{len(paths)} note(s) on the Shelf could not be read ({_names(paths)})"
+            )
+        if self.unparseable:
+            reasons.append(
+                f"{len(self.unparseable)} file(s) on the Shelf have frontmatter "
+                f"that will not parse ({_names(self.unparseable)})"
+            )
+        super().__init__(f"{' and '.join(reasons)}, so {question} is not known.")
+
+
+def _names(paths: list[Path]) -> str:
+    return ", ".join(path.name for path in paths)
+
+
+def _check_shelf_complete(store: ShelfStore, question: str) -> None:
+    """Raise ShelfUnreadable if any note on the Shelf went unanswered for.
+
+    A lookup that found nothing has ruled out only the notes it could read and
+    parse. Where "nothing" would be acted on - a second note written, an
+    update reported as a miss - the rest have to be ruled out too.
+    """
+    unanswered = store.unanswered()
+    if unanswered.paths:
+        raise ShelfUnreadable(
+            unanswered.unreadable, question, unparseable=unanswered.unparseable
         )
 
 
@@ -916,17 +947,15 @@ def update_book(
         ValueError: If a field is not the reader's to set, or a value is null.
         FrontmatterUnreadable: If the note's frontmatter cannot be parsed.
         ShelfUnreadable: If no note it could read holds the identity, and some
-            notes could not be read. Nothing is written.
+            notes could not be read or will not parse. Nothing is written.
     """
     store = ShelfStore(vault_path)
     note = find_by_libris_id(store, libris_id)
     if note is None:
-        unread = store.unreadable()
-        if unread:
-            # Not a miss: one of these may hold it (#168 review).
-            raise ShelfUnreadable(
-                unread, f"whether one of them holds the id {libris_id!r}"
-            )
+        # Not a miss while a note could not be read or parsed: one of them may
+        # hold it (#168 review, #212). A queued update that took this for a
+        # miss would be rejected rather than wait for the note to be fixed.
+        _check_shelf_complete(store, f"whether one of them holds the id {libris_id!r}")
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
     return _set_reader_fields(note.path, fields, holding=libris_id.strip())
 

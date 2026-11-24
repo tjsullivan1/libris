@@ -171,6 +171,19 @@ def _count_words(word_sets: Iterable[frozenset[str]]) -> WordCounts:
     return WordCounts(total=total, counts=counts)
 
 
+@dataclass(frozen=True)
+class Unanswered:
+    """The files a Shelf store's questions could not answer for."""
+
+    unreadable: list[Path]
+    unparseable: list[Path]
+
+    @property
+    def paths(self) -> set[Path]:
+        """Every one of them, either way."""
+        return {*self.unreadable, *self.unparseable}
+
+
 @dataclass
 class ShelfStore:
     """The live Shelf, asked through its revalidated index.
@@ -187,27 +200,39 @@ class ShelfStore:
 
     vault_path: Path
     _unread: set[Path] = field(default_factory=set, repr=False, compare=False)
+    _unparsed: set[Path] = field(default_factory=set, repr=False, compare=False)
 
     def _notes(self) -> list[BookNote]:
         index = index_for(self.vault_path)
         notes = index.notes()
         self._unread.update(index.unreadable)
+        self._unparsed.update(index.unparseable)
         return notes
 
-    def unreadable(self) -> list[Path]:
-        """The notes this store's questions could not read as they stood.
+    def unanswered(self) -> "Unanswered":
+        """The files this store's questions could not answer for as they stood.
+
+        Notes that could not be read, and files that were read but whose
+        frontmatter will not parse - a note an edit broke is still a Book
+        someone owns (#212). Nothing these questions answered has ruled either
+        out, and a match on one of them may be a stale parse.
 
         Scans once more as well, so a store asked nothing yet - a lookup with
         nothing to look up by - still has an answer of its own rather than
-        another request's, or none (#168 review). A scan costs a stat per note;
-        only notes that changed are read.
+        another request's, or none (#168 review). Once, and both lists are
+        taken after it: a second scan for the second list could find a note
+        newly locked after the first list was copied, and the answer would
+        leave out a failure the store had seen (#216 review). A scan costs a
+        stat per note; only notes that changed are read.
 
         Returns:
-            Their paths, in name order. Nothing these questions answered has
-            ruled them out, and a match on one of them may be a stale parse.
+            Both lists, each in name order.
         """
         self._notes()
-        return sorted(self._unread, key=lambda path: path.name)
+        return Unanswered(
+            unreadable=sorted(self._unread, key=lambda path: path.name),
+            unparseable=sorted(self._unparsed, key=lambda path: path.name),
+        )
 
     def _titled(self, status: str | None) -> list[BookNote]:
         return [n for n in self._notes() if n.title and _in_status(n, status)]

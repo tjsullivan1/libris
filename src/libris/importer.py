@@ -120,7 +120,9 @@ def parse_import_file(
 
 
 def _build_vault_index(
-    vault_path: Path, unreadable: list[Path] | None = None
+    vault_path: Path,
+    unreadable: list[Path] | None = None,
+    unparseable: list[Path] | None = None,
 ) -> dict[tuple[str, str], BookNote]:
     """Build an index of Book Notes keyed by normalized (title, first_author).
 
@@ -129,6 +131,9 @@ def _build_vault_index(
         unreadable: Collects the notes that are on the Shelf but could not be
             read, when given. The index cannot say what they hold, so it is
             incomplete while any are listed (#168 review).
+        unparseable: Collects the files that were read but whose frontmatter
+            will not parse, when given. Incomplete in the same way: one may be
+            a Book Note an edit broke (#212).
 
     Returns:
         A mapping from normalized title and first author to the Book Note. Notes
@@ -147,7 +152,11 @@ def _build_vault_index(
             if unreadable is not None:
                 unreadable.append(book_path)
             continue
-        if note is None or note.title is None or note.first_author is None:
+        if note is None:
+            if unparseable is not None:
+                unparseable.append(book_path)
+            continue
+        if note.title is None or note.first_author is None:
             continue
 
         key = (normalize_for_match(note.title), normalize_for_match(note.first_author))
@@ -176,9 +185,12 @@ class ImportResult:
     uncreated_books: List[Tuple[ImportBook, str]] = field(default_factory=list)
     # Notes on the Shelf that could not be read, so could not be matched.
     unreadable_notes: List[Path] = field(default_factory=list)
-    # Books that matched no note while some notes could not be read. Any of
-    # them may be one of those notes, so none is created: a second note for a
-    # Book is the harm a duplicate check exists to prevent (#168 review).
+    # Files on the Shelf whose frontmatter will not parse, so could not be
+    # matched either (#212).
+    unparseable_notes: List[Path] = field(default_factory=list)
+    # Books that matched no note while some notes could not be read or parsed.
+    # Any of them may be one of those notes, so none is created: a second note
+    # for a Book is the harm a duplicate check exists to prevent (#168 review).
     held_books: List[ImportBook] = field(default_factory=list)
 
 
@@ -280,12 +292,14 @@ def run_import(
         books = books[:limit]
 
     result = ImportResult()
-    vault_index = _build_vault_index(vault_path, result.unreadable_notes)
+    vault_index = _build_vault_index(
+        vault_path, result.unreadable_notes, result.unparseable_notes
+    )
 
     for book in books:
         dup = _check_duplicate(book, vault_index)
 
-        if dup is None and result.unreadable_notes:
+        if dup is None and (result.unreadable_notes or result.unparseable_notes):
             result.held_books.append(book)
         elif dup is None:
             if apply:
