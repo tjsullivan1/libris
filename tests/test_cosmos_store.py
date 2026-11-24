@@ -967,3 +967,35 @@ def test_a_sync_that_changes_nothing_does_not_rewrite_the_state(tmp_path, monkey
 
     # Then the state is saved once, as before - not again ahead of no writes
     assert len(saves) == 1
+
+
+def test_sync_signs_in_giving_a_slow_azure_cli_a_minute(monkeypatch):
+    # Given the Azure SDK, and a Cosmos client that records its credential
+    identity = pytest.importorskip("azure.identity")
+    cosmos = pytest.importorskip("azure.cosmos")
+    from libris.cosmos_store import connect_container
+
+    seen = []
+
+    class _Client:
+        def __init__(self, endpoint, credential):
+            seen.append(credential)
+
+        def get_database_client(self, name):
+            return self
+
+        def get_container_client(self, name):
+            return name
+
+    monkeypatch.setattr(cosmos, "CosmosClient", _Client)
+
+    # When sync connects
+    connect_container("https://example.documents.azure.com", "libris", "books")
+
+    # Then the Azure CLI it falls back to gets 60 s, not the SDK's 10 (#213),
+    # which `az` on Windows overran on every sync
+    (credential,) = seen
+    (cli,) = [
+        c for c in credential.credentials if isinstance(c, identity.AzureCliCredential)
+    ]
+    assert cli._process_timeout == 60

@@ -22,7 +22,8 @@ from azure.core import MatchConditions
 from azure.core.exceptions import ResourceNotFoundError
 from azure.cosmos import ContainerProxy, CosmosClient
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError
-from azure.identity import DefaultAzureCredential
+
+from .cosmos_store import azure_credential
 
 CONTAINER = "auth"
 
@@ -41,7 +42,7 @@ class CosmosAuthStore:
     @classmethod
     def connect(cls, endpoint: str, database: str) -> "CosmosAuthStore":
         """Reach the `auth` container as the app's managed identity."""
-        client = CosmosClient(endpoint, credential=DefaultAzureCredential())
+        client = CosmosClient(endpoint, credential=azure_credential())
         return cls(client.get_database_client(database).get_container_client(CONTAINER))
 
     def put(self, kind: str, key: str, data: dict, expires_at: int) -> None:
