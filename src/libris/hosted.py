@@ -1,9 +1,9 @@
 """The hosted MCP server: Streamable HTTP behind Libris's own OAuth (ADR 0035).
 
 It serves the same tools as `libris mcp` (ADR 0007, ADR 0020), answered from
-what `libris sync` pushed to Cosmos. There is no Shelf here, so an add is
-recorded as an Intent for the next sync to apply (ADR 0002, #176), and an
-update says it cannot be made from here and writes nothing (#177).
+what `libris sync` pushed to Cosmos. There is no Shelf here, so an add or an
+update is recorded as an Intent for the next sync to apply (ADR 0002, #176,
+#177).
 
 Configured from environment variables rather than `config.yaml`, because it
 runs in a container whose settings come from the Container App (and its secrets
@@ -184,9 +184,9 @@ def create_app(
         clock: The time, for the write limits.
         library: What the tools answer from. Defaults to the books `libris
             sync` pushed to Cosmos, when an endpoint is configured.
-        intents: Where an add is recorded for sync to apply. Defaults to the
-            `intents` container, when an endpoint is configured; without one,
-            adds are refused.
+        intents: Where an add or update is recorded for sync to apply.
+            Defaults to the `intents` container, when an endpoint is
+            configured; without one, writes are refused.
     """
     if store is None:
         if settings.cosmos_endpoint:

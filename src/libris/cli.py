@@ -3260,7 +3260,8 @@ def _apply_intents(vault_path: Path, container: Container) -> IntentReport | Non
         return None
 
     for settled in report.applied:
-        typer.echo(f"Added {settled.title} ({settled.libris_id}), queued remotely.")
+        done = "Updated" if settled.kind == "update" else "Added"
+        typer.echo(f"{done} {settled.title} ({settled.libris_id}), queued remotely.")
     for settled in report.absorbed:
         typer.echo(
             f"Already held: {settled.title} ({settled.libris_id}); the queued "

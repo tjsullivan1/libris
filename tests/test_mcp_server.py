@@ -731,6 +731,63 @@ def test_without_a_shelf_an_update_writes_nothing_and_says_why(shelved: Path) ->
     assert note.read_bytes() == before
 
 
+def test_a_remote_update_is_queued_and_says_so(shelved: Path) -> None:
+    # Given a remote server that can queue, and Oathbringer on its replica
+    server, intents = queuing(ReplicaStore.from_shelf(shelved))
+    oathbringer = payload(call("search_library", {"query": "oathbringer"}))["books"][0]
+    before = Path(oathbringer["path"]).read_bytes()
+
+    # When the model says it is being read again
+    answer = payload(
+        call(
+            "update_book",
+            {"libris_id": oathbringer["libris_id"], "status": "Reading"},
+            server=server,
+        )
+    )
+
+    # Then it is told the change is queued, on the replica's guarantee, which
+    # Book it names, and that the start date is the Library's to set at sync
+    assert answer["outcome"] == "queued"
+    assert answer["guarantee"] == "replica"
+    assert answer["book"]["libris_id"] == oathbringer["libris_id"]
+    assert answer["book"]["title"] == "Oathbringer"
+    # Not the replica's old status, which would read as the change having failed
+    assert answer["book"]["status"] is None
+    assert "date_started" in answer["derived"]
+    # And the Intent carries only the field it changes
+    document = intents.items[answer["intent_id"]]
+    assert document["fields"] == {"status": "Reading"}
+    # And the Shelf is untouched
+    assert Path(oathbringer["path"]).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("arguments", "said"),
+    [
+        ({"libris_id": "01J0000000000000000000000Z", "status": "Read"}, "No Book"),
+        ({"status": "Read", "format": []}, "format"),
+    ],
+    ids=["unknown id", "empty value"],
+)
+def test_a_remote_update_that_cannot_apply_is_refused_and_not_queued(
+    shelved: Path, arguments: dict, said: str
+) -> None:
+    # Given a remote server that can queue
+    server, intents = queuing(ReplicaStore.from_shelf(shelved))
+    dune = payload(call("search_library", {"query": "dune"}))["books"][0]
+    arguments = {"libris_id": dune["libris_id"], **arguments}
+
+    # When the model sends an update the Library could not apply
+    result = call("update_book", arguments, server=server)
+
+    # Then it is told why while it can still say so, and nothing is queued
+    assert result.is_error
+    assert said in text(result)
+    assert "Nothing was queued" in text(result)
+    assert intents.items == {}
+
+
 def test_a_remote_server_offers_the_same_tools_with_the_same_schemas(
     shelved: Path,
 ) -> None:

@@ -151,6 +151,12 @@ class IntentRecorder(Protocol):
         """Record an add-Intent and return its identity."""
         ...
 
+    def record_update(
+        self, libris_id: str, fields: dict[str, object], title: str | None
+    ) -> str:
+        """Record an update-Intent and return its identity."""
+        ...
+
 
 # Amazon states the ASIN in the product URL itself, in one of two shapes. A
 # scraper that cannot read the page - or reads a layout it does not know - still
@@ -936,6 +942,17 @@ class BookNotFound(Exception):
     """
 
 
+class NoteMoved(BookNotFound):
+    """The note an update resolved to went or changed before it was written.
+
+    Still a miss for a Surface that is asked now. But it says nothing about
+    whether the identity is held: renamed by Obsidian, or replaced by a sync
+    client, the note is usually still there under another name. A queued update
+    waits for the next sync on this, where a plain BookNotFound rejects it
+    (#177).
+    """
+
+
 # The date a status implies when the note does not already carry one. The
 # Library has held half of this rule for years - `ensure_frontmatter_fields`
 # forces status to Read when a finish date is present - and this is the other
@@ -1003,6 +1020,75 @@ def update_book(
         _check_shelf_complete(store, f"whether one of them holds the id {libris_id!r}")
         raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
     return _set_reader_fields(note.path, fields, holding=libris_id.strip(), today=today)
+
+
+@dataclass
+class QueuedUpdate:
+    """An update recorded for sync to apply, and the Book it names.
+
+    The title and authors are the replica's, to show a person which Book was
+    meant. Not its other fields: they predate the change just queued, and shown
+    beside it would read as the update having failed.
+    """
+
+    libris_id: str
+    title: str | None
+    authors: list[str]
+    intent_id: str
+    derived: dict[str, object] = field(default_factory=dict)
+
+
+def queue_update(
+    store: LibraryStore,
+    intents: IntentRecorder,
+    libris_id: str,
+    fields: dict[str, object],
+) -> QueuedUpdate:
+    """Record an update-Intent for sync to apply (ADR 0002, #177).
+
+    `update_book` for a Surface with no Shelf. The Intent names only the fields
+    it changes, so an agent that knows one thing about a Book cannot erase what
+    it does not know. The fields are judged as `update_book` judges them, now,
+    while the person who asked can still be told.
+
+    Args:
+        store: The replica, to resolve the identity against.
+        intents: Where the Intent is recorded.
+        libris_id: The identity to update, as it was named. A superseded one is
+            followed at sync as it is here (ADR 0014).
+        fields: Field names and the values to set them to.
+
+    Returns:
+        The Intent recorded, and the Book the replica resolves the identity to.
+
+    Raises:
+        BookNotFound: If the replica holds no note for the identity. Nothing is
+            recorded: an identity nothing answers for is a question for now,
+            not for a sync that runs after the person has gone.
+        InvalidFieldValue: If a value is not one the Library defines.
+        ValueError: If a field is not the reader's to set, or a value is empty.
+    """
+    checked = _checked_update_fields(fields)
+    note = find_by_libris_id(store, libris_id)
+    if note is None:
+        raise BookNotFound(f"No Book Note holds the id {libris_id!r}.")
+    # Not stamped into the Intent, for the reason a queued add is not: a date
+    # recorded there is a stated one, and would overwrite the one the note has.
+    # Sync stamps the day this was asked, only where the note's date is empty.
+    stamp = _STATUS_STAMPS.get(str(checked.get("status", "")))
+    derived: dict[str, object] = {}
+    if stamp and stamp not in checked:
+        derived[stamp] = QUEUED_STAMP_DISCLOSURE
+    named = libris_id.strip()
+    return QueuedUpdate(
+        # The live identity the replica resolved, which is what a person would
+        # search for. The Intent keeps the one named; sync follows it again.
+        libris_id=note.libris_id or named,
+        title=note.title,
+        authors=note.authors,
+        intent_id=intents.record_update(named, checked, note.title),
+        derived=derived,
+    )
 
 
 def update_note(path: Path, fields: dict[str, object]) -> UpdateResult:
@@ -1083,6 +1169,59 @@ def _set_reader_fields(
         NoteWriteFailed: If the write failed partway and the note could not be
             put back. It may be damaged.
     """
+    written = _checked_update_fields(fields)
+
+    derived: dict[str, object] = {}
+    stamp = _STATUS_STAMPS.get(str(fields.get("status", "")))
+
+    def _decide(current: dict[str, object]) -> dict[str, object]:
+        if holding is not None:
+            held = BookNote(path=path, frontmatter=current)
+            if held.libris_id != holding and holding not in held.superseded_ids:
+                # The index answered for this path, and something else is there
+                # now - a note renamed away and another saved in its place.
+                raise NoteMoved(f"No Book Note holds the id {holding!r}.")
+        if stamp and stamp not in fields and not current.get(stamp):
+            # Only ever fills an empty field, so re-marking a dated book Read
+            # leaves the original date alone. A re-read is not something the
+            # Library models.
+            derived[stamp] = (today or date.today()).isoformat()
+            written[stamp] = derived[stamp]
+        return written
+
+    try:
+        frontmatter = set_frontmatter_fields(path, _decide)
+    except FileNotFoundError:
+        # Gone or moved before the write - Obsidian renaming it, or a sync client.
+        # Either entry point can lose this race: the index answered for a file
+        # that has since moved, or the CLI picked one that has. Nothing was
+        # written, so it is a miss (ADR 0003).
+        raise NoteMoved(f"No Book Note is at {path.name}.") from None
+    # Any other `OSError` - a locked or read-only note - and `NoteWriteFailed`
+    # are left to the Surface, which says which happened (#167). Turned into a
+    # miss here, a locked note would read as a Book the Library does not hold.
+
+    # The frontmatter the write produced, rather than a read-back: a second read
+    # is a second chance for the file to have gone, and would report a write
+    # that happened as one that did not.
+    return UpdateResult(
+        note=BookNote(path=path, frontmatter=frontmatter),
+        written=written,
+        derived=derived,
+    )
+
+
+def _checked_update_fields(fields: dict[str, object]) -> dict[str, object]:
+    """The fields an update writes, repaired and judged, or why it may not.
+
+    One judgement for an update made now and one queued for sync (#177), so a
+    remote update is refused for exactly what a local one would be, while the
+    person who asked is still there to hear it.
+
+    Raises:
+        InvalidFieldValue: If a value is not one the Library defines.
+        ValueError: If a field is not the reader's to set, or a value is empty.
+    """
     written: dict[str, object] = {}
     for name, value in fields.items():
         if name not in READER_FIELDS:
@@ -1124,45 +1263,7 @@ def _set_reader_fields(
             )
         validate_field_value(name, repaired)
         written[name] = repaired
-
-    derived: dict[str, object] = {}
-    stamp = _STATUS_STAMPS.get(str(fields.get("status", "")))
-
-    def _decide(current: dict[str, object]) -> dict[str, object]:
-        if holding is not None:
-            held = BookNote(path=path, frontmatter=current)
-            if held.libris_id != holding and holding not in held.superseded_ids:
-                # The index answered for this path, and something else is there
-                # now - a note renamed away and another saved in its place.
-                raise BookNotFound(f"No Book Note holds the id {holding!r}.")
-        if stamp and stamp not in fields and not current.get(stamp):
-            # Only ever fills an empty field, so re-marking a dated book Read
-            # leaves the original date alone. A re-read is not something the
-            # Library models.
-            derived[stamp] = (today or date.today()).isoformat()
-            written[stamp] = derived[stamp]
-        return written
-
-    try:
-        frontmatter = set_frontmatter_fields(path, _decide)
-    except FileNotFoundError:
-        # Gone or moved before the write - Obsidian renaming it, or a sync client.
-        # Either entry point can lose this race: the index answered for a file
-        # that has since moved, or the CLI picked one that has. Nothing was
-        # written, so it is a miss (ADR 0003).
-        raise BookNotFound(f"No Book Note is at {path.name}.") from None
-    # Any other `OSError` - a locked or read-only note - and `NoteWriteFailed`
-    # are left to the Surface, which says which happened (#167). Turned into a
-    # miss here, a locked note would read as a Book the Library does not hold.
-
-    # The frontmatter the write produced, rather than a read-back: a second read
-    # is a second chance for the file to have gone, and would report a write
-    # that happened as one that did not.
-    return UpdateResult(
-        note=BookNote(path=path, frontmatter=frontmatter),
-        written=written,
-        derived=derived,
-    )
+    return written
 
 
 @dataclass
