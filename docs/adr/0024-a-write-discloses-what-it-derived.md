@@ -27,3 +27,17 @@ override.
 Left unsolved: whose today. Over stdio the server runs on the reader's machine and the local
 date is right. The same tool over Streamable HTTP (ADR 0007) reads a container's UTC clock,
 which is another case of one definition giving two answers by location (ADR 0020).
+
+## Amendment: an add stamps too (#214)
+
+Adding a Book as Read or Reading stamps the same date an update would, under the same two rules,
+and discloses it the same way. It used to stamp nothing, so a Book added as Read had no finish
+date at all - and a queued add that sync absorbed into a note already on the Shelf went through
+`update_book` and got one, so one request was dated two ways depending on what the Shelf held.
+`libris import` still stamps nothing; a bulk import dated "now" is the 2020-12-11 batch again.
+
+It also settles *whose today* for a queued change: the day it was asked, read on the Shelf
+computer's calendar, as `date_added` already is (ADR 0011). Not the day sync ran, which is no
+day anyone finished anything. The hosted server cannot know that calendar, so it discloses the
+rule rather than a date. A date is not written into the Intent either: there it would be a
+stated value, and absorbed into a held note it would overwrite the date that note has.

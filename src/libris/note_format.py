@@ -218,6 +218,9 @@ READER_FIELDS = frozenset(
 # values and a merge should combine them rather than keep one side's.
 MULTI_VALUED_FIELDS = frozenset({"authors", "genres", "tags", "format", "aliases"})
 DATE_FIELDS = ("date_added", "date_started", "date_finished")
+# The dates a person states rather than the Library recording them, and so the
+# ones a write is checked for (#214).
+READER_DATE_FIELDS = frozenset({"date_started", "date_finished"})
 
 # The identities of Book Notes merged into this one (ADR 0014). Deliberately
 # NOT part of MODELLED_FIELDS: it is absent on a note that has never absorbed
@@ -272,6 +275,9 @@ def validate_field_value(field: str, value: object) -> None:
         InvalidFieldValue: If the field has a vocabulary and the value is not
             in it.
     """
+    if field in READER_DATE_FIELDS and value is not None:
+        _validate_reader_date(field, value)
+        return
     allowed = FIELD_VOCABULARIES.get(field)
     if allowed is None or value is None:
         return
@@ -293,6 +299,34 @@ def validate_field_value(field: str, value: object) -> None:
             raise InvalidFieldValue(
                 f"Invalid {field}: {item!r}. Valid values: {', '.join(allowed)}."
             )
+
+
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _validate_reader_date(field: str, value: object) -> None:
+    """Refuse a reading date that is not a calendar day written YYYY-MM-DD.
+
+    These two dates are the ones a person states, so they are the ones that
+    arrive as prose: "last week", or "13/11/2026", which reads as two different
+    days depending on who wrote it. Nothing checked them before #214, so either
+    was written into the note as given. `date.fromisoformat` alone would also
+    accept `20261113` and `2026-W46-5`, which no note on the Shelf is written
+    in, hence the pattern as well.
+    """
+    # A datetime is a date to isinstance, but carries a time the field has no
+    # place for.
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return
+    if isinstance(value, str) and _ISO_DAY.fullmatch(value):
+        try:
+            date.fromisoformat(value)  # 2026-02-30 matches the pattern
+            return
+        except ValueError:
+            pass
+    raise InvalidFieldValue(
+        f"Invalid {field}: {value!r}. Give a calendar day as YYYY-MM-DD."
+    )
 
 
 def read_libris_ids(value: object) -> list[str]:

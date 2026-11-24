@@ -428,7 +428,7 @@ before `mcp`.
 | --- | --- |
 | `search_library` | Finds books you already have. Takes words that identify a book, an optional status, and a limit. Omit the query to list by status alone. |
 | `find_book` | Looks a book up in Google Books, to add it. This searches the outside world, not your Library. |
-| `add_book` | Adds a book by the Google Books id `find_book` returned. |
+| `add_book` | Adds a book by the Google Books id `find_book` returned, with its status, priority, format and dates. |
 | `update_book` | Sets a book's status, priority, rating, format or dates. |
 
 There is deliberately no tool that reads a note's body, and none that writes one.
@@ -457,6 +457,11 @@ run, so the assistant can tell you rather than implying nothing resembled it.
 did. If you finished it last Tuesday, say so and it will be corrected — but only while you are
 still in the conversation, because a stamped date is indistinguishable from a stated one
 afterwards.
+
+Adding a book you have already finished works the same way: say when, and the date goes in with
+the add. Otherwise it is dated the day you asked. Through the hosted server that is the day you
+asked, not the day `libris sync` applied it, and an add that turns out to be a book you already
+have keeps whatever date that note carries.
 
 **Nothing can be cleared.** Fields can be set but not emptied, so "drop the priority on that
 one" has no answer yet. Refusing was the safer way to be wrong: an assistant that sends an empty
@@ -520,11 +525,13 @@ and only they can say which stands (ADR 0018).
 | Field | |
 | --- | --- |
 | `date_added` | Also the source of the `libris_id` timestamp. |
-| `date_started` | Filled when a book becomes **Reading**, if it is empty. |
-| `date_finished` | Filled when a book becomes **Read**, if it is empty. |
+| `date_started` | Filled when a book becomes **Reading**, or is added as Reading, if it is empty. |
+| `date_finished` | Filled when a book becomes **Read**, or is added as Read, if it is empty. |
 
 Both are only ever filled when empty, so re-marking a dated book leaves the original date
-alone. A re-read is not something the Library models.
+alone. A re-read is not something the Library models. Both are written `YYYY-MM-DD`, and any
+other shape is refused rather than written as given. `libris import` stamps neither: a whole
+library imported as Read on one day would all claim to have been finished that day.
 
 ### Not modelled, but written
 

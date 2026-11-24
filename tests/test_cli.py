@@ -513,6 +513,37 @@ def test_add_refuses_an_unknown_format_before_searching(monkeypatch):
     assert "Traceback" not in result.output
 
 
+def test_add_refuses_a_finish_date_that_is_not_a_day_before_searching(monkeypatch):
+    # Given a search that would fail loudly if it ran
+    def _never(*args, **kwargs):
+        raise AssertionError("the API was called despite an invalid date")
+
+    monkeypatch.setattr("libris.cli.GoogleBooksClient.search", _never)
+
+    # When a book is added with a finish date written another way
+    result = runner.invoke(
+        app, ["add", "Dune", "--status", "Read", "--date-finished", "13/11/2026"]
+    )
+
+    # Then it is refused up front, saying the shape a date takes (#214)
+    assert result.exit_code != 0
+    assert "YYYY-MM-DD" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_add_as_read_says_which_day_it_dated_the_book(monkeypatch, tmp_path):
+    # Given a search offering Dune
+    _add_finds(monkeypatch, tmp_path, _dune())
+
+    # When it is added as Read, naming no finish date
+    result = runner.invoke(app, ["add", "dune", "--status", "Read"])
+
+    # Then the reader is told the date the Library set, since a stamped date
+    # reads as a stated one once it is in the note (ADR 0024)
+    assert result.exit_code == 0, result.output
+    assert f"Set date_finished to {date.today().isoformat()}" in result.output
+
+
 def _add_finds(
     monkeypatch: pytest.MonkeyPatch,
     vault: Path,

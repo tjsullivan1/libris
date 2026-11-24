@@ -365,6 +365,8 @@ def create_server(
         status: Status | None = None,
         priority: Priority | None = None,
         format: list[Format] | None = None,
+        date_started: Annotated[str | None, Field(description="YYYY-MM-DD.")] = None,
+        date_finished: Annotated[str | None, Field(description="YYYY-MM-DD.")] = None,
         confirm: Annotated[
             bool,
             Field(
@@ -384,6 +386,11 @@ def create_server(
         Where the Library is a remote copy, the add is queued and reaches the
         Library at its next sync: the outcome is queued, and there is no
         libris_id yet.
+
+        A book added as Read is dated the day it was added unless you pass
+        date_finished, and Reading likewise with date_started. `derived` says
+        when that happened. For a book someone has already finished, ask when
+        and pass the date here: a queued add cannot be corrected afterwards.
         """
         # Decided before Google Books is asked, so a server that can do nothing
         # with the volume does not fetch it.
@@ -419,6 +426,10 @@ def create_server(
             overrides["priority"] = priority
         if format is not None:
             overrides["format"] = list(format)
+        if date_started is not None:
+            overrides["date_started"] = date_started
+        if date_finished is not None:
+            overrides["date_finished"] = date_finished
 
         if queue is not None:
             return _queue_add(store_provider(), queue(), candidate, overrides, confirm)
@@ -448,6 +459,7 @@ def create_server(
             near_match_check=(
                 result.near_match_check.value if result.near_match_check else None
             ),
+            derived={k: str(v) for k, v in result.derived.items()},
         )
 
     @mcp.tool()
@@ -544,6 +556,7 @@ def _queue_add(
         near_match_check=(
             result.near_match_check.value if result.near_match_check else None
         ),
+        derived={k: str(v) for k, v in result.derived.items()},
     )
 
 
