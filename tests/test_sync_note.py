@@ -321,3 +321,42 @@ def test_a_shelf_at_its_vaults_root_gets_no_note_outside_the_vault(tmp_path):
     # Then nothing is written beside the Shelf, outside the Vault, or on it
     assert not (tmp_path / NOTE_NAME).exists()
     assert not (root / NOTE_NAME).exists()
+
+
+def test_a_tick_made_while_sync_runs_is_kept_and_acknowledged_next_run(
+    vault, monkeypatch
+):
+    # Given two rejections listed, and a sync that will have something new to
+    # write: a third rejection since
+    intents = FakeContainer()
+    emma = _rejected_update(intents, "01E", "Emma")
+    _sync(vault, intents)
+    _rejected_update(intents, "01P", "Persuasion")
+
+    # When the person ticks Emma after this sync read the note but before it
+    # replaced it
+    from libris import sync_note
+
+    real_render = sync_note.render
+
+    def _render_then_tick(*args, **kwargs):
+        text = real_render(*args, **kwargs)
+        _tick(vault, emma)
+        return text
+
+    monkeypatch.setattr(sync_note, "render", _render_then_tick)
+    report = _sync(vault, intents)
+    monkeypatch.setattr(sync_note, "render", real_render)
+
+    # Then this sync leaves the note alone, tick and all
+    assert report.changed_while_writing
+    assert not report.written
+    assert any(
+        line.startswith("- [x]") and f"intent:{emma}" in line
+        for line in _note(vault).splitlines()
+    )
+
+    # And the next sync acknowledges the tick and lists the rest
+    assert _sync(vault, intents).acknowledged == [emma]
+    (line,) = _rejected_lines(vault)
+    assert "**Persuasion**" in line

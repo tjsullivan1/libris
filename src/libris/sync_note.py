@@ -56,6 +56,9 @@ class NoteReport:
     # Rejections the note now lists.
     rejected: int = 0
     written: bool = False
+    # The note changed between being read and being replaced, so it was left
+    # for the next sync.
+    changed_while_writing: bool = False
 
 
 def note_path(vault_path: Path) -> Path:
@@ -91,7 +94,9 @@ def update_note(
         # Beside the Shelf is outside the Vault, where Obsidian neither shows
         # nor syncs it. Not inside the Shelf either: anything that lists Book
         # Notes would find it, and a Bases view's folder filter takes in
-        # subfolders too (ADR 0013, #219 review).
+        # subfolders too (ADR 0013, #219 review). Only the default config
+        # folder is recognised: Obsidian lets it be renamed to any dot-folder,
+        # and nothing in one reliably says it is Obsidian's.
         raise NoteRefused(
             f"the Shelf {vault_path} is the root of its Vault, so the note would "
             "sit outside the Vault where Obsidian cannot show it. Move the Book "
@@ -141,6 +146,13 @@ def update_note(
         # Obsidian Sync keeps carrying, and one more chance of writing over a
         # tick made on the phone that has not reached this PC yet.
         if text != current:
+            # Not if the note changed since it was read: a box ticked on this
+            # PC in between would be written over. Left as it is, the next sync
+            # reads that tick (#219 review). Narrows the window to the replace
+            # itself; nothing short of a lock Obsidian honours closes it.
+            if _read(path) != (exists, current):
+                result.changed_while_writing = True
+                return result
             _write(path, text)
             result.written = True
     return result

@@ -3310,6 +3310,11 @@ def _update_sync_note(
             f"{len(note.acknowledged)} rejected change(s) ticked in {note.path.name} "
             "were acknowledged."
         )
+    if note.changed_while_writing:
+        typer.echo(
+            f"{note.path.name} changed while sync was writing it, so it was left "
+            "as it is; the next sync updates it."
+        )
     if note.rejected:
         typer.echo(f"{note.rejected} rejected change(s) are listed in {note.path}.")
     return True
