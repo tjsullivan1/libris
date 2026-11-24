@@ -23,7 +23,7 @@ import contextlib
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -437,7 +437,7 @@ def _push_shelf(
         # A scan that found files it could not read or parse is not empty: it
         # is incomplete, and the hold below names those files (#195 review).
         incomplete = bool(unreadable or report.unparseable)
-        scanned_empty = not on_shelf and not incomplete and bool(state.hashes)
+        scanned_empty = _scans_empty(on_shelf, state.hashes, incomplete)
         if scanned_empty or len(leaving) > _plausible_deletions(len(state.hashes)):
             raise DeletionsRefused(
                 deleting=len(leaving),
@@ -523,6 +523,44 @@ _DELETIONS_ALWAYS_PLAUSIBLE = 20
 # Recorded for a document while a write to it is unconfirmed. Not a digest, so
 # it never matches one, and not empty, which means something else (#207).
 _UNCONFIRMED = "unconfirmed"
+
+
+def shelf_looks_missing(vault_path: Path, books: Container, *, target: str) -> bool:
+    """Whether the Shelf scans as a missing drive does, before anything writes.
+
+    The push refuses such a Shelf, but sync writes to the Shelf before it
+    pushes: queued adds are applied first. Applied to the empty folder an
+    unmounted drive leaves, a note would be hidden again when the drive
+    returns, and its Intent settled and never retried (#211 review). So sync
+    asks this first, and applies nothing to a Shelf that looks missing.
+
+    Args:
+        vault_path: The Shelf.
+        books: The `books` container, asked what it holds when the state
+            cannot say.
+        target: Names the account and database, as `push_shelf` takes it.
+
+    Returns:
+        True if the remote holds notes and the Shelf scans cleanly without
+        any of them.
+    """
+    state = SyncState.load(target)
+    held = state.hashes if state.trusted else dict.fromkeys(_ids_on_remote(books))
+    index = index_for(vault_path)
+    on_shelf = index.notes()
+    return _scans_empty(on_shelf, held, bool(index.unreadable or index.unparseable))
+
+
+def _scans_empty(
+    on_shelf: Iterable[Any], held: Mapping[str, Any], incomplete: bool
+) -> bool:
+    # Only a note the remote already holds says the Shelf is really there. A
+    # new one, such as a queued add applied to a missing drive, says nothing
+    # about the notes that vanished, in this sync or the next one that retries
+    # it (#211 review). A scan that could not read everything is not empty but
+    # incomplete, and is held back for that instead (#195 review).
+    found = any(note.libris_id in held for note in on_shelf)
+    return bool(held) and not found and not incomplete
 
 
 def _plausible_deletions(held: int) -> int:
@@ -803,9 +841,19 @@ def connect_containers(endpoint: str, database: str) -> tuple[Container, Contain
     Raises:
         ImportError: If the `sync` extra is not installed.
     """
+    books, counts = connect_container(endpoint, database, BOOKS, WORD_COUNTS)
+    return books, counts
+
+
+def connect_container(endpoint: str, database: str, *names: str) -> list[Container]:
+    """Reach the named containers as `connect_containers` reaches its two.
+
+    Raises:
+        ImportError: If the `sync` extra is not installed.
+    """
     from azure.cosmos import CosmosClient
     from azure.identity import DefaultAzureCredential
 
     client = CosmosClient(endpoint, credential=DefaultAzureCredential())
     db = client.get_database_client(database)
-    return db.get_container_client(BOOKS), db.get_container_client(WORD_COUNTS)
+    return [db.get_container_client(name) for name in names]

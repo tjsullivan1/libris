@@ -1,8 +1,9 @@
 """The hosted MCP server: Streamable HTTP behind Libris's own OAuth (ADR 0035).
 
 It serves the same tools as `libris mcp` (ADR 0007, ADR 0020), answered from
-what `libris sync` pushed to Cosmos. There is no Shelf here, so the tools that
-write say so and write nothing, until remote writes arrive as Intents.
+what `libris sync` pushed to Cosmos. There is no Shelf here, so an add is
+recorded as an Intent for the next sync to apply (ADR 0002, #176), and an
+update says it cannot be made from here and writes nothing (#177).
 
 Configured from environment variables rather than `config.yaml`, because it
 runs in a container whose settings come from the Container App (and its secrets
@@ -43,6 +44,7 @@ from .oauth import (
     LibrisAuthProvider,
     MemoryAuthStore,
 )
+from .service import IntentRecorder
 from .store import LibraryStore
 
 # Registration is open by design (ADR 0035), and each one writes a document.
@@ -167,6 +169,7 @@ def create_app(
     sign_ins_per_client_per_hour: int = SIGN_INS_PER_CLIENT_PER_HOUR,
     clock: Callable[[], float] = time.monotonic,
     library: LibraryStore | None = None,
+    intents: IntentRecorder | None = None,
 ) -> Starlette:
     """Build the hosted ASGI app.
 
@@ -181,6 +184,9 @@ def create_app(
         clock: The time, for the write limits.
         library: What the tools answer from. Defaults to the books `libris
             sync` pushed to Cosmos, when an endpoint is configured.
+        intents: Where an add is recorded for sync to apply. Defaults to the
+            `intents` container, when an endpoint is configured; without one,
+            adds are refused.
     """
     if store is None:
         if settings.cosmos_endpoint:
@@ -212,6 +218,14 @@ def create_app(
         library = CosmosStore(
             *connect_containers(settings.cosmos_endpoint, settings.cosmos_database)
         )
+    if intents is None and settings.cosmos_endpoint:
+        from .cosmos_store import connect_container
+        from .intents import INTENTS, IntentQueue
+
+        (container,) = connect_container(
+            settings.cosmos_endpoint, settings.cosmos_database, INTENTS
+        )
+        intents = IntentQueue(container)
 
     def library_store() -> LibraryStore:
         if library is None:
@@ -226,6 +240,7 @@ def create_app(
     mcp = create_server(
         store_provider=library_store,
         shelf_provider=None,
+        intent_recorder=(lambda: intents) if intents is not None else None,
         auth_server_provider=provider,
         auth=AuthSettings(
             issuer_url=public_url,

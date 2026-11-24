@@ -3365,19 +3365,25 @@ def _stopped_cleanly(result) -> bool:
     return result.exit_code == 1 and type(result.exception) is SystemExit
 
 
-def _sync_to_fakes(monkeypatch, tmp_path):
-    """Point `libris sync` at fake containers and a Shelf; return the containers."""
+def _sync_to_fakes(monkeypatch, tmp_path, intents=None):
+    """Point `libris sync` at fake containers and a Shelf; return the containers.
+
+    `intents` is the container queued changes are read from, for a test that
+    puts some there. Otherwise it is empty.
+    """
     pytest.importorskip("azure.core")
     from cosmos_fake import FakeContainer
 
     books, counts = FakeContainer(), FakeContainer()
+    intents = intents if intents is not None else FakeContainer()
+    by_name = {"books": books, "word_counts": counts, "intents": intents}
     reached = []
 
-    def _connect(endpoint, database):
+    def _connect(endpoint, database, *names):
         reached.append((endpoint, database))
-        return books, counts
+        return [by_name[name] for name in names]
 
-    monkeypatch.setattr("libris.cli.connect_containers", _connect)
+    monkeypatch.setattr("libris.cli.connect_container", _connect)
     config.set_book_vault_path(tmp_path)
     config.set_config(config.COSMOS_ENDPOINT_KEY, "https://cosmos.example")
     return books, counts, reached
@@ -3402,6 +3408,127 @@ def test_sync_pushes_the_shelf_to_the_configured_account(monkeypatch, tmp_path):
     assert sorted(books.items) == ["01D", "01E"]
     assert "word-counts" in counts.items
     assert "Pushed 2 note(s)" in result.output
+
+
+def _queue_mistborn(intents, **fields):
+    """Record an add-Intent for Mistborn, as the hosted server would."""
+    from libris.intents import IntentQueue
+
+    return IntentQueue(intents).record_add(
+        BookCandidate(
+            title="Mistborn", authors=["Brandon Sanderson"], google_books_id="mist-1"
+        ),
+        fields,
+    )
+
+
+def test_sync_applies_a_queued_add_and_pushes_it_in_the_same_run(monkeypatch, tmp_path):
+    # Given a Shelf, and an add queued remotely
+    from cosmos_fake import FakeContainer
+
+    intents = FakeContainer()
+    intent_id = _queue_mistborn(intents, status="Reading")
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path, intents=intents)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the note is written, the Intent applied, and the note pushed
+    assert result.exit_code == 0, result.output
+    libris_id = intents.items[intent_id]["libris_id"]
+    assert intents.items[intent_id]["outcome"] == "applied"
+    assert libris_id in books.items
+    assert f"Added Mistborn ({libris_id}), queued remotely." in result.output
+    assert "Pushed 2 note(s)" in result.output
+
+
+def test_sync_says_a_queued_add_must_wait_and_exits_non_zero(
+    monkeypatch, tmp_path, lock_note
+):
+    # Given an add queued remotely, and a note on the Shelf that cannot be read
+    from cosmos_fake import FakeContainer
+
+    intents = FakeContainer()
+    intent_id = _queue_mistborn(intents)
+    _sync_to_fakes(monkeypatch, tmp_path, intents=intents)
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    lock_note(tmp_path / "dune.md", reads=True)
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the add waits for the next sync, and the run is reported unfinished
+    assert _stopped_cleanly(result), result.output
+    assert intents.items[intent_id]["pending"] is True
+    assert "could not be applied yet" in result.output
+    assert "Mistborn" in result.output
+
+
+def _shelve_dune_and_emma(vault):
+    _shelved(vault, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    _shelved(vault, "emma.md", "title: Emma\nlibris_id: 01E\n")
+
+
+def test_a_queued_add_waits_out_a_missing_shelf_and_lands_when_it_returns(
+    monkeypatch, tmp_path
+):
+    # Given a remote holding two books pushed from a Shelf that now scans
+    # empty, as an unmounted drive's folder does - and an add queued remotely
+    from cosmos_fake import FakeContainer
+
+    intents = FakeContainer()
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path, intents=intents)
+    _shelve_dune_and_emma(tmp_path)
+    assert runner.invoke(app, ["sync"]).exit_code == 0
+    (tmp_path / "dune.md").unlink()
+    (tmp_path / "emma.md").unlink()
+    intent_id = _queue_mistborn(intents)
+
+    # When the Shelf is synced, and synced again as the scheduled task would
+    first = runner.invoke(app, ["sync"])
+    retried = runner.invoke(app, ["sync"])
+
+    # Then on neither run is the add written into the empty folder, or settled,
+    # and nothing the remote holds is deleted (#211 review)
+    for result in (first, retried):
+        assert _stopped_cleanly(result), result.output
+        assert "Nothing queued remotely was applied" in result.output
+        assert "holds none of the notes the remote" in result.output
+    assert list(tmp_path.glob("*.md")) == []
+    assert intents.items[intent_id]["pending"] is True
+    assert {"01D", "01E"} <= set(books.items)
+
+    # And once the drive is back, the next sync applies it
+    _shelve_dune_and_emma(tmp_path)
+    returned = runner.invoke(app, ["sync"])
+    assert returned.exit_code == 0, returned.output
+    assert intents.items[intent_id]["outcome"] == "applied"
+    assert intents.items[intent_id]["libris_id"] in books.items
+
+
+def test_sync_without_an_intents_container_still_pushes(monkeypatch, tmp_path):
+    # Given an account deployed before remote writes, with no intents container
+    pytest.importorskip("azure.core")
+    from azure.core.exceptions import ResourceNotFoundError
+    from cosmos_fake import FakeContainer
+
+    class _Missing(FakeContainer):
+        def query_items(self, *args, **kwargs):
+            error = ResourceNotFoundError("Resource Not Found")
+            error.status_code = 404
+            raise error
+
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path, intents=_Missing())
+    _shelved(tmp_path, "dune.md", "title: Dune\nlibris_id: 01D\n")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then it says so, and pushes the Shelf all the same
+    assert result.exit_code == 0, result.output
+    assert "no intents container" in result.output
+    assert sorted(books.items) == ["01D"]
 
 
 def test_sync_refuses_two_notes_sharing_an_id_and_names_them(monkeypatch, tmp_path):
@@ -3515,7 +3642,7 @@ def test_sync_stops_short_of_emptying_the_remote_and_says_how_to_go_on(
 
     # Then it stops, says why, names the way through, and deletes nothing
     assert _stopped_cleanly(result)
-    assert "has no notes in it" in result.output
+    assert "holds none of the notes the remote" in result.output
     assert "delete 1 of the 1 notes" in result.output
     assert "libris sync --allow-deletions" in result.output
     assert list(books.items) == ["01D"]

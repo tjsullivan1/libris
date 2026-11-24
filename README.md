@@ -253,7 +253,7 @@ libris config --cosmos-endpoint https://<account>.documents.azure.com
 libris sync
 ```
 
-Each sync pushes only the notes that changed since the last one, renames included, and deletes the remote copy of any note that has left the Shelf. What was pushed is recorded in `sync-state.json` beside `config.yaml`. If you delete it, the next sync pushes everything and rebuilds it.
+Each sync first applies any books added from the hosted server (section 15), then pushes only the notes that changed since the last one, renames included, and deletes the remote copy of any note that has left the Shelf. What was pushed is recorded in `sync-state.json` beside `config.yaml`. If you delete it, the next sync pushes everything and rebuilds it.
 
 Sync refuses to push anything while two notes share a Libris ID, and names them, because the remote would keep only one. A note it cannot push - one with no Libris ID, say, which `libris migrate` gives - is named, and the command exits non-zero while every other note still goes up.
 
@@ -270,7 +270,7 @@ It runs the installed `librisw` (the console-less build of `libris`, so no windo
 
 ### 15. Ask Claude or Gemini about the Library
 
-The hosted Libris server lets Claude and Gemini answer from the remote Library: "have I read Mistborn?", "what am I reading?", or "look up Piranesi". It answers from what the last `libris sync` pushed, so sync first. It is read-only for now: asked to add a book or change one, the assistant is told that changes can't be made remotely yet, and nothing is written. Make the change with `libris` on the computer that holds the Shelf, then sync.
+The hosted Libris server lets Claude and Gemini answer from the remote Library: "have I read Mistborn?", "what am I reading?", or "look up Piranesi". It answers from what the last `libris sync` pushed, so sync first. Adding a book from here is queued rather than written: the assistant says the book was queued, and the next `libris sync` adds it to the Shelf and pushes it, so it can be found remotely after that sync. If the Shelf already holds the book by then, sync adds no second note and sets whatever the queued add named, such as its status, on the one it holds. Changing a book is not possible remotely yet: the assistant is told so, and nothing is written. Make that change with `libris` on the computer that holds the Shelf, then sync.
 
 Get the server's URL from `terraform -chdir=infra output -raw mcp_url`, then add it as a custom connector:
 
