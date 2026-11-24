@@ -82,7 +82,11 @@ def update_note(
             )
             if not document.get("acknowledged_at")
         ]
-        ticked = _ticked(path)
+        # Read once, so the ticks and the comparison below agree on what the
+        # note holds. Unreadable as text is the same as absent: rewritten, and
+        # never the reason a sync stops before its push (#219 review).
+        current = _read(path)
+        ticked = _ticked(current or "")
         outstanding = []
         for document in rejected:
             if document["id"] in ticked:
@@ -98,10 +102,6 @@ def update_note(
         result.rejected = len(outstanding)
 
         text = render(outstanding, report.waiting)
-        try:
-            current = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            current = None
         # Only when it changed: a note rewritten every quarter hour is one
         # Obsidian Sync keeps carrying, and one more chance of writing over a
         # tick made on the phone that has not reached this PC yet.
@@ -148,8 +148,7 @@ def render(rejected: list[dict[str, Any]], waiting: list[Settled]) -> str:
             "",
         ]
         lines += [
-            f"- **{_one_line(s.title)}** ({s.kind}): {_one_line(s.reason or '')}"
-            for s in waiting
+            _one_line(f"- **{s.title}** ({s.kind}): {s.reason or ''}") for s in waiting
         ]
         lines.append("")
     return "\n".join(lines)
@@ -161,8 +160,12 @@ def _rejected_line(document: dict[str, Any]) -> str:
     origin = f"from {_SURFACES.get(surface, surface or 'an unknown Surface')}"
     if asked:
         origin += f" on {asked}"
-    return (
-        f"- [ ] **{_one_line(_title_of(document))}**: {_asked_for(document)}, "
+    # Flattened whole, not piece by piece: every part but the box is text an
+    # Intent carries, and a line break in any of them - a target, a field's
+    # name, a Surface - parts the box from its marker, so a tick would never
+    # be found (#219 review).
+    return _one_line(
+        f"- [ ] **{_title_of(document)}**: {_asked_for(document)}, "
         f"{origin}. Rejected because {_reason(document)}. "
         f"%%intent:{document['id']}%%"
     )
@@ -184,24 +187,26 @@ def _asked_for(document: dict[str, Any]) -> str:
         return f"{change} on the note with Libris ID {target}"
     if kind == "add":
         return f"add it, with {named}" if named else "add it"
-    return f"a {_one_line(str(kind))!r} change"
+    return f"a {kind!r} change"
 
 
 def _fields_text(fields: dict[str, Any]) -> str:
     def value(v: Any) -> str:
         return ", ".join(map(str, v)) if isinstance(v, list) else str(v)
 
-    return "; ".join(
-        f"{_one_line(str(k))} to {_one_line(value(v))}" for k, v in fields.items()
-    )
+    return "; ".join(f"{k} to {value(v)}" for k, v in fields.items())
 
 
-def _ticked(path: Path) -> set[str]:
-    """The Intents a person ticked in the note, if there is one to read."""
+def _read(path: Path) -> str | None:
+    """The note's text, or None when there is none to read as text."""
     try:
-        text = path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except (FileNotFoundError, UnicodeDecodeError):
-        return set()
+        return None
+
+
+def _ticked(text: str) -> set[str]:
+    """The Intents a person ticked in the note's text."""
     return {match[1] for line in text.splitlines() if (match := _TICKED.match(line))}
 
 

@@ -226,14 +226,65 @@ def test_an_unchanged_note_is_not_written_again(vault):
     assert not report.written
 
 
-def test_a_title_spanning_lines_stays_one_task_and_can_still_be_ticked(vault):
-    # Given a rejected Intent whose title holds a line break
+def _settled_rejection(**overrides):
+    """A rejected update as the remote holds it once sync has settled it."""
+    return {
+        "id": "0a1b2c",
+        "kind": "update",
+        "pending": False,
+        "outcome": "rejected",
+        "surface": "hosted_mcp",
+        "recorded_at": "2026-11-20T15:00:00+00:00",
+        "target": "01X",
+        "title": "Emma",
+        "fields": {"status": "Read"},
+        "reason": "no note on the Shelf holds the Libris ID 01X",
+        **overrides,
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"title": "Pride\nand Prejudice"},
+        {"target": "01X\n"},
+        {"surface": "a\nnewer server"},
+        {"fields": {"status\nnote": "Read"}},
+        {"fields": {"status": ["Read", "\n"]}},
+        {"reason": "it cannot be read:\nfields are str"},
+        {"kind": "rename\nbook"},
+    ],
+    ids=["title", "target", "surface", "field name", "field value", "reason", "kind"],
+)
+def test_a_line_break_anywhere_in_an_intent_keeps_its_task_on_one_line(
+    vault, overrides
+):
+    # Given a rejected Intent holding a line break in one of its texts
     intents = FakeContainer()
-    intent_id = _rejected_update(intents, title="Pride\nand Prejudice")
+    intents.upsert_item(_settled_rejection(**overrides))
+
+    # When sync lists it
     _sync(vault, intents)
 
-    # Then it is one line, and ticking it acknowledges it
+    # Then the box and the Intent's marker share one line, so ticking it
+    # acknowledges it
     (line,) = _rejected_lines(vault)
-    assert "**Pride and Prejudice**" in line
-    _tick(vault, intent_id)
-    assert _sync(vault, intents).acknowledged == [intent_id]
+    assert line.startswith("- [ ] ") and line.endswith("%%intent:0a1b2c%%")
+    _tick(vault, "0a1b2c")
+    assert _sync(vault, intents).acknowledged == ["0a1b2c"]
+
+
+def test_a_note_that_is_not_utf8_is_rewritten_rather_than_stopping_sync(vault):
+    # Given a rejection, and a note whose bytes are not UTF-8
+    intents = FakeContainer()
+    _rejected_update(intents)
+    (vault.parent / NOTE_NAME).write_bytes(b"- [x] \xff\xfe broken")
+
+    # When sync runs
+    report = _sync(vault, intents)
+
+    # Then the note is rewritten, listing the rejection, and nothing is
+    # acknowledged from text that could not be read
+    assert report.written
+    assert report.acknowledged == []
+    assert len(_rejected_lines(vault)) == 1
