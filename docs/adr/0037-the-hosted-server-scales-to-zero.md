@@ -25,6 +25,20 @@ sending the request Claude sends first: an unauthenticated `POST /mcp`, answered
 
 Four cold starts, 28.8–29.7 s, median 29.5 s. Before #179's tracing; see below for what it adds.
 
+With tracing deployed (#222), measured the same way on 2026-11-25:
+
+| Started (UTC) | Replicas before | Time to first byte |
+|---|---|---|
+| 17:34 | 0 | 41.9 s, the first cold start after the deploy |
+| 17:47 | 0 | 26.7 s |
+| 17:55 | 0 | 29.7 s |
+| 18:04 | 0 | 29.8 s |
+
+Tracing changes nothing measurable: 26.7–29.8 s against 28.8–29.7 s. The 41.9 s outlier was the
+first replica of a new image. The system log shows its node pulling the image for the first time
+(3 s instead of 137 ms) and waiting 12 s longer before starting the pull. Python startup took
+9.6 s, the same as before. **Expect the first call after each deploy to wait about 40 seconds.**
+
 A warm replica answers the same request in 0.19–0.24 s, and the OAuth metadata in 0.20 s.
 
 The platform's system log (`ContainerAppSystemLogs_CL`) breaks the first one down:
@@ -38,12 +52,15 @@ The platform's system log (`ContainerAppSystemLogs_CL`) breaks the first one dow
 
 The 15 seconds belong to the platform and nothing in this repository changes them. The 9 seconds
 are mostly the `mcp` SDK: of the 2.5 s `libris.hosted` takes to import on a desktop, 2.0 s is
-`mcp` itself. The tracing added in #179 adds another 0.9 s there, which is about 3.5 s on a
-quarter of a vCPU.
+`mcp` itself. The tracing packages add 0.9 s of imports on a desktop. Scaled to a quarter of a
+vCPU, that predicted about 3.5 s. Deployed, it was under a second, within the run-to-run spread.
 
 Claude was not timed separately. The server cannot see how long a client waited, because its
-first span starts once the app is up. `curl` from a desktop is the client-side measurement. Gemini
-has not connected yet (#180).
+first span starts once the app is up. `curl` from a desktop is the client-side measurement. In
+Application Insights a cold start looks like an ordinary request: the waking request is recorded,
+but its duration starts when the app is up. The one exception was the very first request after
+the deploy that created the app's telemetry role, which is missing. That's most likely the role
+still propagating (infra/README.md). Gemini has not connected yet (#180).
 
 ## What a running replica costs in money
 

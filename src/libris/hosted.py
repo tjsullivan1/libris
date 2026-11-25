@@ -407,8 +407,21 @@ def instrument(
     return True
 
 
+def quiet_azure_sdk_logs() -> None:
+    """Keep the Azure SDKs' INFO logging out of the container's output.
+
+    The MCP SDK sets the root logger to INFO, so every Azure SDK logs at that
+    level too: each managed-identity token fetch, each Cosmos request and each
+    telemetry upload, headers and all, a few dozen lines a minute from a replica
+    doing nothing (#179). Their values are redacted, so this is noise, not a
+    leak, but it buried the lines worth reading. Warnings and errors still show.
+    """
+    logging.getLogger("azure").setLevel(logging.WARNING)
+
+
 def create_app_from_env() -> Starlette:
     """The app as the container runs it, configured from its environment."""
+    quiet_azure_sdk_logs()
     app = create_app(HostedSettings.from_env())
     instrument(app)
     return app
