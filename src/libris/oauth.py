@@ -576,7 +576,9 @@ class LibrisAuthProvider:
         cookie = request.cookies.get(CONSENT_COOKIE, "")
         if sign_in is None or sign_in.sent_to_google:
             return _page(*_EXPIRED)
-        if not secrets.compare_digest(cookie, sign_in.consent_token):
+        # Bytes, as every compare_digest here: given a str holding a non-ASCII
+        # character it raises TypeError, a 500 where a 403 belongs (#235).
+        if not secrets.compare_digest(cookie.encode(), sign_in.consent_token.encode()):
             return _page(
                 "Not allowed",
                 "<p>This approval did not come from the consent page.</p>",
@@ -632,7 +634,9 @@ class LibrisAuthProvider:
         # Checked before Google is asked anything, and after the sign-in was
         # taken, so a refused attempt cannot be retried from another browser.
         approved = request.cookies.get(APPROVAL_COOKIE, "")
-        if not secrets.compare_digest(approved, sign_in.consent_token):
+        if not secrets.compare_digest(
+            approved.encode(), sign_in.consent_token.encode()
+        ):
             return _page(
                 "Not allowed",
                 "<p>This sign-in was approved in a different browser. "
@@ -925,7 +929,7 @@ class LibrisAuthProvider:
 
     def _is_allowed(self, sub: str) -> bool:
         return self._allowed_sub is not None and secrets.compare_digest(
-            sub, self._allowed_sub
+            sub.encode(), self._allowed_sub.encode()
         )
 
     def _back_to_client(self, sign_in: _SignIn, **params: str) -> str:

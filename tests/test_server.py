@@ -108,6 +108,16 @@ def test_request_with_a_wrong_token_is_rejected(client):
     assert response.status_code == 401
 
 
+def test_request_with_a_non_ascii_token_is_rejected_not_crashed(client):
+    # Given a credential with a non-ASCII byte, which compare_digest refuses
+    # to compare as a str (#235 review)
+    # When a non-health path is requested
+    response = client.get("/anything", headers={"Authorization": b"Bearer \xe9"})
+
+    # Then it is refused like any other wrong token, not answered with a 500
+    assert response.status_code == 401
+
+
 def test_request_with_a_malformed_header_is_rejected(client, token):
     # Given the right token sent without the Bearer scheme
     # When a non-health path is requested
@@ -246,8 +256,9 @@ def test_health_reports_a_configured_shelf(token, configured_shelf):
         {},
         {"Authorization": "Bearer not-the-token"},
         {"Authorization": "Basic whatever"},
+        {"Authorization": b"Bearer \xe9"},
     ],
-    ids=["no-token", "wrong-token", "wrong-scheme"],
+    ids=["no-token", "wrong-token", "wrong-scheme", "non-ascii-token"],
 )
 def test_health_withholds_the_shelf_path_without_the_token(
     token, configured_shelf, headers

@@ -494,6 +494,29 @@ def test_a_consent_cookie_from_another_sign_in_does_not_count(
     assert response.status_code == 403
 
 
+def test_a_non_ascii_consent_cookie_is_refused_not_crashed(
+    client: TestClient,
+) -> None:
+    # Given a sign-in at the consent page
+    client_id = register(client)
+    _, challenge = pkce()
+    authorize = start_sign_in(client, client_id, challenge)
+    request_id = query(authorize.headers["location"])["request"]
+
+    # When the form is submitted with a consent cookie holding a non-ASCII
+    # byte, which compare_digest will not compare as a str (#235 review)
+    client.cookies.clear()
+    response = client.post(
+        "/oauth/consent",
+        headers={**SAME_ORIGIN, "Cookie": f"{CONSENT_COOKIE}=".encode() + b"\xe9"},
+        data={"request": request_id, "decision": "allow"},
+        follow_redirects=False,
+    )
+
+    # Then it is refused like any other wrong cookie, not answered with a 500
+    assert response.status_code == 403
+
+
 def test_denying_sends_the_client_an_access_denied(client: TestClient) -> None:
     # Given a sign-in at the consent page
     client_id = register(client)

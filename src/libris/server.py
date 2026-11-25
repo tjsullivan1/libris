@@ -240,10 +240,12 @@ def _bears_token(request: Request) -> bool:
     """
     token = config.get_server_token()
     scheme, _, presented = request.headers.get("authorization", "").partition(" ")
+    # Compared as bytes: compare_digest raises TypeError on a str holding any
+    # non-ASCII character, which turned a wrong token into a 500 (#235 review).
     return bool(
         token
         and scheme.lower() == "bearer"
-        and secrets.compare_digest(presented, token)
+        and secrets.compare_digest(presented.encode(), token.encode())
     )
 
 
