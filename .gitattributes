@@ -1,0 +1,8 @@
+# Terraform with LF on every checkout. A heredoc keeps the file's line endings
+# in the value it builds, so a CRLF checkout on Windows applies different
+# strings from the LF deploy runner, and every deploy then plans a change.
+# That happened to the deploy identity's role condition, a grant the deploy
+# may not change, so every deploy failed with a 403.
+*.tf     text eol=lf
+*.tfvars text eol=lf
+*.hcl    text eol=lf

@@ -69,9 +69,18 @@ resource "azurerm_role_assignment" "deploy_grants_app_roles" {
   role_definition_name = "Role Based Access Control Administrator"
   principal_id         = var.deploy_principal_id
   condition_version    = "2.0"
+  # Stripped of carriage returns: a heredoc keeps the checkout's line endings,
+  # so an apply from a Windows checkout stored CRLF and every Linux deploy then
+  # planned a change to this grant - which the deploy may not make, so it
+  # failed with a 403. Azure keeps the string as sent; the same on every
+  # machine means no diff on any.
+  condition = replace(local.deploy_grant_condition, "\r", "")
+}
+
+locals {
   # Checked on the request for a write and on the existing assignment for a
   # delete, so the deploy can neither make nor remove any other grant.
-  condition = <<-EOT
+  deploy_grant_condition = <<-EOT
     (
       (
         !(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})
