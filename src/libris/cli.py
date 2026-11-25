@@ -85,6 +85,7 @@ from .note_format import (
     STATUS_VALUES,
     InvalidFieldValue,
     dump_frontmatter_yaml,
+    escape_template_syntax,
     normalize_field_value,
     parse_frontmatter_yaml,
     validate_field_value,
@@ -1063,11 +1064,12 @@ def _append_auto_enrich_note(
             # The body goes back as it was read, leading newlines and all (#99).
             content = f"---\n{new_fm}\n---\n{split[1]}"
 
-    # Append the callout note to the body
+    # Append the callout note to the body. The matched title is Google's, so it
+    # is escaped as a description is (#231).
     note = (
         f"\n\n> [!warning] Auto-enriched ({date.today().isoformat()})\n"
         f"> Title matched automatically from Google Books.\n"
-        f'> Query: "{original_query}" → Matched: "{matched_title}"\n'
+        f'> Query: "{original_query}" → Matched: "{escape_template_syntax(matched_title)}"\n'
         f"> Please verify this is the correct book.\n"
     )
     # Rewritten, never created: the note was read above, and one removed since

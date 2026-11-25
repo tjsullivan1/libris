@@ -261,6 +261,55 @@ class InvalidFieldValue(ValueError):
     """
 
 
+# Templater, an Obsidian plugin, can run every `<% %>` command in a note the
+# moment the note appears in the vault, whoever wrote it ("Trigger Templater on
+# new file creation"). `<%* %>` is JavaScript with Node's `require`. A Book Note
+# is written from a catalogue anyone can publish to, so text from it must never
+# reach a note carrying the opener (#231).
+TEMPLATE_OPENER = "<%"
+
+
+class TemplateSyntaxInMetadata(ValueError):
+    """A book's metadata carries template syntax, so no note is written from it.
+
+    Subclasses ValueError, as InvalidFieldValue does, so every Surface reports
+    it as a refusal and a queued add is rejected rather than retried.
+    """
+
+
+def carries_template_syntax(value: object) -> bool:
+    """Whether a metadata value, or any string in a list of them, has the opener.
+
+    Args:
+        value: A field's value as a source gave it.
+
+    Returns:
+        True when the value would put `<%` into a note.
+    """
+    if isinstance(value, str):
+        return TEMPLATE_OPENER in value
+    if isinstance(value, list):
+        return any(carries_template_syntax(item) for item in value)
+    return False
+
+
+def escape_template_syntax(text: str) -> str:
+    """Spell `<%` as `&lt;%` in text bound for a note's body.
+
+    Obsidian renders the entity as `<`, so the reader sees the same text, and
+    Templater does not see an opener. Frontmatter cannot do this: YAML does not
+    decode entities, so a value there would change. There, a value with the
+    opener is refused instead (`TemplateSyntaxInMetadata`).
+
+    Args:
+        text: Text from an external source.
+
+    Returns:
+        The text with every opener escaped.
+    """
+    return text.replace(TEMPLATE_OPENER, "&lt;%")
+
+
 def validate_field_value(field: str, value: object) -> None:
     """Check a field value against the vocabulary the Library defines for it.
 
@@ -535,7 +584,8 @@ def render_description_callout(description: str) -> str:
         The callout block, with every line prefixed.
     """
     lines = ["> [!abstract]- Description"]
-    for line in description.strip().splitlines():
+    # Every writer of a description goes through here (#231).
+    for line in escape_template_syntax(description).strip().splitlines():
         lines.append(f"> {line}" if line.strip() else ">")
     return "\n".join(lines)
 

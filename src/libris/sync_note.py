@@ -24,6 +24,7 @@ from typing import Any
 
 from .cosmos_store import Container, _sync_lock
 from .intents import HOSTED_MCP, IntentOutcome, IntentReport, Settled, _title_of
+from .note_format import escape_template_syntax
 
 NOTE_NAME = "Libris sync.md"
 
@@ -305,13 +306,13 @@ def _shown(text: str) -> str:
     Flattened onto one line, and with every way of opening a comment broken
     up: a title holding `%%` or `<!--` would otherwise hide the rest of its
     line, and through the marker's own `%%`, every task listed after it
-    (#219 review).
+    (#219 review). And with template syntax escaped, because a title is a
+    catalogue's, and this note is created afresh when it was deleted (#231).
     """
     # Every `%` followed by another, not every `%%`: replacing pairs leaves
-    # `%%%` holding one.
-    return re.sub(r"%(?=%)", f"%{_ZWSP}", _one_line(text)).replace(
-        "<!--", f"<{_ZWSP}!--"
-    )
+    # `%%%` holding one. The template opener first, while `<%` is still whole.
+    text = escape_template_syntax(_one_line(text))
+    return re.sub(r"%(?=%)", f"%{_ZWSP}", text).replace("<!--", f"<{_ZWSP}!--")
 
 
 def _text(value: object) -> str:
