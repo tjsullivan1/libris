@@ -54,6 +54,8 @@ jobs:
       TF_VAR_google_client_id: ${{ secrets.GOOGLE_CLIENT_ID }}
       TF_VAR_google_client_secret: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       TF_VAR_google_books_api_key: ${{ secrets.GOOGLE_BOOKS_API_KEY }}
+      # A secret for the same reason as the Google ID: it is a personal address.
+      TF_VAR_budget_alert_email: ${{ secrets.LIBRIS_BUDGET_ALERT_EMAIL }}
       # The commit CI tested, not whatever main points at by now. Every image
       # gets its own tag: reusing one leaves the running revision on the old
       # image.

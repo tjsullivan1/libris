@@ -110,6 +110,7 @@ resource "time_sleep" "secrets_role_propagates" {
     azurerm_role_assignment.app_reads_secrets,
     azurerm_role_assignment.app_pulls_images,
     azurerm_cosmosdb_sql_role_assignment.app,
+    azurerm_role_assignment.app_sends_telemetry,
   ]
   create_duration = "60s"
 }
@@ -161,6 +162,19 @@ resource "azurerm_cosmosdb_account" "main" {
 
   consistency_policy {
     consistency_level = "Session"
+  }
+
+  # Azure's default, written out so it is a decision rather than an accident
+  # (#179). Almost nothing here needs a backup: the books are rebuilt from the
+  # Shelf by sync, and lost sign-ins only mean signing in again. Pending Intents
+  # are the exception, and this covers them through a support ticket.
+  # Continuous backup was considered and left out: the switch is one-way, and
+  # it would protect a few hours of Intents (infra/README.md).
+  backup {
+    type                = "Periodic"
+    interval_in_minutes = 240
+    retention_in_hours  = 8
+    storage_redundancy  = "Geo"
   }
 
   geo_location {
@@ -307,6 +321,72 @@ resource "azurerm_log_analytics_workspace" "main" {
   resource_group_name = azurerm_resource_group.main.name
   sku                 = "PerGB2018"
   retention_in_days   = 30
+  # A ceiling, not an estimate: one person's traffic is megabytes a day. A
+  # loop logging on every request is what this stops from becoming a bill
+  # (#179). Ingestion past it is dropped until the next UTC day.
+  daily_quota_gb = 0.2
+}
+
+# Traces of every request and tool call (#179), kept in the workspace above.
+# Accepts telemetry only from an Entra identity, like everything else here
+# (ADR 0006): the connection string says where to send, not who may.
+resource "azurerm_application_insights" "main" {
+  name                         = "appi-libris-${local.suffix}"
+  location                     = azurerm_resource_group.main.location
+  resource_group_name          = azurerm_resource_group.main.name
+  workspace_id                 = azurerm_log_analytics_workspace.main.id
+  application_type             = "other"
+  local_authentication_enabled = false
+}
+
+resource "azurerm_role_assignment" "app_sends_telemetry" {
+  scope                = azurerm_application_insights.main.id
+  role_definition_name = "Monitoring Metrics Publisher"
+  principal_id         = azurerm_user_assigned_identity.app.principal_id
+}
+
+# Cost --------------------------------------------------------------------------
+
+# When the budget was first applied, kept in state so it never moves. Azure
+# takes a start date on the first of a month, and refuses a past one outside
+# the current month, so a date written here would stop working for any
+# deployment made after that month (#222 review).
+resource "time_static" "budget_created" {}
+
+# Mails the owner before a month's costs surprise them (#179). Most of the
+# spend is the registry's flat daily fee, so the amount leaves room above it:
+# an alert means something changed, not that a month went by.
+resource "azurerm_consumption_budget_resource_group" "main" {
+  name              = "budget-libris-${local.suffix}"
+  resource_group_id = azurerm_resource_group.main.id
+  amount            = var.monthly_budget
+  time_grain        = "Monthly"
+
+  time_period {
+    start_date = formatdate("YYYY-MM-01'T'00:00:00Z", time_static.budget_created.rfc3339)
+  }
+
+  notification {
+    threshold      = 80
+    threshold_type = "Actual"
+    operator       = "GreaterThanOrEqualTo"
+    contact_emails = [var.budget_alert_email]
+  }
+
+  notification {
+    threshold      = 100
+    threshold_type = "Actual"
+    operator       = "GreaterThanOrEqualTo"
+    contact_emails = [var.budget_alert_email]
+  }
+
+  # Warns mid-month, while there is still time to act on it.
+  notification {
+    threshold      = 100
+    threshold_type = "Forecasted"
+    operator       = "GreaterThanOrEqualTo"
+    contact_emails = [var.budget_alert_email]
+  }
 }
 
 resource "azurerm_container_app_environment" "main" {
@@ -414,6 +494,12 @@ resource "azurerm_container_app" "mcp" {
       env {
         name  = "LIBRIS_COSMOS_ENDPOINT"
         value = azurerm_cosmosdb_account.main.endpoint
+      }
+      # Switches tracing on (#179). Not a secret: the resource refuses
+      # anything but the app's identity, so it only says where to send.
+      env {
+        name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        value = azurerm_application_insights.main.connection_string
       }
       # Tells DefaultAzureCredential which of the app's identities to use.
       env {

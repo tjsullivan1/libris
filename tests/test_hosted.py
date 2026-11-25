@@ -9,6 +9,7 @@ Google is replaced by a fake that names whichever account a test chooses.
 import hashlib
 import json
 import secrets
+import sys
 import threading
 import time
 from base64 import urlsafe_b64encode
@@ -32,7 +33,14 @@ from starlette.testclient import TestClient  # noqa: E402
 from libris import service  # noqa: E402
 from libris.api import BookCandidate  # noqa: E402
 from libris.cosmos_store import CosmosStore, push_shelf  # noqa: E402
-from libris.hosted import HostedConfigError, HostedSettings, create_app  # noqa: E402
+from libris.hosted import (  # noqa: E402
+    TELEMETRY_CONNECTION_STRING,
+    UNTRACED_URLS,
+    HostedConfigError,
+    HostedSettings,
+    create_app,
+    instrument,
+)
 from libris.intents import IntentQueue  # noqa: E402
 from libris.markdown import create_book_note  # noqa: E402
 from libris.oauth import (  # noqa: E402
@@ -1752,3 +1760,206 @@ def test_with_no_cosmos_configured_a_search_says_what_is_missing(
     # Then the tool names the setting, rather than failing as a server error
     assert result["isError"]
     assert "LIBRIS_COSMOS_ENDPOINT" in result["content"][0]["text"]
+
+
+# Telemetry (#179) -------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def span_exporter():
+    """Every span the process records, kept in memory.
+
+    OpenTelemetry takes one global tracer provider per process, and the MCP SDK
+    traces through it. So the exporter joins whichever SDK provider is already
+    installed, and installs one only if none is, rather than depending on
+    running first (#222 review).
+    """
+    sdk_trace = pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    provider = trace.get_tracer_provider()
+    if not isinstance(provider, sdk_trace.TracerProvider):
+        trace.set_tracer_provider(sdk_trace.TracerProvider())
+        provider = trace.get_tracer_provider()
+    if not isinstance(provider, sdk_trace.TracerProvider):
+        pytest.skip("a tracer provider that cannot take an exporter is installed")
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return exporter
+
+
+@pytest.fixture
+def spans(span_exporter):
+    span_exporter.clear()
+    return span_exporter
+
+
+@pytest.fixture
+def traced_client(
+    google: FakeGoogle, store: MemoryAuthStore, library: CosmosStore
+) -> Iterator[tuple[TestClient, list[str]]]:
+    """A hosted app told where to send traces, and the destinations it was given."""
+    app = create_app(settings(), store=store, identity=google, library=library)
+    exported: list[str] = []
+    instrument(
+        app,
+        {TELEMETRY_CONNECTION_STRING: "InstrumentationKey=fake"},
+        export=exported.append,
+    )
+    with TestClient(app, base_url=PUBLIC_URL) as test_client:
+        yield test_client, exported
+
+
+def test_a_tool_call_is_traced_by_name_inside_its_request(
+    traced_client: tuple[TestClient, list[str]], spans
+) -> None:
+    # Given a signed-in client of an app that sends its traces somewhere
+    client, exported = traced_client
+    _, issued = tokens(client)
+    spans.clear()
+
+    # When it calls a tool
+    call_tool(client, issued["access_token"], "search_library", {"query": "mistborn"})
+
+    # Then the traces went where the environment said
+    assert exported == ["InstrumentationKey=fake"]
+    # And the call is a span named for its tool...
+    finished = spans.get_finished_spans()
+    tool_spans = [s for s in finished if s.name == "tools/call search_library"]
+    assert len(tool_spans) == 1, [s.name for s in finished]
+    tool_span = tool_spans[0]
+    assert tool_span.attributes["gen_ai.tool.name"] == "search_library"
+    # ...inside the HTTP request it arrived on, so status and duration sit beside it
+    assert tool_span.parent is not None, "the tool span stands alone"
+    parents = [s for s in finished if s.context.span_id == tool_span.parent.span_id]
+    assert [s.name for s in parents] == ["POST /mcp"]
+    assert parents[0].attributes["http.status_code"] == 200
+
+
+def test_the_liveness_probe_is_not_traced(
+    traced_client: tuple[TestClient, list[str]], spans
+) -> None:
+    # Given an app that sends its traces somewhere
+    client, _ = traced_client
+
+    # When the liveness probe asks after it
+    assert client.get("/healthz").status_code == 200
+
+    # Then nothing is recorded for it
+    assert spans.get_finished_spans() == ()
+
+
+def test_without_a_connection_string_nothing_is_traced(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given an app whose environment names no Application Insights
+    app = create_app(settings(), store=store, identity=google)
+    exported: list[str] = []
+
+    # When it is instrumented
+    switched_on = instrument(app, {}, export=exported.append)
+
+    # Then tracing stays off and nothing is exported
+    assert not switched_on
+    assert exported == []
+
+
+def test_a_sign_in_leaves_no_query_string_in_its_traces(
+    traced_client: tuple[TestClient, list[str]], spans
+) -> None:
+    # Given an app that sends its traces somewhere
+    client, _ = traced_client
+
+    # When a client signs in, which carries Google's code in a query string
+    tokens(client)
+
+    # Then each sign-in step is traced by its path alone
+    finished = spans.get_finished_spans()
+    urls = {s.name: s.attributes.get("http.url") for s in finished}
+    assert urls["GET /oauth/google/callback"] == f"{PUBLIC_URL}/oauth/google/callback"
+    assert urls["GET /authorize"] == f"{PUBLIC_URL}/authorize"
+    # And no attribute of any span holds a query string
+    leaked = [
+        (s.name, name, value)
+        for s in finished
+        for name, value in s.attributes.items()
+        if isinstance(value, str) and ("?" in value or "code=" in value)
+    ]
+    assert leaked == []
+
+
+@pytest.mark.parametrize(
+    ("url", "traced"),
+    [
+        (f"{PUBLIC_URL}/healthz", False),
+        ("http://10.0.0.4:8000/healthz", False),
+        (f"{PUBLIC_URL}/healthz2", True),
+        (f"{PUBLIC_URL}/x/healthz", True),
+        (f"{PUBLIC_URL}/mcp", True),
+    ],
+)
+def test_only_the_liveness_probe_is_left_untraced(url: str, traced: bool) -> None:
+    # Given the exclusion the middleware is given, read as it reads it
+    util_http = pytest.importorskip("opentelemetry.util.http")
+    excluded = util_http.ExcludeList([UNTRACED_URLS])
+
+    # Then exactly the probe's URL is left out
+    assert excluded.url_disabled(url) is not traced
+
+
+def refuse_connection_string(connection_string: str) -> None:
+    """What Azure Monitor does with a connection string it cannot parse."""
+    raise ValueError("Invalid connection string")
+
+
+def test_a_malformed_connection_string_leaves_the_server_serving(
+    google: FakeGoogle, store: MemoryAuthStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Given the tracing packages, and a connection string Azure Monitor refuses
+    pytest.importorskip("opentelemetry.instrumentation.asgi")
+    app = create_app(settings(), store=store, identity=google)
+
+    # When the app is instrumented
+    with caplog.at_level("WARNING", logger="uvicorn.error"):
+        switched_on = instrument(
+            app,
+            {TELEMETRY_CONNECTION_STRING: "garbage"},
+            export=refuse_connection_string,
+        )
+
+    # Then it runs untraced, says why, and still answers
+    assert not switched_on
+    assert "Invalid connection string" in caplog.text
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        assert client.get("/healthz").status_code == 200
+
+
+def test_missing_tracing_packages_leave_the_server_serving(
+    google: FakeGoogle,
+    store: MemoryAuthStore,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given an install without the tracing packages, whatever this one has
+    monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.asgi", None)
+    app = create_app(settings(), store=store, identity=google)
+    exported: list[str] = []
+
+    # When the app is told to send traces
+    with caplog.at_level("WARNING", logger="uvicorn.error"):
+        switched_on = instrument(
+            app,
+            {TELEMETRY_CONNECTION_STRING: "InstrumentationKey=x"},
+            export=exported.append,
+        )
+
+    # Then it runs untraced, says why, and still answers
+    assert not switched_on
+    assert exported == []
+    assert "opentelemetry.instrumentation.asgi" in caplog.text
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        assert client.get("/healthz").status_code == 200

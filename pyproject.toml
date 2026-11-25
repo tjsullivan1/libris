@@ -1,6 +1,6 @@
 [project]
 name = "libris"
-version = "0.22.0"
+version = "0.23.0"
 description = "A simple CLI tool to track your reading list in Obsidian"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -46,6 +46,10 @@ hosted = [
     # Seals client secrets at rest (ADR 0035). Also arrives through pyjwt[crypto],
     # but oauth.py imports it directly, so it is declared rather than inherited.
     "cryptography>=43",
+    # Exports to Application Insights (#179). The MCP SDK already opens a span
+    # per tool call; this sends it somewhere, under the HTTP request it came in.
+    "azure-monitor-opentelemetry>=1.6",
+    "opentelemetry-instrumentation-asgi>=0.50b0",
 ]
 
 [dependency-groups]

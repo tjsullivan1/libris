@@ -14,11 +14,13 @@ Run it the way the container does:
     uvicorn --factory libris.hosted:create_app_from_env --host 0.0.0.0 --port 8000
 """
 
+import logging
 import os
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from mcp.server.auth.settings import (
     AuthSettings,
@@ -288,6 +290,125 @@ def create_app(
     return app
 
 
+# Set by the Container App when Application Insights exists (#179).
+TELEMETRY_CONNECTION_STRING = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+
+# The liveness probe asks every few seconds while a replica runs. Tracing it
+# would bill for thousands of identical requests a day and bury the real ones.
+# A regex, searched for in the request's full URL (`https://host/healthz`), so
+# it is anchored on the scheme rather than with a bare `^/healthz` - which
+# would match nothing - and ends at the path, so `/healthz2` is still traced
+# (#222 review).
+UNTRACED_URLS = r"^https?://[^/]+/healthz$"
+
+# Uvicorn's own logger: it reaches the container's stdout, and so Log
+# Analytics, whether or not tracing works.
+_STARTUP_LOG = logging.getLogger("uvicorn.error")
+
+
+# Where a request span keeps its URL, in the old semantic conventions and the
+# stable ones.
+_URL_ATTRIBUTES = ("http.url", "http.target", "url.full")
+
+
+def drop_query_strings(span: Any, scope: Scope) -> None:
+    """Keep a request's query string out of its span.
+
+    The sign-in carries credentials there: Google's callback brings an
+    authorization code as `?code=`, `/authorize` a PKCE challenge and the
+    client's state, and the consent page the pending sign-in's ID (#222
+    review). The path says which endpoint was called, and that is all a trace
+    needs.
+
+    Args:
+        span: The request span, already holding the URL attributes.
+        scope: The ASGI scope. Unused; the hook's signature requires it.
+    """
+    attributes = getattr(span, "attributes", None) or {}
+    for name in _URL_ATTRIBUTES:
+        value = attributes.get(name)
+        if isinstance(value, str) and "?" in value:
+            span.set_attribute(name, value.split("?", 1)[0])
+    if "url.query" in attributes:
+        span.set_attribute("url.query", "")
+
+
+def export_to_azure_monitor(connection_string: str) -> None:
+    """Send traces and the `libris` logs to Application Insights.
+
+    Signs in as the app's managed identity: the Application Insights resource
+    refuses its ingestion key (ADR 0006), so the connection string only says
+    where to send, not who may.
+    """
+    from azure.identity import DefaultAzureCredential
+    from azure.monitor.opentelemetry import configure_azure_monitor
+
+    configure_azure_monitor(
+        connection_string=connection_string,
+        credential=DefaultAzureCredential(),
+        # The root logger would also take the Azure SDK's own HTTP logging,
+        # billed by the gigabyte. Container stdout reaches Log Analytics anyway.
+        logger_name="libris",
+        enable_live_metrics=False,
+    )
+
+
+def instrument(
+    app: Starlette,
+    environ: Mapping[str, str] | None = None,
+    *,
+    export: Callable[[str], None] = export_to_azure_monitor,
+) -> bool:
+    """Trace each request, when the environment says where to send traces.
+
+    The MCP SDK opens a span for every tool call by itself (`tools/call
+    find_book`); this gives those spans an exporter and wraps each in the HTTP
+    request it arrived on, so a call can be found by tool name and its status
+    and duration read beside it. Added outermost, so a request refused before
+    it reaches the SDK, such as a 429 from the registration limit, is traced
+    too.
+
+    Args:
+        app: The hosted app.
+        environ: Where to look for the connection string. Defaults to the
+            process environment.
+        export: Points OpenTelemetry at its destination. Replaced in tests.
+
+    Tracing is the one part of the server it can do without. If it cannot be
+    switched on - the packages are missing, or the connection string is
+    malformed - the server says so in its log and serves the Library untraced,
+    rather than refusing to start over its telemetry (#222 review).
+
+    Returns:
+        Whether tracing was switched on.
+    """
+    env = os.environ if environ is None else environ
+    connection_string = env.get(TELEMETRY_CONNECTION_STRING)
+    if not connection_string:
+        return False
+    try:
+        from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+
+        export(connection_string)
+    except (ImportError, ValueError) as exc:
+        _STARTUP_LOG.warning(
+            "%s is set, but tracing could not start, so requests are not traced: %s",
+            TELEMETRY_CONNECTION_STRING,
+            exc,
+        )
+        return False
+    app.add_middleware(
+        OpenTelemetryMiddleware,
+        excluded_urls=UNTRACED_URLS,
+        # One span per ASGI message would triple the count for nothing.
+        exclude_spans=["receive", "send"],
+        server_request_hook=drop_query_strings,
+    )
+    return True
+
+
 def create_app_from_env() -> Starlette:
     """The app as the container runs it, configured from its environment."""
-    return create_app(HostedSettings.from_env())
+    app = create_app(HostedSettings.from_env())
+    instrument(app)
+    return app

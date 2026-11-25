@@ -1,3 +1,8 @@
+output "application_insights" {
+  description = "Where a request or tool call can be looked up (infra/README.md)."
+  value       = azurerm_application_insights.main.name
+}
+
 output "mcp_url" {
   description = "What to paste into Claude and Gemini as the connector URL."
   value       = "${local.public_url}/mcp"

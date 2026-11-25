@@ -20,6 +20,10 @@ from .config import get_api_key
 
 logger = logging.getLogger(__name__)
 
+# Google's APIs take a key in this header as well as in `?key=`, and a header
+# is not copied into URLs, errors, traces or logs.
+API_KEY_HEADER = "X-goog-api-key"
+
 
 def _default_rate_limit_notice(
     wait_seconds: float, attempt: int, max_retries: int
@@ -181,24 +185,28 @@ class GoogleBooksClient:
         self.on_rate_limit(wait_time, attempt + 1, self.max_retries)
         time.sleep(wait_time)
 
-    def _identifying_params(self) -> dict:
-        """Build the params that say who is asking.
+    def _identity(self) -> tuple[dict[str, str], dict[str, str]]:
+        """Say who is asking, as query params and headers.
+
+        The API key goes in a header, never the URL. A URL is copied into
+        every error httpx raises, every trace span (#179) and every log line
+        that prints one, and `find_book` once handed a failed lookup's error,
+        key and all, back to the agent that called it (#222 review).
 
         Returns:
-            The API key when one is configured, and otherwise a `quotaUser` so
-            an unauthenticated caller is rate limited on its own account rather
-            than against every anonymous user of the API.
+            The params and headers to send: the API key when one is
+            configured, and otherwise a `quotaUser`, so an unauthenticated
+            caller is rate limited on its own account rather than against every
+            anonymous user of the API.
         """
-        params: dict = {}
         api_key = get_api_key()
         if api_key:
-            params["key"] = api_key
-            return params
+            return {}, {API_KEY_HEADER: api_key}
         try:
-            params["quotaUser"] = socket.gethostname()
+            return {"quotaUser": socket.gethostname()}, {}
         except OSError:
             logger.debug("Could not determine hostname for quotaUser.")
-        return params
+            return {}, {}
 
     def _get(self, url: str, params: dict) -> dict:
         """Fetch one URL, retrying what is worth retrying.
@@ -220,9 +228,10 @@ class GoogleBooksClient:
         """
         import httpx
 
-        params = {**params, **self._identifying_params()}
+        identifying_params, headers = self._identity()
+        params = {**params, **identifying_params}
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout, headers=headers) as client:
             for attempt in range(self.max_retries + 1):
                 try:
                     response = client.get(url, params=params)

@@ -56,6 +56,7 @@ deploys on its own ([Deploying](#deploying)).
    suffix              = "<suffix>"
    owner_object_id     = "<owner_object_id>"
    deploy_principal_id = "<deploy_principal_id>"
+   budget_alert_email  = "<where budget alerts go>"
    ```
 
 3. **Create the Google OAuth client.** In the Google Cloud console, create a project and open
@@ -130,11 +131,13 @@ deploys on its own ([Deploying](#deploying)).
    | `GOOGLE_CLIENT_SECRET` | as in `terraform.tfvars` |
    | `GOOGLE_BOOKS_API_KEY` | as in `terraform.tfvars`, or leave it out to run keyless |
    | `LIBRIS_ALLOWED_GOOGLE_SUB` | the `allowed_google_sub` from step 7 |
+   | `LIBRIS_BUDGET_ALERT_EMAIL` | the `budget_alert_email` from step 2 |
 
    None of these is an Azure credential. The variables are identifiers that grant nothing, and
    they stay variables so the logs stay readable: GitHub masks a secret's value wherever it
-   appears, and the suffix is in every resource name. The Google account ID isn't a credential
-   either, but the repository is public, and so are its logs, which print a variable's value.
+   appears, and the suffix is in every resource name. The Google account ID and the alert address
+   aren't credentials either, but the repository is public, and so are its logs, which print a
+   variable's value.
 
 ## Deploying
 
@@ -147,6 +150,23 @@ Terraform sets the app's image only when it creates the app. Every image after t
 workflow's, so an apply by hand never rolls the app back to `image_tag`. An apply by hand still
 works, with the same `terraform.tfvars`, and reads and writes the same state as the workflow.
 Whichever runs second waits for the other's state lock.
+
+## Upgrading a deployment from before #179
+
+#179 added Application Insights and a budget, which need two more resource providers, and a
+required `budget_alert_email`. Before the first deploy that includes it:
+
+1. Rerun bootstrap, which registers `Microsoft.Insights` and `Microsoft.Consumption`. The deploy
+   identity can't, because registering is subscription-wide. A provider that's already
+   registered is left as it is.
+
+   ```bash
+   terraform -chdir=infra/bootstrap apply -var suffix=<suffix>
+   ```
+
+2. Add `budget_alert_email` to `infra/terraform.tfvars`, and as the `LIBRIS_BUDGET_ALERT_EMAIL`
+   secret. Without it, `terraform plan` stops and asks for it, and the workflow, which can't be
+   asked, fails.
 
 ## Moving an existing deployment onto the pipeline
 
@@ -205,6 +225,78 @@ applies to the `uv sync`. If it fails that way, stop the MCP server and run it a
 Without `LIBRIS_COSMOS_ENDPOINT`, clients, tokens and sign-ins are kept in memory and lost on
 restart, and there is no Library: the tools answer that the endpoint is not set.
 
+## Finding a request
+
+Every request and every tool call is traced to Application Insights
+(`terraform output -raw application_insights`). Each tool call is a span named for the tool,
+such as `tools/call find_book`, inside the `POST /mcp` request it arrived on. A tool that
+answered with an error carries `error.type = tool_error`. The liveness probe is not traced.
+
+In the portal, open the Application Insights resource, then **Transaction search**, and search
+for the tool's name. Or query the workspace from **Logs**:
+
+```kusto
+AppRequests
+| where TimeGenerated > ago(1d) and Name startswith "tools/call"
+| project TimeGenerated, Name, Success, DurationMs, OperationId
+| order by TimeGenerated desc
+```
+
+The SDK's tool span is a server span, so it is a row in `AppRequests` like the `POST /mcp` it
+sits in. The two share an `OperationId`, which also finds any Cosmos call the tool made, in
+`AppDependencies`, along with its Google Books calls.
+
+No query string is recorded. The sign-in carries credentials there: Google's authorization code,
+the PKCE challenge, the pending consent. A request span keeps only its path, and the Google Books
+API key travels in a header rather than the URL, so it doesn't appear in spans, errors or logs.
+uvicorn's access log is off for the same reason.
+
+Telemetry is sent as the app's managed identity: the resource accepts nothing else. The app's
+role on it is created in the same apply that switches tracing on, and a new role takes a minute or
+two to start working, so the first minutes of telemetry after that first apply can be refused.
+
+Container stdout (startup, shutdown, and the MCP SDK's own log lines) still goes to the Log
+Analytics workspace as `ContainerAppConsoleLogs_CL`, and scaling and probe events as
+`ContainerAppSystemLogs_CL`.
+
+The workspace takes at most 0.2 GB a day. One person's traffic is megabytes. If a day's
+ingestion reaches the cap, the rest of that day's telemetry is dropped. That's a sign of a loop,
+not of normal use.
+
+## Cost
+
+A budget on the resource group (`monthly_budget`, $10 by default) emails `budget_alert_email` at
+80% and 100% of actual spend, and when the month is forecast to pass 100%. Set the address in
+`terraform.tfvars` and as the `LIBRIS_BUDGET_ALERT_EMAIL` repository secret. It is a personal
+address and the workflow logs are public, so it is never a variable.
+
+Almost all the spend is the container registry's flat Basic fee, about $5 a month. Everything
+else together came to under $0.05 in October 2026, and the Container App stayed inside the
+monthly free grant. An alert therefore means something changed.
+
+## If Cosmos loses data
+
+Almost nothing in Cosmos needs a backup, because almost all of it lives somewhere else:
+
+| Container | What's in it | Getting it back |
+|---|---|---|
+| `books`, `word_counts` | What `libris sync` pushed from the Shelf | Delete `sync-state.json` from Libris's config directory and run `libris sync`. Every note goes up, and sync rebuilds its record of what Cosmos holds. |
+| `auth` | Registered clients, refresh tokens | Nothing to recover. Each connector signs in again. |
+| `intents` | Adds and updates from Claude that sync hasn't applied yet | Nowhere else. Usually there are none: the scheduled sync applies them. |
+
+So the only loss is the Intents made since the last sync. Asking Claude again is usually
+quicker than any restore.
+
+The account keeps Azure's default periodic backup: one every 4 hours, kept for 8 hours, in
+geo-redundant storage. Restoring from it means opening a support request in the portal
+(**Help + support**, Cosmos DB, restore). It has to be opened within those 8 hours, and Microsoft
+restores into a new account. Copy the `intents` documents you need from that account into the live
+one, then delete it.
+
+Continuous backup, which restores to any second without a ticket, was considered in #179 and left
+out. Switching to it is one-way, it isn't documented as working on serverless accounts, and it
+would protect a few hours of Intents at most.
+
 ## Troubleshooting
 
 **`RequestDisallowedByAzure ... without authenticating through MFA`**. Azure has required MFA for
@@ -220,7 +312,8 @@ repeat the write afterwards; let Terraform create the resource. See
 
 - **One replica.** Enough for one person. Sign-ins are kept in Cosmos, not in memory, so this is a
   cost choice rather than a correctness one (ADR 0035).
-- **Scale to zero.** The first call after an idle period waits for a cold start. #179 measures it.
+- **Scale to zero.** The first call after five idle minutes waits for a cold start of about 30
+  seconds. ADR 0037 has the measurements and why that wait is kept.
 - **The deploy identity is Owner of the app's resource group.** It applies `infra/`, which grants
   roles, and Contributor can't. It holds no role outside that group and the state container.
 - **The state's storage account takes no access keys.** Everyone who reaches the state, CI or a
