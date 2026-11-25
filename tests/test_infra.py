@@ -7,6 +7,8 @@ instead.
 """
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -130,3 +132,24 @@ def test_the_deploy_does_not_hold_owner(source):
 
     # Then none is Owner, which could grant anything to anyone (#234)
     assert "Owner" not in roles
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_terraform_is_checked_out_with_lf_everywhere():
+    # Given every Terraform file the deploy applies
+    files = sorted(path.name for path in INFRA.glob("*.tf"))
+
+    # When git is asked which line endings it checks them out with
+    result = subprocess.run(  # noqa: S603 - fixed arguments, no shell
+        ["git", "check-attr", "eol", "--", *files],  # noqa: S607
+        cwd=INFRA,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    # Then it is LF for each, so a heredoc builds the same string on Windows
+    # as on the deploy runner, and an apply by hand cannot store a value every
+    # later deploy plans to change
+    not_lf = [line for line in result.stdout.splitlines() if not line.endswith(": lf")]
+    assert not not_lf, not_lf
