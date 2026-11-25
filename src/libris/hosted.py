@@ -17,7 +17,7 @@ Run it the way the container does:
 import os
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from mcp.server.auth.settings import (
@@ -288,6 +288,76 @@ def create_app(
     return app
 
 
+# Set by the Container App when Application Insights exists (#179).
+TELEMETRY_CONNECTION_STRING = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+
+# The liveness probe asks every few seconds while a replica runs. Tracing it
+# would bill for thousands of identical requests a day and bury the real ones.
+UNTRACED_PATHS = "/healthz"
+
+
+def export_to_azure_monitor(connection_string: str) -> None:
+    """Send traces and the `libris` logs to Application Insights.
+
+    Signs in as the app's managed identity: the Application Insights resource
+    refuses its ingestion key (ADR 0006), so the connection string only says
+    where to send, not who may.
+    """
+    from azure.identity import DefaultAzureCredential
+    from azure.monitor.opentelemetry import configure_azure_monitor
+
+    configure_azure_monitor(
+        connection_string=connection_string,
+        credential=DefaultAzureCredential(),
+        # The root logger would also take the Azure SDK's own HTTP logging,
+        # billed by the gigabyte. Container stdout reaches Log Analytics anyway.
+        logger_name="libris",
+        enable_live_metrics=False,
+    )
+
+
+def instrument(
+    app: Starlette,
+    environ: Mapping[str, str] | None = None,
+    *,
+    export: Callable[[str], None] = export_to_azure_monitor,
+) -> bool:
+    """Trace each request, when the environment says where to send traces.
+
+    The MCP SDK opens a span for every tool call by itself (`tools/call
+    find_book`); this gives those spans an exporter and wraps each in the HTTP
+    request it arrived on, so a call can be found by tool name and its status
+    and duration read beside it. Added outermost, so a request refused before
+    it reaches the SDK, such as a 429 from the registration limit, is traced
+    too.
+
+    Args:
+        app: The hosted app.
+        environ: Where to look for the connection string. Defaults to the
+            process environment.
+        export: Points OpenTelemetry at its destination. Replaced in tests.
+
+    Returns:
+        Whether tracing was switched on.
+    """
+    env = os.environ if environ is None else environ
+    connection_string = env.get(TELEMETRY_CONNECTION_STRING)
+    if not connection_string:
+        return False
+    from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+
+    export(connection_string)
+    app.add_middleware(
+        OpenTelemetryMiddleware,
+        excluded_urls=UNTRACED_PATHS,
+        # One span per ASGI message would triple the count for nothing.
+        exclude_spans=["receive", "send"],
+    )
+    return True
+
+
 def create_app_from_env() -> Starlette:
     """The app as the container runs it, configured from its environment."""
-    return create_app(HostedSettings.from_env())
+    app = create_app(HostedSettings.from_env())
+    instrument(app)
+    return app

@@ -32,7 +32,13 @@ from starlette.testclient import TestClient  # noqa: E402
 from libris import service  # noqa: E402
 from libris.api import BookCandidate  # noqa: E402
 from libris.cosmos_store import CosmosStore, push_shelf  # noqa: E402
-from libris.hosted import HostedConfigError, HostedSettings, create_app  # noqa: E402
+from libris.hosted import (  # noqa: E402
+    TELEMETRY_CONNECTION_STRING,
+    HostedConfigError,
+    HostedSettings,
+    create_app,
+    instrument,
+)
 from libris.intents import IntentQueue  # noqa: E402
 from libris.markdown import create_book_note  # noqa: E402
 from libris.oauth import (  # noqa: E402
@@ -1752,3 +1758,104 @@ def test_with_no_cosmos_configured_a_search_says_what_is_missing(
     # Then the tool names the setting, rather than failing as a server error
     assert result["isError"]
     assert "LIBRIS_COSMOS_ENDPOINT" in result["content"][0]["text"]
+
+
+# Telemetry (#179) -------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def span_exporter():
+    """Every span the process records, kept in memory.
+
+    OpenTelemetry takes one global tracer provider per process, and the MCP SDK
+    traces through it, so it is installed once here and cleared per test.
+    """
+    sdk_trace = pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = sdk_trace.TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    assert trace.get_tracer_provider() is provider, "another provider was set first"
+    return exporter
+
+
+@pytest.fixture
+def spans(span_exporter):
+    span_exporter.clear()
+    return span_exporter
+
+
+@pytest.fixture
+def traced_client(
+    google: FakeGoogle, store: MemoryAuthStore, library: CosmosStore
+) -> Iterator[tuple[TestClient, list[str]]]:
+    """A hosted app told where to send traces, and the destinations it was given."""
+    app = create_app(settings(), store=store, identity=google, library=library)
+    exported: list[str] = []
+    instrument(
+        app,
+        {TELEMETRY_CONNECTION_STRING: "InstrumentationKey=fake"},
+        export=exported.append,
+    )
+    with TestClient(app, base_url=PUBLIC_URL) as test_client:
+        yield test_client, exported
+
+
+def test_a_tool_call_is_traced_by_name_inside_its_request(
+    traced_client: tuple[TestClient, list[str]], spans
+) -> None:
+    # Given a signed-in client of an app that sends its traces somewhere
+    client, exported = traced_client
+    _, issued = tokens(client)
+    spans.clear()
+
+    # When it calls a tool
+    call_tool(client, issued["access_token"], "search_library", {"query": "mistborn"})
+
+    # Then the traces went where the environment said
+    assert exported == ["InstrumentationKey=fake"]
+    # And the call is a span named for its tool...
+    finished = spans.get_finished_spans()
+    tool_spans = [s for s in finished if s.name == "tools/call search_library"]
+    assert len(tool_spans) == 1, [s.name for s in finished]
+    tool_span = tool_spans[0]
+    assert tool_span.attributes["gen_ai.tool.name"] == "search_library"
+    # ...inside the HTTP request it arrived on, so status and duration sit beside it
+    assert tool_span.parent is not None, "the tool span stands alone"
+    parents = [s for s in finished if s.context.span_id == tool_span.parent.span_id]
+    assert [s.name for s in parents] == ["POST /mcp"]
+    assert parents[0].attributes["http.status_code"] == 200
+
+
+def test_the_liveness_probe_is_not_traced(
+    traced_client: tuple[TestClient, list[str]], spans
+) -> None:
+    # Given an app that sends its traces somewhere
+    client, _ = traced_client
+
+    # When the liveness probe asks after it
+    assert client.get("/healthz").status_code == 200
+
+    # Then nothing is recorded for it
+    assert spans.get_finished_spans() == ()
+
+
+def test_without_a_connection_string_nothing_is_traced(
+    google: FakeGoogle, store: MemoryAuthStore
+) -> None:
+    # Given an app whose environment names no Application Insights
+    app = create_app(settings(), store=store, identity=google)
+    exported: list[str] = []
+
+    # When it is instrumented
+    switched_on = instrument(app, {}, export=exported.append)
+
+    # Then tracing stays off and nothing is exported
+    assert not switched_on
+    assert exported == []

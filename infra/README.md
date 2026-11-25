@@ -205,6 +205,120 @@ applies to the `uv sync`. If it fails that way, stop the MCP server and run it a
 Without `LIBRIS_COSMOS_ENDPOINT`, clients, tokens and sign-ins are kept in memory and lost on
 restart, and there is no Library: the tools answer that the endpoint is not set.
 
+## Finding a request
+
+Every request and every tool call is traced to Application Insights
+(`terraform output -raw application_insights`). Each tool call is a span named for the tool,
+such as `tools/call find_book`, inside the `POST /mcp` request it arrived on. A tool that
+answered with an error carries `error.type = tool_error`. The liveness probe is not traced.
+
+In the portal, open the Application Insights resource, then **Transaction search**, and search
+for the tool's name. Or query the workspace from **Logs**:
+
+```kusto
+AppRequests
+| where TimeGenerated > ago(1d) and Name startswith "tools/call"
+| project TimeGenerated, Name, Success, DurationMs, OperationId
+| order by TimeGenerated desc
+```
+
+The SDK's tool span is a server span, so it is a row in `AppRequests` like the `POST /mcp` it
+sits in. The two share an `OperationId`, which also finds any Cosmos call the tool made, in
+`AppDependencies`.
+
+Telemetry is sent as the app's managed identity: the resource accepts nothing else. The app's
+role on it is created in the same apply that switches tracing on, and a new role takes a minute or
+two to start working, so the first minutes of telemetry after that first apply can be refused.
+
+Container stdout, including uvicorn's access log, still goes to the Log Analytics workspace as
+`ContainerAppConsoleLogs_CL`, and scaling and probe events as `ContainerAppSystemLogs_CL`.
+
+The workspace takes at most 0.2 GB a day. One person's traffic is megabytes. If a day's
+ingestion reaches the cap, the rest of that day's telemetry is dropped. That's a sign of a loop,
+not of normal use.
+
+## Cost
+
+A budget on the resource group (`monthly_budget`, $10 by default) emails `budget_alert_email` at
+80% and 100% of actual spend, and when the month is forecast to pass 100%. Set the address in
+`terraform.tfvars` and as the `LIBRIS_BUDGET_ALERT_EMAIL` repository secret. It is a personal
+address and the workflow logs are public, so it is never a variable.
+
+Almost all the spend is the container registry's flat Basic fee, about $5 a month. Everything
+else together came to under $0.05 in October 2026, and the Container App stayed inside the
+monthly free grant. An alert therefore means something changed.
+
+## Restoring Cosmos
+
+Cosmos keeps continuous backup for 7 days (`Continuous7Days`): any second in the last week can
+be restored. Backups cost nothing in this tier. A restore is billed once, at about $0.15 a GB.
+A restore always creates a **new** account; it never rewinds the live one.
+
+First, decide whether you need one. What Cosmos holds, and where else it lives:
+
+| Container | What's in it | Without a restore |
+|---|---|---|
+| `books`, `word_counts` | What `libris sync` pushed | Delete `sync-state.json` from Libris's config directory and run `libris sync`. Every note goes up, and sync rebuilds its record of what Cosmos holds. |
+| `auth` | Registered clients, refresh tokens | Connectors sign in again. Nothing else is lost. |
+| `intents` | Adds and updates from Claude that sync hasn't applied yet | **Nothing else holds these.** This is what a restore is for. |
+
+To restore:
+
+1. Find the restorable account and the moment to go back to. A deleted account is listed too,
+   for as long as its backups last:
+
+   ```bash
+   az cosmosdb restorable-database-account list --account-name cosmos-libris-<suffix>
+   ```
+
+2. Restore into a side account. Keep it off the public network. Leave TTL on, so expired
+   refresh tokens stay expired:
+
+   ```bash
+   az cosmosdb restore \
+     --resource-group rg-libris-<suffix> \
+     --account-name cosmos-libris-<suffix> \
+     --target-database-account-name cosmos-libris-<suffix>-r \
+     --restore-timestamp 2026-11-25T14:00:00Z \
+     --location eastus2 \
+     --public-network-access Disabled
+   ```
+
+   It takes minutes to tens of minutes. The side account isn't in Terraform; it's yours to
+   delete.
+
+3. Role assignments aren't restored, so grant yourself data access to the side account. Then
+   open its network to your own IP for the copy:
+
+   ```bash
+   az cosmosdb sql role assignment create \
+     --resource-group rg-libris-<suffix> --account-name cosmos-libris-<suffix>-r \
+     --role-definition-id 00000000-0000-0000-0000-000000000002 \
+     --principal-id "$(az ad signed-in-user show --query id -o tsv)" --scope /
+   az cosmosdb update -g rg-libris-<suffix> -n cosmos-libris-<suffix>-r \
+     --public-network-access Enabled --ip-range-filter "$(curl -s https://api.ipify.org)"
+   ```
+
+4. Copy back the documents you need, usually the pending Intents, with the `sync` extra's SDK:
+
+   ```python
+   from azure.cosmos import CosmosClient
+   from azure.identity import DefaultAzureCredential
+
+   cred = DefaultAzureCredential()
+   side = CosmosClient("https://cosmos-libris-<suffix>-r.documents.azure.com:443/", cred)
+   live = CosmosClient("https://cosmos-libris-<suffix>.documents.azure.com:443/", cred)
+   source = side.get_database_client("libris").get_container_client("intents")
+   target = live.get_database_client("libris").get_container_client("intents")
+   for doc in source.read_all_items():
+       target.upsert_item({k: v for k, v in doc.items() if not k.startswith("_")})
+   ```
+
+5. Delete the side account: `az cosmosdb delete -g rg-libris-<suffix> -n cosmos-libris-<suffix>-r`.
+
+Moving the app onto a restored account instead isn't worth it. Its name comes from the suffix,
+so Terraform would have to import it, and copying is a few lines.
+
 ## Troubleshooting
 
 **`RequestDisallowedByAzure ... without authenticating through MFA`**. Azure has required MFA for
@@ -220,7 +334,8 @@ repeat the write afterwards; let Terraform create the resource. See
 
 - **One replica.** Enough for one person. Sign-ins are kept in Cosmos, not in memory, so this is a
   cost choice rather than a correctness one (ADR 0035).
-- **Scale to zero.** The first call after an idle period waits for a cold start. #179 measures it.
+- **Scale to zero.** The first call after five idle minutes waits for a cold start of about 30
+  seconds. ADR 0037 has the measurements and why that wait is kept.
 - **The deploy identity is Owner of the app's resource group.** It applies `infra/`, which grants
   roles, and Contributor can't. It holds no role outside that group and the state container.
 - **The state's storage account takes no access keys.** Everyone who reaches the state, CI or a

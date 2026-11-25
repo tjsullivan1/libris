@@ -1,3 +1,20 @@
+variable "budget_alert_email" {
+  description = "Where the budget alerts go. Kept out of committed files: this repository is public, and so are its workflow logs."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.budget_alert_email))
+    error_message = "budget_alert_email must be an email address."
+  }
+}
+
+variable "monthly_budget" {
+  description = "The monthly spend, in the subscription's currency, that the budget alerts are measured against."
+  type        = number
+  default     = 10
+}
+
 variable "subscription_id" {
   description = "The Azure subscription to deploy into. Leave unset to use ARM_SUBSCRIPTION_ID from the environment."
   type        = string
