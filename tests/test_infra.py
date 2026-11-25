@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 
-MAIN_TF = Path(__file__).resolve().parent.parent / "infra" / "main.tf"
+# Every file of the configuration the deploy applies, not just main.tf: a grant
+# in a new file is as much the deploy's as one in main.tf. Bootstrap is not
+# here because the owner applies it, never the deploy.
+INFRA = Path(__file__).resolve().parent.parent / "infra"
 
 # The deploy identity's own grants. They are deliberately outside its
 # condition, so it can neither widen them nor lift the condition itself.
@@ -19,14 +22,25 @@ DEPLOY_OWN_GRANTS = {"deploy_builds_group", "deploy_grants_app_roles"}
 
 
 def _role_grants(source: str) -> dict[str, str]:
-    """Map each azurerm_role_assignment block's name to its body."""
-    return dict(
+    """Map each azurerm_role_assignment block's name to its body.
+
+    The parse expects `terraform fmt` layout. Anything it cannot read fails
+    the test rather than being skipped: a loose search counts every
+    declaration, and each must have been parsed. Otherwise a grant the parse
+    missed - one with a hyphen in its name, as Terraform allows (#236 review),
+    or one laid out by hand - would pass every check unread.
+    """
+    grants = dict(
         re.findall(
-            r'^resource "azurerm_role_assignment" "(\w+)" \{\n(.*?)^\}',
+            r'^resource "azurerm_role_assignment" "([^"]+)" \{\n(.*?)^\}',
             source,
             flags=re.MULTILINE | re.DOTALL,
         )
     )
+    declared = re.findall(r'\bresource\s+"azurerm_role_assignment"\s+"([^"]+)"', source)
+    unread = sorted(set(declared) - set(grants))
+    assert not unread, f"Role assignments the test could not read: {unread}"
+    return grants
 
 
 def _attribute(body: str, name: str) -> str:
@@ -47,7 +61,9 @@ def _local_block(source: str, name: str, opener: str, closer: str) -> str:
 
 @pytest.fixture(scope="module")
 def source() -> str:
-    return MAIN_TF.read_text(encoding="utf-8")
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(INFRA.glob("*.tf"))
+    )
 
 
 @pytest.fixture(scope="module")
