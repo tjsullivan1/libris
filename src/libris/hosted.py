@@ -19,6 +19,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from mcp.server.auth.settings import (
     AuthSettings,
@@ -296,6 +297,33 @@ TELEMETRY_CONNECTION_STRING = "APPLICATIONINSIGHTS_CONNECTION_STRING"
 UNTRACED_PATHS = "/healthz"
 
 
+# Where a request span keeps its URL, in the old semantic conventions and the
+# stable ones.
+_URL_ATTRIBUTES = ("http.url", "http.target", "url.full")
+
+
+def drop_query_strings(span: Any, scope: Scope) -> None:
+    """Keep a request's query string out of its span.
+
+    The sign-in carries credentials there: Google's callback brings an
+    authorization code as `?code=`, `/authorize` a PKCE challenge and the
+    client's state, and the consent page the pending sign-in's ID (#222
+    review). The path says which endpoint was called, and that is all a trace
+    needs.
+
+    Args:
+        span: The request span, already holding the URL attributes.
+        scope: The ASGI scope. Unused; the hook's signature requires it.
+    """
+    attributes = getattr(span, "attributes", None) or {}
+    for name in _URL_ATTRIBUTES:
+        value = attributes.get(name)
+        if isinstance(value, str) and "?" in value:
+            span.set_attribute(name, value.split("?", 1)[0])
+    if "url.query" in attributes:
+        span.set_attribute("url.query", "")
+
+
 def export_to_azure_monitor(connection_string: str) -> None:
     """Send traces and the `libris` logs to Application Insights.
 
@@ -352,6 +380,7 @@ def instrument(
         excluded_urls=UNTRACED_PATHS,
         # One span per ASGI message would triple the count for nothing.
         exclude_spans=["receive", "send"],
+        server_request_hook=drop_query_strings,
     )
     return True
 

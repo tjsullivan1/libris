@@ -23,4 +23,7 @@ USER libris
 EXPOSE 8000
 # The Container App's ingress terminates TLS and forwards to this port, so the
 # proxy headers are trusted to say the request arrived over https.
-CMD ["uvicorn", "--factory", "libris.hosted:create_app_from_env", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# No access log: it prints each request line, query string and all, and the
+# sign-in carries an authorization code there. Requests are traced to
+# Application Insights instead, without their query strings (#179).
+CMD ["uvicorn", "--factory", "libris.hosted:create_app_from_env", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]

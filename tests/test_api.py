@@ -143,3 +143,58 @@ def test_an_upstream_failure_is_raised_rather_than_swallowed():
         # proceed on nothing.
         with pytest.raises(httpx.HTTPStatusError):
             client.get_volume("dune-1")
+
+
+# --- the API key stays out of URLs (#222 review) ---
+
+
+@pytest.fixture
+def google_books_requests(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
+    """Every request the client sends, each answered 403 Forbidden."""
+    sent: list[httpx.Request] = []
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(403, request=request)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(refuse), **kwargs),
+    )
+    return sent
+
+
+def test_the_api_key_travels_in_a_header_and_never_in_the_url(
+    monkeypatch: pytest.MonkeyPatch, google_books_requests: list[httpx.Request]
+) -> None:
+    # Given a configured API key
+    monkeypatch.setenv("LIBRIS_GOOGLE_BOOKS_API_KEY", "SECRET-KEY")
+
+    # When a search is refused by Google
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        GoogleBooksClient().search("Dune")
+
+    # Then the key went in the header Google reads it from
+    (request,) = google_books_requests
+    assert request.headers["X-goog-api-key"] == "SECRET-KEY"
+    # And not in the URL, so not in the error a tool hands back to its caller
+    assert "SECRET-KEY" not in str(request.url)
+    assert "SECRET-KEY" not in str(raised.value)
+
+
+def test_without_a_key_the_caller_is_named_by_quota_user(
+    monkeypatch: pytest.MonkeyPatch, google_books_requests: list[httpx.Request]
+) -> None:
+    # Given no API key anywhere
+    monkeypatch.delenv("LIBRIS_GOOGLE_BOOKS_API_KEY", raising=False)
+
+    # When a search is sent
+    with pytest.raises(httpx.HTTPStatusError):
+        GoogleBooksClient().search("Dune")
+
+    # Then it carries a quotaUser and no key header
+    (request,) = google_books_requests
+    assert request.url.params.get("quotaUser")
+    assert "X-goog-api-key" not in request.headers

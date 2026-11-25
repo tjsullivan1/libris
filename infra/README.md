@@ -56,6 +56,7 @@ deploys on its own ([Deploying](#deploying)).
    suffix              = "<suffix>"
    owner_object_id     = "<owner_object_id>"
    deploy_principal_id = "<deploy_principal_id>"
+   budget_alert_email  = "<where budget alerts go>"
    ```
 
 3. **Create the Google OAuth client.** In the Google Cloud console, create a project and open
@@ -130,11 +131,13 @@ deploys on its own ([Deploying](#deploying)).
    | `GOOGLE_CLIENT_SECRET` | as in `terraform.tfvars` |
    | `GOOGLE_BOOKS_API_KEY` | as in `terraform.tfvars`, or leave it out to run keyless |
    | `LIBRIS_ALLOWED_GOOGLE_SUB` | the `allowed_google_sub` from step 7 |
+   | `LIBRIS_BUDGET_ALERT_EMAIL` | the `budget_alert_email` from step 2 |
 
    None of these is an Azure credential. The variables are identifiers that grant nothing, and
    they stay variables so the logs stay readable: GitHub masks a secret's value wherever it
-   appears, and the suffix is in every resource name. The Google account ID isn't a credential
-   either, but the repository is public, and so are its logs, which print a variable's value.
+   appears, and the suffix is in every resource name. The Google account ID and the alert address
+   aren't credentials either, but the repository is public, and so are its logs, which print a
+   variable's value.
 
 ## Deploying
 
@@ -147,6 +150,23 @@ Terraform sets the app's image only when it creates the app. Every image after t
 workflow's, so an apply by hand never rolls the app back to `image_tag`. An apply by hand still
 works, with the same `terraform.tfvars`, and reads and writes the same state as the workflow.
 Whichever runs second waits for the other's state lock.
+
+## Upgrading a deployment from before #179
+
+#179 added Application Insights and a budget, which need two more resource providers, and a
+required `budget_alert_email`. Before the first deploy that includes it:
+
+1. Rerun bootstrap, which registers `Microsoft.Insights` and `Microsoft.Consumption`. The deploy
+   identity can't, because registering is subscription-wide. A provider that's already
+   registered is left as it is.
+
+   ```bash
+   terraform -chdir=infra/bootstrap apply -var suffix=<suffix>
+   ```
+
+2. Add `budget_alert_email` to `infra/terraform.tfvars`, and as the `LIBRIS_BUDGET_ALERT_EMAIL`
+   secret. Without it, `terraform plan` stops and asks for it, and the workflow, which can't be
+   asked, fails.
 
 ## Moving an existing deployment onto the pipeline
 
@@ -224,14 +244,20 @@ AppRequests
 
 The SDK's tool span is a server span, so it is a row in `AppRequests` like the `POST /mcp` it
 sits in. The two share an `OperationId`, which also finds any Cosmos call the tool made, in
-`AppDependencies`.
+`AppDependencies`, along with its Google Books calls.
+
+No query string is recorded. The sign-in carries credentials there: Google's authorization code,
+the PKCE challenge, the pending consent. A request span keeps only its path, and the Google Books
+API key travels in a header rather than the URL, so it doesn't appear in spans, errors or logs.
+uvicorn's access log is off for the same reason.
 
 Telemetry is sent as the app's managed identity: the resource accepts nothing else. The app's
 role on it is created in the same apply that switches tracing on, and a new role takes a minute or
 two to start working, so the first minutes of telemetry after that first apply can be refused.
 
-Container stdout, including uvicorn's access log, still goes to the Log Analytics workspace as
-`ContainerAppConsoleLogs_CL`, and scaling and probe events as `ContainerAppSystemLogs_CL`.
+Container stdout (startup, shutdown, and the MCP SDK's own log lines) still goes to the Log
+Analytics workspace as `ContainerAppConsoleLogs_CL`, and scaling and probe events as
+`ContainerAppSystemLogs_CL`.
 
 The workspace takes at most 0.2 GB a day. One person's traffic is megabytes. If a day's
 ingestion reaches the cap, the rest of that day's telemetry is dropped. That's a sign of a loop,

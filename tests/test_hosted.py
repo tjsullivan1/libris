@@ -1859,3 +1859,27 @@ def test_without_a_connection_string_nothing_is_traced(
     # Then tracing stays off and nothing is exported
     assert not switched_on
     assert exported == []
+
+
+def test_a_sign_in_leaves_no_query_string_in_its_traces(
+    traced_client: tuple[TestClient, list[str]], spans
+) -> None:
+    # Given an app that sends its traces somewhere
+    client, _ = traced_client
+
+    # When a client signs in, which carries Google's code in a query string
+    tokens(client)
+
+    # Then each sign-in step is traced by its path alone
+    finished = spans.get_finished_spans()
+    urls = {s.name: s.attributes.get("http.url") for s in finished}
+    assert urls["GET /oauth/google/callback"] == f"{PUBLIC_URL}/oauth/google/callback"
+    assert urls["GET /authorize"] == f"{PUBLIC_URL}/authorize"
+    # And no attribute of any span holds a query string
+    leaked = [
+        (s.name, name, value)
+        for s in finished
+        for name, value in s.attributes.items()
+        if isinstance(value, str) and ("?" in value or "code=" in value)
+    ]
+    assert leaked == []
