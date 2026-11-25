@@ -39,6 +39,7 @@ from libris.hosted import (  # noqa: E402
     HostedConfigError,
     HostedSettings,
     create_app,
+    create_app_from_env,
     instrument,
 )
 from libris.intents import IntentQueue  # noqa: E402
@@ -1963,3 +1964,49 @@ def test_missing_tracing_packages_leave_the_server_serving(
     assert "opentelemetry.instrumentation.asgi" in caplog.text
     with TestClient(app, base_url=PUBLIC_URL) as client:
         assert client.get("/healthz").status_code == 200
+
+
+@pytest.fixture
+def azure_log_level() -> Iterator[None]:
+    """Put the `azure` logger's level back after a test changes it."""
+    import logging
+
+    logger = logging.getLogger("azure")
+    before = logger.level
+    yield
+    logger.setLevel(before)
+
+
+def test_the_container_keeps_azure_sdk_chatter_out_of_its_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    azure_log_level: None,
+) -> None:
+    # Given the environment the container runs with, at the MCP SDK's INFO level
+    for name, value in {
+        "LIBRIS_PUBLIC_URL": PUBLIC_URL,
+        "LIBRIS_GOOGLE_CLIENT_ID": "google-client",
+        "LIBRIS_GOOGLE_CLIENT_SECRET": "google-secret",
+        "LIBRIS_TOKEN_SIGNING_KEY": SIGNING_KEY,
+    }.items():
+        monkeypatch.setenv(name, value)
+    for name in ("LIBRIS_COSMOS_ENDPOINT", TELEMETRY_CONNECTION_STRING):
+        monkeypatch.delenv(name, raising=False)
+
+    # When the app is built as the container builds it, and the SDKs then log
+    with caplog.at_level("INFO"):
+        create_app_from_env()
+        import logging
+
+        logging.getLogger("azure.identity._credentials.chained").info("token acquired")
+        logging.getLogger("azure.core.pipeline.policies.http_logging_policy").info(
+            "Request URL: ..."
+        )
+        logging.getLogger("azure.monitor.opentelemetry.exporter").warning(
+            "Transmission failed"
+        )
+
+    # Then their routine INFO lines are dropped, and their warnings kept
+    assert "token acquired" not in caplog.text
+    assert "Request URL" not in caplog.text
+    assert "Transmission failed" in caplog.text
