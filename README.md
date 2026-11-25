@@ -277,9 +277,9 @@ Because sync usually runs unattended, it also keeps a note called `Libris sync.m
 Get the server's URL from `terraform -chdir=infra output -raw mcp_url`, then add it as a custom connector:
 
 - **Claude**: **Customize → Connectors → Add custom connector** on Free, Pro or Max. On Team or Enterprise, an Owner adds it under **Organization settings → Connectors**. When asked about the OAuth client, choose **Register automatically**, and leave the client ID and secret empty.
-- **Gemini** (untested, #180): **Settings → Connected apps → Add a custom app** at gemini.google.com, with the same URL.
+- **Gemini**: **Settings → Personal Intelligence → Connected Apps → + Custom** at gemini.google.com, with the same URL. It registers itself, so there is no client ID or secret to enter. It needs a personal Google account in the US.
 
-Either one sends you to sign in with Google, and only the account the server was deployed for gets in. Deploying the server, and finding that account's ID, is covered in [infra/README.md](infra/README.md#first-deployment). After the first deployment, every merge to `main` redeploys it.
+Either one sends you to sign in with Google, and only the account the server was deployed for gets in. Connect while the server is awake (open its `/healthz` first): it sleeps when idle, takes about 30 seconds to wake, and Claude gives up on a connection after 10. Deploying the server, and finding that account's ID, is covered in [infra/README.md](infra/README.md#first-deployment). After the first deployment, every merge to `main` redeploys it.
 
 ## Browser extension
 

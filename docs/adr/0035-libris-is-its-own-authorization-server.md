@@ -141,7 +141,30 @@ That registration was the request that woke the app from zero, and Claude allows
 so a cold start is the likely cause. It is not proven, because the attempt that succeeded reached an
 instance that was already running. #179 owns the measurement and the `min_replicas` decision.
 
-Gemini was not tested. The design does not depend on it, but whether Gemini's custom apps accept this
-server is still open.
+## Gemini (#180, 2026-11-25)
+
+Gemini's consumer app accepts this server unchanged. It was added under **Settings → Personal
+Intelligence → Connected Apps → + Custom** on a personal Google account, with the app already
+awake. Application Insights recorded the whole chain this ADR was written to serve:
+
+1. `HEAD /mcp` and `POST /mcp` answered `401`. Gemini followed them to the protected resource
+   metadata and the authorization server metadata.
+2. `POST /register` gave `201`. Gemini registers through DCR as a confidential client
+   (`client_secret_post`) named "Google", so it never fell back to asking for a client ID.
+3. `/authorize`, the consent page, Google and `/token`, each once, with no failures.
+4. Tool calls: `search_library` 8 times, `find_book` 12, and `add_book` 6. A `libris sync` then
+   applied all six adds to the Shelf.
+
+**Its callback host is `oauth-redirect.googleusercontent.com`.** The registered client lists six
+redirect URIs: that host and its `-test` and `-sandbox` variants, each under `/r/` and `/a/`,
+ending in a per-user path such as `user_bound_custom-mcp-<id>`. Libris needs none of this in
+advance, because DCR hands it over. It's recorded so a refused redirect can be recognised.
+
+Gemini behaves differently from Claude in one way. It opens a `GET /mcp` stream with each session,
+and the server holds it for about 300 s. That keeps the replica awake about five minutes past
+the last call, which matters only to the cold-start arithmetic in ADR 0037.
+
+Gemini's timeout for a registration that wakes the app was not measured. Connect while the app is
+warm, as with Claude (infra/README.md).
 
 Amended by ADR 0036: Libris keeps this provider rather than move to FastMCP's OAuthProxy, and adds a Client ID Metadata Document only when a client needs one.
