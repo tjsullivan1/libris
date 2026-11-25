@@ -60,7 +60,16 @@ installed editable. Use it. Killing the MCP server also works, at the cost of th
 applies: CI syncs cleanly, so a missing dependency surfaces there rather than being hidden.
 
 `libris` on your PATH is a `uv tool` snapshot, not the working tree. It goes stale silently:
-after landing a change, `uv tool install . --force --no-cache` from the repo root refreshes it.
+after landing a change, `uv tool install ".[sync]" --force --no-cache` from the repo root
+refreshes it.
+
+Keep `[sync]`. `uv tool install` replaces the tool's extras with exactly the ones it is given,
+and the scheduled `Libris sync` task runs this installed copy. A bare `uv tool install .`
+installs no extras, so every run after it fails with "The sync extra is not installed" - in a
+log nobody is watching. That happened: one refresh dropped the extra and the task failed
+from then until someone read `sync.log`. If the installed copy also serves the daemon, name
+every extra it uses: `".[sync,server]"`. The receipt says which it has:
+`cat "$(uv tool dir)/libris/uv-receipt.toml"`.
 
 Keep `--no-cache`. Without it, a reinstall can report "Installed" and put back an older build
 from `uv`'s cache. The obvious cure, `uv cache clean libris`, waits on a cache lock that a
@@ -71,14 +80,14 @@ way:
 
 ```bash
 uv run libris --help                     # the working tree, always current
-uv tool install . --force --no-cache     # refresh the global command
+uv tool install ".[sync]" --force --no-cache   # refresh the global command, keeping sync
 ```
 
 ## Workflow
 
 - **Branching:** Always create a feature branch from `main`. Never commit directly to `main`.
 - **Pre-commit:** Run `uv run ruff check --fix .` (auto-fix lint issues, including import sorting), `uv run ruff format .`, and `uv run pytest` before every commit. Fix any remaining failures. All three are needed: CI lints and checks formatting as separate steps, so a commit that ran only `ruff check` still fails `ruff format --check .`.
-- **Versioning:** Bump `version` in `pyproject.toml` in any PR that changes behaviour a user can see, matching the change's conventional-commit type: `feat:` bumps the minor, `fix:` the patch. This is not bookkeeping. `uv` keys its build cache on the version, so shipping two different builds as the same version means `uv tool install . --force` reports success and installs the older one - which happened, and cost a debugging session before anyone thought to compare the installed file's timestamp. `extension/manifest.json` carries the same version and moves with it: the extension and the daemon ship together and share the `/api/v1` contract, so two numbers drifting apart makes "which extension works with which daemon" unanswerable. `extension/package.json` carries it too. That one is `private` and never published, so its number changes nothing - but it sat at `0.4.0` through five releases while the other two moved, and a version that is silently unmanaged reads as an oversight whether or not it is one. Three files, one number. `extension/package-lock.json` repeats that number and drifted the same way, to `0.8.2` while the rest said `0.11.2`: after the bump, run `npm install --package-lock-only` in `extension/` so it follows. `uv.lock` follows `pyproject.toml` on `uv lock`.
+- **Versioning:** Bump `version` in `pyproject.toml` in any PR that changes behaviour a user can see, matching the change's conventional-commit type: `feat:` bumps the minor, `fix:` the patch. This is not bookkeeping. `uv` keys its build cache on the version, so shipping two different builds as the same version means `uv tool install ".[sync]" --force` reports success and installs the older one - which happened, and cost a debugging session before anyone thought to compare the installed file's timestamp. `extension/manifest.json` carries the same version and moves with it: the extension and the daemon ship together and share the `/api/v1` contract, so two numbers drifting apart makes "which extension works with which daemon" unanswerable. `extension/package.json` carries it too. That one is `private` and never published, so its number changes nothing - but it sat at `0.4.0` through five releases while the other two moved, and a version that is silently unmanaged reads as an oversight whether or not it is one. Three files, one number. `extension/package-lock.json` repeats that number and drifted the same way, to `0.8.2` while the rest said `0.11.2`: after the bump, run `npm install --package-lock-only` in `extension/` so it follows. `uv.lock` follows `pyproject.toml` on `uv lock`.
 - **Commit messages:** Use [Conventional Commits](https://www.conventionalcommits.org/):
   - `feat: add book export command`
   - `fix: handle missing ISBN in frontmatter`

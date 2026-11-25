@@ -266,7 +266,7 @@ To keep the remote current without thinking about it, register a scheduled task 
 .\contrib\Register-LibrisSync.ps1 -Remove
 ```
 
-It runs the installed `librisw` (the console-less build of `libris`, so no window flashes up and the task reports sync's real exit code) while you're logged on and waits for the first run to finish so it can show how it went. Each run appends what it said, and its exit code, to `%LOCALAPPDATA%\libris\sync.log`. The task only runs while you're logged on because sync signs in with your `az login`, which Windows can only unlock for your own logon. Refresh the installed `libris` after an upgrade (`uv tool install 'libris[sync]' --force`), or the task keeps running the old one.
+It runs the installed `librisw` (the console-less build of `libris`, so no window flashes up and the task reports sync's real exit code) while you're logged on and waits for the first run to finish so it can show how it went. Each run appends what it said, and its exit code, to `%LOCALAPPDATA%\libris\sync.log`. The task only runs while you're logged on because sync signs in with your `az login`, which Windows can only unlock for your own logon. Refresh the installed `libris` after an upgrade (`uv tool install 'libris[sync]' --force`), or the task keeps running the old one. Keep `[sync]` in that command: a reinstall keeps only the extras it names, and one without it leaves every later run failing with "The sync extra is not installed". If the same install serves other parts of Libris, name them all, as in `'libris[sync,server]'`.
 
 ### 15. Ask Claude or Gemini about the Library
 
@@ -422,7 +422,8 @@ Or, in an `mcp.json` (Claude Desktop, VS Code, and most other clients):
 snapshot that goes stale silently, and a server registered once and started daily is where a
 stale snapshot hides longest. If you would rather register the installed command, run
 `uv tool install 'libris[mcp]' --force` after every change and use `libris` with no arguments
-before `mcp`.
+before `mcp`. That install keeps only the extras it names, so if the scheduled sync runs the
+same command, name both: `'libris[mcp,sync]'`.
 
 ### The tools
 
