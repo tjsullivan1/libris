@@ -347,6 +347,12 @@ resource "azurerm_role_assignment" "app_sends_telemetry" {
 
 # Cost --------------------------------------------------------------------------
 
+# When the budget was first applied, kept in state so it never moves. Azure
+# takes a start date on the first of a month, and refuses a past one outside
+# the current month, so a date written here would stop working for any
+# deployment made after that month (#222 review).
+resource "time_static" "budget_created" {}
+
 # Mails the owner before a month's costs surprise them (#179). Most of the
 # spend is the registry's flat daily fee, so the amount leaves room above it:
 # an alert means something changed, not that a month went by.
@@ -357,8 +363,7 @@ resource "azurerm_consumption_budget_resource_group" "main" {
   time_grain        = "Monthly"
 
   time_period {
-    # Must be the first of a month. Fixed, so a later apply never moves it.
-    start_date = "2026-11-01T00:00:00Z"
+    start_date = formatdate("YYYY-MM-01'T'00:00:00Z", time_static.budget_created.rfc3339)
   }
 
   notification {

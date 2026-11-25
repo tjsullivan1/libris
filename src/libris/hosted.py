@@ -14,6 +14,7 @@ Run it the way the container does:
     uvicorn --factory libris.hosted:create_app_from_env --host 0.0.0.0 --port 8000
 """
 
+import logging
 import os
 import time
 from collections import deque
@@ -294,7 +295,15 @@ TELEMETRY_CONNECTION_STRING = "APPLICATIONINSIGHTS_CONNECTION_STRING"
 
 # The liveness probe asks every few seconds while a replica runs. Tracing it
 # would bill for thousands of identical requests a day and bury the real ones.
-UNTRACED_PATHS = "/healthz"
+# A regex, searched for in the request's full URL (`https://host/healthz`), so
+# it is anchored on the scheme rather than with a bare `^/healthz` - which
+# would match nothing - and ends at the path, so `/healthz2` is still traced
+# (#222 review).
+UNTRACED_URLS = r"^https?://[^/]+/healthz$"
+
+# Uvicorn's own logger: it reaches the container's stdout, and so Log
+# Analytics, whether or not tracing works.
+_STARTUP_LOG = logging.getLogger("uvicorn.error")
 
 
 # Where a request span keeps its URL, in the old semantic conventions and the
@@ -365,6 +374,11 @@ def instrument(
             process environment.
         export: Points OpenTelemetry at its destination. Replaced in tests.
 
+    Tracing is the one part of the server it can do without. If it cannot be
+    switched on - the packages are missing, or the connection string is
+    malformed - the server says so in its log and serves the Library untraced,
+    rather than refusing to start over its telemetry (#222 review).
+
     Returns:
         Whether tracing was switched on.
     """
@@ -372,12 +386,20 @@ def instrument(
     connection_string = env.get(TELEMETRY_CONNECTION_STRING)
     if not connection_string:
         return False
-    from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+    try:
+        from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
 
-    export(connection_string)
+        export(connection_string)
+    except (ImportError, ValueError) as exc:
+        _STARTUP_LOG.warning(
+            "%s is set, but tracing could not start, so requests are not traced: %s",
+            TELEMETRY_CONNECTION_STRING,
+            exc,
+        )
+        return False
     app.add_middleware(
         OpenTelemetryMiddleware,
-        excluded_urls=UNTRACED_PATHS,
+        excluded_urls=UNTRACED_URLS,
         # One span per ASGI message would triple the count for nothing.
         exclude_spans=["receive", "send"],
         server_request_hook=drop_query_strings,

@@ -34,6 +34,7 @@ from libris.api import BookCandidate  # noqa: E402
 from libris.cosmos_store import CosmosStore, push_shelf  # noqa: E402
 from libris.hosted import (  # noqa: E402
     TELEMETRY_CONNECTION_STRING,
+    UNTRACED_URLS,
     HostedConfigError,
     HostedSettings,
     create_app,
@@ -1768,7 +1769,9 @@ def span_exporter():
     """Every span the process records, kept in memory.
 
     OpenTelemetry takes one global tracer provider per process, and the MCP SDK
-    traces through it, so it is installed once here and cleared per test.
+    traces through it. So the exporter joins whichever SDK provider is already
+    installed, and installs one only if none is, rather than depending on
+    running first (#222 review).
     """
     sdk_trace = pytest.importorskip("opentelemetry.sdk.trace")
     from opentelemetry import trace
@@ -1777,11 +1780,14 @@ def span_exporter():
         InMemorySpanExporter,
     )
 
+    provider = trace.get_tracer_provider()
+    if not isinstance(provider, sdk_trace.TracerProvider):
+        trace.set_tracer_provider(sdk_trace.TracerProvider())
+        provider = trace.get_tracer_provider()
+    if not isinstance(provider, sdk_trace.TracerProvider):
+        pytest.skip("a tracer provider that cannot take an exporter is installed")
     exporter = InMemorySpanExporter()
-    provider = sdk_trace.TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
-    assert trace.get_tracer_provider() is provider, "another provider was set first"
     return exporter
 
 
@@ -1883,3 +1889,44 @@ def test_a_sign_in_leaves_no_query_string_in_its_traces(
         if isinstance(value, str) and ("?" in value or "code=" in value)
     ]
     assert leaked == []
+
+
+@pytest.mark.parametrize(
+    ("url", "traced"),
+    [
+        (f"{PUBLIC_URL}/healthz", False),
+        ("http://10.0.0.4:8000/healthz", False),
+        (f"{PUBLIC_URL}/healthz2", True),
+        (f"{PUBLIC_URL}/x/healthz", True),
+        (f"{PUBLIC_URL}/mcp", True),
+    ],
+)
+def test_only_the_liveness_probe_is_left_untraced(url: str, traced: bool) -> None:
+    # Given the exclusion the middleware is given, read as it reads it
+    util_http = pytest.importorskip("opentelemetry.util.http")
+    excluded = util_http.ExcludeList([UNTRACED_URLS])
+
+    # Then exactly the probe's URL is left out
+    assert excluded.url_disabled(url) is not traced
+
+
+def test_tracing_that_cannot_start_leaves_the_server_serving(
+    google: FakeGoogle, store: MemoryAuthStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Given a connection string Azure Monitor refuses
+    app = create_app(settings(), store=store, identity=google)
+
+    def refuse(connection_string: str) -> None:
+        raise ValueError("Invalid connection string")
+
+    # When the app is instrumented
+    with caplog.at_level("WARNING", logger="uvicorn.error"):
+        switched_on = instrument(
+            app, {TELEMETRY_CONNECTION_STRING: "garbage"}, export=refuse
+        )
+
+    # Then it runs untraced, says why, and still answers
+    assert not switched_on
+    assert "Invalid connection string" in caplog.text
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        assert client.get("/healthz").status_code == 200
