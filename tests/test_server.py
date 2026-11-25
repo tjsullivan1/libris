@@ -60,12 +60,16 @@ def test_health_needs_no_token(client):
     assert response.status_code == 200
 
 
-def test_health_reports_version_and_shelf(client, tmp_path):
+def test_health_reports_version_and_shelf(client, token, tmp_path):
     # Given a configured Shelf
     config.set_book_vault_path(tmp_path / "Book List")
 
-    # When health is requested
-    body = TestClient(create_app()).get("/health").json()
+    # When health is requested with the token
+    body = (
+        TestClient(create_app())
+        .get("/health", headers={"Authorization": f"Bearer {token}"})
+        .json()
+    )
 
     # Then the popup can show which Library it is talking to
     assert body["status"] == "ok"
@@ -101,6 +105,16 @@ def test_request_with_a_wrong_token_is_rejected(client):
     response = client.get("/anything", headers={"Authorization": "Bearer wrong"})
 
     # Then it is refused
+    assert response.status_code == 401
+
+
+def test_request_with_a_non_ascii_token_is_rejected_not_crashed(client):
+    # Given a credential with a non-ASCII byte, which compare_digest refuses
+    # to compare as a str (#235 review)
+    # When a non-health path is requested
+    response = client.get("/anything", headers={"Authorization": b"Bearer \xe9"})
+
+    # Then it is refused like any other wrong token, not answered with a 500
     assert response.status_code == 401
 
 
@@ -224,12 +238,44 @@ def test_health_reports_that_no_shelf_is_configured(client):
 
 def test_health_reports_a_configured_shelf(token, configured_shelf):
     # Given a configured Shelf
-    # When the popup checks the connection
-    body = TestClient(create_app()).get("/health").json()
+    # When the popup checks the connection, carrying its token
+    body = (
+        TestClient(create_app())
+        .get("/health", headers={"Authorization": f"Bearer {token}"})
+        .json()
+    )
 
     # Then it is told the daemon is usable, not merely up
     assert body["vault_configured"] is True
     assert body["vault_path"] == str(configured_shelf)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Bearer not-the-token"},
+        {"Authorization": "Basic whatever"},
+        {"Authorization": b"Bearer \xe9"},
+    ],
+    ids=["no-token", "wrong-token", "wrong-scheme", "non-ascii-token"],
+)
+def test_health_withholds_the_shelf_path_without_the_token(
+    token, configured_shelf, headers
+):
+    # Given a configured Shelf, and a caller without the token - such as a
+    # page that rebound its hostname to loopback (#233)
+    # When it asks for health
+    response = TestClient(create_app()).get("/health", headers=headers)
+
+    # Then it is answered, not refused, so a wrong token still reads as a
+    # running daemon...
+    assert response.status_code == 200
+    body = response.json()
+    assert body["vault_configured"] is True
+    # ...but it is not told where the Shelf is
+    assert body["vault_path"] is None
+    assert configured_shelf.name not in response.text
 
 
 # --- binding ---

@@ -36,7 +36,7 @@ export class DaemonError extends Error {
   }
 }
 
-async function call(path, { method = "GET", body, auth = true } = {}) {
+async function call(path, { method = "GET", body } = {}) {
   const settings = await readSettings();
 
   // Checked before fetching, because a missing grant is indistinguishable from
@@ -45,8 +45,7 @@ async function call(path, { method = "GET", body, auth = true } = {}) {
     throw new DaemonError(Problem.NOT_PERMITTED, settings);
   }
 
-  const headers = {};
-  if (auth) headers.Authorization = `Bearer ${settings.credential}`;
+  const headers = { Authorization: `Bearer ${settings.credential}` };
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
   let response;
@@ -94,9 +93,13 @@ async function detailOf(response) {
   }
 }
 
-/** Unauthenticated, so a wrong token is distinguishable from a dead daemon. */
+/**
+ * Never refused, so a wrong token is distinguishable from a dead daemon. The
+ * token is sent anyway: the daemon names the Shelf only to a caller holding
+ * it (#233), and answers `vault_path: null` to anyone else.
+ */
 export async function health() {
-  const body = await call("/health", { auth: false });
+  const body = await call("/health");
   if (!body.vault_configured) {
     throw new DaemonError(Problem.NO_SHELF, await readSettings());
   }
