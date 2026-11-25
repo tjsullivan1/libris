@@ -67,6 +67,12 @@ resource "azurerm_key_vault" "main" {
   sku_name                   = "standard"
   rbac_authorization_enabled = true
   soft_delete_retention_days = 7
+
+  # Purge protection cannot be turned off once on, and holds the vault's name
+  # for the retention period after a delete. Every secret here can be
+  # regenerated or entered again, so soft delete is recovery enough (#229).
+  #checkov:skip=CKV_AZURE_42:Soft delete without purge protection, see above
+  #checkov:skip=CKV_AZURE_110:Soft delete without purge protection, see above
 }
 
 # For an apply by hand; the deploy workflow's identity has its own, below.
@@ -125,6 +131,10 @@ resource "azurerm_key_vault_secret" "token_signing_key" {
   value        = random_password.token_signing_key.result
   key_vault_id = azurerm_key_vault.main.id
   depends_on   = [time_sleep.secrets_role_propagates]
+
+  # An expiry date rotates nothing. It only stops the app reading the secret
+  # on that date. The same goes for the two secrets below (#229).
+  #checkov:skip=CKV_AZURE_41:An expiry would take the app down, not rotate the secret
 }
 
 resource "azurerm_key_vault_secret" "google_client_secret" {
@@ -132,6 +142,8 @@ resource "azurerm_key_vault_secret" "google_client_secret" {
   value        = var.google_client_secret == "" ? "unset" : var.google_client_secret
   key_vault_id = azurerm_key_vault.main.id
   depends_on   = [time_sleep.secrets_role_propagates]
+
+  #checkov:skip=CKV_AZURE_41:An expiry would take the app down, not rotate the secret
 }
 
 # Optional, unlike the secrets above: Google Books answers without a key, and a
@@ -143,6 +155,8 @@ resource "azurerm_key_vault_secret" "google_books_api_key" {
   value        = var.google_books_api_key
   key_vault_id = azurerm_key_vault.main.id
   depends_on   = [time_sleep.secrets_role_propagates]
+
+  #checkov:skip=CKV_AZURE_41:An expiry would take the app down, not rotate the secret
 }
 
 # Cosmos --------------------------------------------------------------------
@@ -155,6 +169,10 @@ resource "azurerm_cosmosdb_account" "main" {
   kind                         = "GlobalDocumentDB"
   local_authentication_enabled = false
   minimal_tls_version          = "Tls12"
+  # Account keys cannot change databases or containers, only Azure RBAC can.
+  # Local authentication is off, so no key works anyway: this is the second
+  # lock on the same door, should that ever change (#229).
+  access_key_metadata_writes_enabled = false
 
   capabilities {
     name = "EnableServerless"

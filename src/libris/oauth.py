@@ -207,8 +207,14 @@ def account_from_id_token(
         SignInFailed: The token is not one Google issued to this client, or it
             has expired.
     """
+    # Unverified on purpose, as the docstring of GoogleIdentity.account says:
+    # this token came straight from Google's token endpoint over TLS. Kept on
+    # one line, because semgrep reads its suppression only on the line it
+    # reports, and the formatter would otherwise move the comment off it.
     try:
-        claims = jwt.decode(id_token, options={"verify_signature": False})
+        # fmt: off
+        claims = jwt.decode(id_token, options={"verify_signature": False})  # nosemgrep: python.jwt.security.unverified-jwt-decode.unverified-jwt-decode
+        # fmt: on
     except jwt.InvalidTokenError as exc:
         raise SignInFailed("Google's ID token could not be read") from exc
     if claims.get("iss") not in GOOGLE_ISSUERS:
@@ -529,12 +535,14 @@ class LibrisAuthProvider:
             return _page(*_EXPIRED)
 
         host = urlsplit(str(sign_in.params.redirect_uri)).hostname or "an unknown host"
+        # Every value from outside goes through html.escape. Semgrep's
+        # raw-html-format rule cannot see that, so each line says so.
         body = (
-            f"<p><strong>{html.escape(sign_in.client_name)}</strong> wants to use your Library.</p>"
-            f"<p>After you sign in, you will be sent back to <strong>{html.escape(host)}</strong>. "
+            f"<p><strong>{html.escape(sign_in.client_name)}</strong> wants to use your Library.</p>"  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format
+            f"<p>After you sign in, you will be sent back to <strong>{html.escape(host)}</strong>. "  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format
             "If you did not just ask to connect an app, deny this.</p>"
             f'<form method=post action="{CONSENT_PATH}">'
-            f'<input type=hidden name=request value="{html.escape(request_id)}">'
+            f'<input type=hidden name=request value="{html.escape(request_id)}">'  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format
             "<button name=decision value=allow>Continue with Google</button>"
             "<button name=decision value=deny>Deny</button></form>"
         )
@@ -647,12 +655,13 @@ class LibrisAuthProvider:
             return _page("Sign-in failed", f"<p>{html.escape(str(exc))}</p>", 502)
 
         if not self._is_allowed(account.sub) or not account.email_verified:
+            # Escaped, as on the consent page.
             return _page(
                 "This account cannot use this Library",
-                f"<p>Google signed in <strong>{html.escape(account.email or 'an account')}</strong>, "
+                f"<p>Google signed in <strong>{html.escape(account.email or 'an account')}</strong>, "  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format
                 "which is not the account this Library belongs to.</p>"
                 "<p>Setting this Library up for the first time? This account's Google ID is:</p>"
-                f"<p><code>{html.escape(account.sub)}</code></p>",
+                f"<p><code>{html.escape(account.sub)}</code></p>",  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format
                 403,
             )
 

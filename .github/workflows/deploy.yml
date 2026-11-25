@@ -5,7 +5,10 @@ name: Deploy
 # OIDC token, which only the identity infra/bootstrap created accepts, and only
 # from the `production` environment.
 on:
-  workflow_run:
+  # zizmor calls workflow_run dangerous because it runs with secrets after
+  # a workflow anyone could trigger. The job's `if` below admits only a push
+  # to main whose commit is still main's tip, which no fork can produce.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [CI]
     types: [completed]
     branches: [main]
@@ -64,6 +67,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
+          persist-credentials: false
 
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
