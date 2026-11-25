@@ -164,13 +164,17 @@ resource "azurerm_cosmosdb_account" "main" {
     consistency_level = "Session"
   }
 
-  # Point-in-time restore to any second of the last week (#179). The 7-day
-  # tier stores backups free; a restore is billed once, by the gigabyte. It
-  # replaced periodic mode, whose restores go through a support ticket, and the
-  # change is one-way. How to restore is in infra/README.md.
+  # Azure's default, written out so it is a decision rather than an accident
+  # (#179). Almost nothing here needs a backup: the books are rebuilt from the
+  # Shelf by sync, and lost sign-ins only mean signing in again. Pending Intents
+  # are the exception, and this covers them through a support ticket.
+  # Continuous backup was considered and left out: the switch is one-way, and
+  # it would protect a few hours of Intents (infra/README.md).
   backup {
-    type = "Continuous"
-    tier = "Continuous7Days"
+    type                = "Periodic"
+    interval_in_minutes = 240
+    retention_in_hours  = 8
+    storage_redundancy  = "Geo"
   }
 
   geo_location {

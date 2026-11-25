@@ -248,76 +248,28 @@ Almost all the spend is the container registry's flat Basic fee, about $5 a mont
 else together came to under $0.05 in October 2026, and the Container App stayed inside the
 monthly free grant. An alert therefore means something changed.
 
-## Restoring Cosmos
+## If Cosmos loses data
 
-Cosmos keeps continuous backup for 7 days (`Continuous7Days`): any second in the last week can
-be restored. Backups cost nothing in this tier. A restore is billed once, at about $0.15 a GB.
-A restore always creates a **new** account; it never rewinds the live one.
+Almost nothing in Cosmos needs a backup, because almost all of it lives somewhere else:
 
-First, decide whether you need one. What Cosmos holds, and where else it lives:
-
-| Container | What's in it | Without a restore |
+| Container | What's in it | Getting it back |
 |---|---|---|
-| `books`, `word_counts` | What `libris sync` pushed | Delete `sync-state.json` from Libris's config directory and run `libris sync`. Every note goes up, and sync rebuilds its record of what Cosmos holds. |
-| `auth` | Registered clients, refresh tokens | Connectors sign in again. Nothing else is lost. |
-| `intents` | Adds and updates from Claude that sync hasn't applied yet | **Nothing else holds these.** This is what a restore is for. |
+| `books`, `word_counts` | What `libris sync` pushed from the Shelf | Delete `sync-state.json` from Libris's config directory and run `libris sync`. Every note goes up, and sync rebuilds its record of what Cosmos holds. |
+| `auth` | Registered clients, refresh tokens | Nothing to recover. Each connector signs in again. |
+| `intents` | Adds and updates from Claude that sync hasn't applied yet | Nowhere else. Usually there are none: the scheduled sync applies them. |
 
-To restore:
+So the only loss is the Intents made since the last sync. Asking Claude again is usually
+quicker than any restore.
 
-1. Find the restorable account and the moment to go back to. A deleted account is listed too,
-   for as long as its backups last:
+The account keeps Azure's default periodic backup: one every 4 hours, kept for 8 hours, in
+geo-redundant storage. Restoring from it means opening a support request in the portal
+(**Help + support**, Cosmos DB, restore). It has to be opened within those 8 hours, and Microsoft
+restores into a new account. Copy the `intents` documents you need from that account into the live
+one, then delete it.
 
-   ```bash
-   az cosmosdb restorable-database-account list --account-name cosmos-libris-<suffix>
-   ```
-
-2. Restore into a side account. Keep it off the public network. Leave TTL on, so expired
-   refresh tokens stay expired:
-
-   ```bash
-   az cosmosdb restore \
-     --resource-group rg-libris-<suffix> \
-     --account-name cosmos-libris-<suffix> \
-     --target-database-account-name cosmos-libris-<suffix>-r \
-     --restore-timestamp 2026-11-25T14:00:00Z \
-     --location eastus2 \
-     --public-network-access Disabled
-   ```
-
-   It takes minutes to tens of minutes. The side account isn't in Terraform; it's yours to
-   delete.
-
-3. Role assignments aren't restored, so grant yourself data access to the side account. Then
-   open its network to your own IP for the copy:
-
-   ```bash
-   az cosmosdb sql role assignment create \
-     --resource-group rg-libris-<suffix> --account-name cosmos-libris-<suffix>-r \
-     --role-definition-id 00000000-0000-0000-0000-000000000002 \
-     --principal-id "$(az ad signed-in-user show --query id -o tsv)" --scope /
-   az cosmosdb update -g rg-libris-<suffix> -n cosmos-libris-<suffix>-r \
-     --public-network-access Enabled --ip-range-filter "$(curl -s https://api.ipify.org)"
-   ```
-
-4. Copy back the documents you need, usually the pending Intents, with the `sync` extra's SDK:
-
-   ```python
-   from azure.cosmos import CosmosClient
-   from azure.identity import DefaultAzureCredential
-
-   cred = DefaultAzureCredential()
-   side = CosmosClient("https://cosmos-libris-<suffix>-r.documents.azure.com:443/", cred)
-   live = CosmosClient("https://cosmos-libris-<suffix>.documents.azure.com:443/", cred)
-   source = side.get_database_client("libris").get_container_client("intents")
-   target = live.get_database_client("libris").get_container_client("intents")
-   for doc in source.read_all_items():
-       target.upsert_item({k: v for k, v in doc.items() if not k.startswith("_")})
-   ```
-
-5. Delete the side account: `az cosmosdb delete -g rg-libris-<suffix> -n cosmos-libris-<suffix>-r`.
-
-Moving the app onto a restored account instead isn't worth it. Its name comes from the suffix,
-so Terraform would have to import it, and copying is a few lines.
+Continuous backup, which restores to any second without a ticket, was considered in #179 and left
+out. Switching to it is one-way, it isn't documented as working on serverless accounts, and it
+would protect a few hours of Intents at most.
 
 ## Troubleshooting
 
