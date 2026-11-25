@@ -8,6 +8,11 @@ name: Security scans
 # Runs after a merge to main, and on a pull request only when it changes this
 # file, so an edit to the scanners can be seen working before it merges.
 #
+# GitHub ignores SARIF's `suppressions`: a result a scanner reports as
+# suppressed in the code (`# nosemgrep`, `#checkov:skip`, ...) still opens an
+# alert. So each job drops those results before uploading, and a suppression
+# in the code, with its reason beside it, is how a finding is closed (#229).
+#
 # Already covered elsewhere, so not repeated here: bandit's rules (ruff's `S`
 # set, in CI's lint job), pip-audit (CI's security job), and Dependabot's npm
 # and Actions alerts.
@@ -23,9 +28,8 @@ permissions:
   contents: read
 
 jobs:
-  # Terraform misconfiguration. Most of what it reports on first run are
-  # enterprise defaults (private endpoints, customer-managed keys) that a
-  # one-person app does not want; triage them in the Security tab.
+  # Terraform misconfiguration. Rules that cannot apply here are skipped in
+  # .checkov.yaml, and exceptions about one resource sit on that resource.
   checkov:
     runs-on: ubuntu-latest
     permissions:
@@ -44,6 +48,11 @@ jobs:
         run: >-
           uvx checkov --config-file .checkov.yaml --directory infra --framework terraform
           --output sarif --output-file-path checkov-results --soft-fail
+
+      - name: Drop results suppressed in the code
+        run: >-
+          jq '.runs[].results |= map(select((.suppressions // []) | length == 0))'
+          checkov-results/results_sarif.sarif > kept.sarif && mv -f kept.sarif checkov-results/results_sarif.sarif
 
       - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
@@ -71,6 +80,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: uvx zizmor --format sarif --no-exit-codes .github/workflows > zizmor.sarif
+
+      - name: Drop results suppressed in the code
+        run: >-
+          jq '.runs[].results |= map(select((.suppressions // []) | length == 0))'
+          zizmor.sarif > kept.sarif && mv -f kept.sarif zizmor.sarif
 
       - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
@@ -107,6 +121,11 @@ jobs:
           ./gitleaks git --redact --no-banner
           --report-format sarif --report-path gitleaks.sarif --exit-code 0
 
+      - name: Drop results suppressed in the code
+        run: >-
+          jq '.runs[].results |= map(select((.suppressions // []) | length == 0))'
+          gitleaks.sarif > kept.sarif && mv -f kept.sarif gitleaks.sarif
+
       - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
           sarif_file: gitleaks.sarif
@@ -134,6 +153,11 @@ jobs:
           uvx semgrep scan --metrics=off
           --config p/python --config p/javascript --config p/dockerfile
           --sarif --output semgrep.sarif
+
+      - name: Drop results suppressed in the code
+        run: >-
+          jq '.runs[].results |= map(select((.suppressions // []) | length == 0))'
+          semgrep.sarif > kept.sarif && mv -f kept.sarif semgrep.sarif
 
       - uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
