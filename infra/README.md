@@ -106,10 +106,15 @@ deploys on its own ([Deploying](#deploying)).
      in. Changing the allowed account changes nothing in the connector's settings, so it doesn't
      need removing. Then [push the Shelf](#pushing-the-shelf) and ask Claude whether you've
      read a book you have.
-   - **Gemini (untested).** Nobody has connected Gemini yet, and #180 tracks doing it. From
-     Google's documentation, the route should be gemini.google.com, then **Settings → Connected
-     apps → Add a custom app**, entering the same URL. It needs a personal Google account in the
-     US. Treat the menu names as a guess, and correct them here once #180 is done.
+   - **Gemini**: at gemini.google.com, open **Settings → Personal Intelligence → Connected Apps
+     → + Custom** and enter the same URL. Gemini registers itself, so there is no client ID or
+     secret to enter. If it asks for one, registration failed. Sign in through the consent page
+     and Google. It needs a personal Google account in the US: custom apps aren't offered on work
+     or school accounts. Connected on 2026-11-25 (#180).
+
+   Connect while the app is awake. A connector's registration can be the request that wakes it,
+   and a cold start takes about 30 seconds (ADR 0037). Claude gives registration 10 seconds and
+   fails silently, so open `/healthz` in a browser first, then connect.
 
 9. **Let GitHub deploy.** In the repository's **Settings → Environments**, create `production`.
    Under **Deployment branches and tags**, choose **Selected branches and tags** and add `main`.
