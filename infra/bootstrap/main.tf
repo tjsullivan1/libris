@@ -98,11 +98,22 @@ resource "azurerm_storage_account" "state" {
       days = 7
     }
   }
+
+  # Versions and the week's retention cover a bad write. Losing the region
+  # would only lose state, which can be imported again (#229).
+  #checkov:skip=CKV_AZURE_206:Versioning covers a bad write, and LRS is enough for state
+  # The account holds one blob container and no queues.
+  #checkov:skip=CKV_AZURE_33:No queues exist in this account
 }
 
 resource "azurerm_storage_container" "state" {
   name               = "tfstate"
   storage_account_id = azurerm_storage_account.state.id
+
+  # Read logging would record, and bill for, every plan's read of the state.
+  # The account accepts Entra ID only, so the reads are already authenticated
+  # (#229).
+  #checkov:skip=CKV2_AZURE_21:Read logging not wanted for the state container
 }
 
 # Whoever applies infra/ by hand reads and writes the same state as CI.

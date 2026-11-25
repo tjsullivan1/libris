@@ -1,0 +1,44 @@
+# Checks skipped for the whole of infra/, because they cannot apply to a
+# one-person app on the cheapest tiers (#229). Exceptions that are about one
+# resource sit on that resource instead, with their reason, so that the check
+# still covers any resource added later.
+skip-check:
+  # Container Registry: Premium-tier features (private access, geo-replication,
+  # quarantine, content trust, retention policy, zone redundancy, dedicated
+  # data endpoints), at about ten times the Basic price, and Defender for
+  # Containers' image scanning, which is billed per image.
+  - CKV_AZURE_139
+  - CKV_AZURE_163
+  - CKV_AZURE_164
+  - CKV_AZURE_165
+  - CKV_AZURE_166
+  - CKV_AZURE_167
+  - CKV_AZURE_233
+  - CKV_AZURE_237
+
+  # Private networking. `libris sync` runs on a PC on a home connection, and
+  # deploys run on GitHub's hosted runners, so Key Vault, Cosmos and the state
+  # account have to be reachable from the internet. Every one of them accepts
+  # Entra ID only: no keys, no SAS (ADR 0006).
+  - CKV_AZURE_59
+  - CKV_AZURE_99
+  - CKV_AZURE_101
+  - CKV_AZURE_109
+  - CKV_AZURE_189
+  - CKV2_AZURE_32
+  - CKV2_AZURE_33
+
+  # Customer-managed encryption keys. Microsoft-managed keys protect the same
+  # data at rest; a key of our own adds a key to manage and nothing an attacker
+  # without Azure access could reach.
+  - CKV_AZURE_100
+  - CKV2_AZURE_1
+
+  # Key Vault secrets' content type is a free-text label, not a control.
+  - CKV_AZURE_114
+
+  # Cosmos local authentication. infra/main.tf turns it off, with
+  # `local_authentication_enabled = false`. The check reads
+  # `local_authentication_disabled`, the name azurerm dropped in 4.0, so on
+  # this provider it can never pass, whatever the setting.
+  - CKV_AZURE_140
