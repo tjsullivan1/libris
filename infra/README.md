@@ -173,6 +173,35 @@ required `budget_alert_email`. Before the first deploy that includes it:
    secret. Without it, `terraform plan` stops and asks for it, and the workflow, which can't be
    asked, fails.
 
+## Upgrading a deployment from before #234
+
+#234 replaced the deploy identity's Owner role with Contributor plus a restricted RBAC
+Administrator role. The deploy identity can't make this change itself: the apply would remove the
+Owner role it is running under. Apply it by hand, as yourself, before merging anything else:
+
+```bash
+terraform -chdir=infra plan    # expect 2 to add, 1 to destroy: deploy_owns_group goes
+terraform -chdir=infra apply
+```
+
+Then run the workflow from **Actions → Deploy → Run workflow**. Its apply should change nothing,
+which shows the new roles cover what the deploy does.
+
+## Granting a new role
+
+The deploy identity may grant only the roles listed in `local.deploy_may_grant` in `main.tf`, to
+the principals in `local.deploy_may_grant_to`. A grant outside those lists fails the deploy with a
+403 `AuthorizationFailed`. That is the restriction working, not a bug. `tests/test_infra.py`
+catches the omission in CI, before merge.
+
+Adding a role to the list changes the deploy identity's own condition, which it can't do. So:
+
+1. Add the role and its ID (`az role definition list --name "<role>" --query "[0].name" -o tsv`)
+   to `local.deploy_may_grant`, and any new principal to `local.deploy_may_grant_to`.
+2. Before merging, run `terraform -chdir=infra apply` as yourself. This updates the condition and
+   makes the new grant in the same apply.
+3. Merge. The workflow's apply then finds nothing to change.
+
 ## Moving an existing deployment onto the pipeline
 
 A deployment from before #175 has local state and no deploy identity. Run step 1 with the
@@ -185,7 +214,7 @@ terraform init -migrate-state      # copies terraform.tfstate into the storage a
 
 Add `suffix`, `owner_object_id` and `deploy_principal_id` to `terraform.tfvars`, and
 `terraform apply`. The plan moves four resources to new names and destroys `random_string.suffix`,
-which the pinned suffix replaces. Nothing in Azure changes except the two new role assignments for
+which the pinned suffix replaces. Nothing in Azure changes except the three new role assignments for
 the deploy identity. Once the migration works, delete the local `terraform.tfstate` and its backup:
 they hold the signing key and the Google secret. Then do step 9.
 
@@ -319,7 +348,12 @@ repeat the write afterwards; let Terraform create the resource. See
   cost choice rather than a correctness one (ADR 0035).
 - **Scale to zero.** The first call after five idle minutes waits for a cold start of about 30
   seconds. ADR 0037 has the measurements and why that wait is kept.
-- **The deploy identity is Owner of the app's resource group.** It applies `infra/`, which grants
-  roles, and Contributor can't. It holds no role outside that group and the state container.
+- **The deploy identity is not Owner of the app's resource group.** It holds Contributor there,
+  plus Role Based Access Control Administrator under a condition: it may grant or remove only the
+  roles in `local.deploy_may_grant`, and only for the principals in `local.deploy_may_grant_to`
+  (#234). Owner would let a compromised deploy grant any role to any identity, and that access
+  would survive the bad commit being reverted. It holds no role outside that group and the state
+  container. Its own two grants are outside its condition, so it can't change them, and any change
+  to them is applied by hand. See [Granting a new role](#granting-a-new-role).
 - **The state's storage account takes no access keys.** Everyone who reaches the state, CI or a
   person, does it through Entra. The state holds the signing key and the Google secret.

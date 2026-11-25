@@ -26,13 +26,76 @@ resource "azurerm_resource_group" "main" {
   location = var.location
 }
 
-# The deploy workflow (#175) applies this configuration, which grants roles of
-# its own, so Contributor is not enough. Scoped to this one group. The first
-# apply, by hand, is what lets the workflow run at all.
-resource "azurerm_role_assignment" "deploy_owns_group" {
+# The deploy workflow (#175) applies this configuration. Both of its grants are
+# scoped to this one group, and the first apply, by hand, is what lets the
+# workflow run at all.
+#
+# Not Owner (#234): Owner could grant any role to anyone, so a compromised
+# deploy could leave itself a lasting way back in that outlives the revert.
+# Contributor builds everything but the role assignments. Role Based Access
+# Control Administrator builds those, held by a condition to the roles below
+# and the principals this configuration grants them to.
+#
+# Its own two grants are outside that list, so the deploy can neither widen
+# them nor drop the condition. The cost: any change to them - including adding
+# a role here - is applied by hand, as the first deployment was. A role granted
+# below and not listed here fails the deploy with a 403.
+locals {
+  # Built-in role IDs, the same in every tenant. Each is named, as a
+  # role_definition_name, by a grant below.
+  deploy_may_grant = {
+    "AcrPull"                      = "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+    "Key Vault Secrets User"       = "4633458b-17de-408a-b874-0445c86b69e6"
+    "Key Vault Secrets Officer"    = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7"
+    "Monitoring Metrics Publisher" = "3913510d-42f4-4e42-8a64-420c390055eb"
+  }
+  deploy_may_grant_to = [
+    azurerm_user_assigned_identity.app.principal_id,
+    var.owner_object_id,
+    var.deploy_principal_id,
+  ]
+  granted_roles      = join(", ", values(local.deploy_may_grant))
+  granted_principals = join(", ", local.deploy_may_grant_to)
+}
+
+resource "azurerm_role_assignment" "deploy_builds_group" {
   scope                = azurerm_resource_group.main.id
-  role_definition_name = "Owner"
+  role_definition_name = "Contributor"
   principal_id         = var.deploy_principal_id
+}
+
+resource "azurerm_role_assignment" "deploy_grants_app_roles" {
+  scope                = azurerm_resource_group.main.id
+  role_definition_name = "Role Based Access Control Administrator"
+  principal_id         = var.deploy_principal_id
+  condition_version    = "2.0"
+  # Checked on the request for a write and on the existing assignment for a
+  # delete, so the deploy can neither make nor remove any other grant.
+  condition = <<-EOT
+    (
+      (
+        !(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})
+      )
+      OR
+      (
+        @Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${local.granted_roles}}
+        AND
+        @Request[Microsoft.Authorization/roleAssignments:PrincipalId] ForAnyOfAnyValues:GuidEquals {${local.granted_principals}}
+      )
+    )
+    AND
+    (
+      (
+        !(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})
+      )
+      OR
+      (
+        @Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${local.granted_roles}}
+        AND
+        @Resource[Microsoft.Authorization/roleAssignments:PrincipalId] ForAnyOfAnyValues:GuidEquals {${local.granted_principals}}
+      )
+    )
+  EOT
 }
 
 resource "azurerm_user_assigned_identity" "app" {
