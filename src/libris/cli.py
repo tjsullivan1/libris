@@ -3160,6 +3160,9 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
             intents = None
         else:
             intents = _apply_intents(vault_path, queued)
+        # Before the push, so a push that refuses still leaves the note saying
+        # what did not apply - and never instead of the push (ADR 0013).
+        note_written = intents is None or _update_sync_note(vault_path, queued, intents)
         report = push_shelf(
             vault_path,
             books,
@@ -3236,7 +3239,11 @@ def _sync(endpoint: str | None, database: str, allow_deletions: bool) -> None:
             "might be one of them. The next sync that reads every note deletes "
             "them."
         )
-    if not report.complete or (intents is not None and intents.waiting):
+    if (
+        not report.complete
+        or not note_written
+        or (intents is not None and intents.waiting)
+    ):
         raise typer.Exit(1)
 
 
@@ -3279,6 +3286,42 @@ def _apply_intents(vault_path: Path, container: Container) -> IntentReport | Non
         for settled in report.waiting:
             typer.echo(f"  {settled.title}: {settled.reason}")
     return report
+
+
+def _update_sync_note(
+    vault_path: Path, container: Container, report: IntentReport
+) -> bool:
+    """Rewrite the note beside the Shelf; False when it could not be (#178).
+
+    A note that could not be written is reported and the push goes ahead: the
+    rejections are still on the remote, and the next sync writes them.
+    """
+    from azure.core.exceptions import AzureError
+
+    from .sync_note import NoteRefused, update_note
+
+    try:
+        note = update_note(vault_path, container, report)
+    except (NoteRefused, OSError, AzureError) as error:
+        typer.echo(f"\nThe note listing what did not apply was not updated: {error}")
+        return False
+    if note.acknowledged:
+        typer.echo(
+            f"{len(note.acknowledged)} rejected change(s) ticked in {note.path.name} "
+            "were acknowledged."
+        )
+    if note.changed_while_writing:
+        # Not "listed": the note holds what the last sync wrote, not this one's
+        # rejections. Not written, as far as the exit code goes (#219 review).
+        typer.echo(
+            f"\n{note.path.name} changed while sync was writing it, so it was "
+            f"left as it is. {note.rejected} rejected change(s) will be listed "
+            "there by the next sync."
+        )
+        return False
+    if note.rejected:
+        typer.echo(f"{note.rejected} rejected change(s) are listed in {note.path}.")
+    return True
 
 
 @app.command()

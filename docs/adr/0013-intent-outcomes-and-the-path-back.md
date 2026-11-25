@@ -42,3 +42,35 @@ We rejected leaving rejections on the remote for a Surface to display when next 
 extension popup is a capture UI opened while buying a book, not an inbox, so a rejection
 could sit unseen for months - the same silent wrongness ADR 0003 refuses. A push channel
 reaches the person faster and remains open as an addition once workstream 4 exists.
+
+## Amendment (#178): a rejection leaves the note when it is ticked
+
+A rejection is terminal: sync never reads it again, and the fix - editing the Book Note by
+hand - leaves nothing sync can tell apart from any other edit. So "the note lists what is
+outstanding" needs a definition of when a rejection stops being outstanding, and the
+original decision did not give one.
+
+Each rejection is a task in the note, and ticking it is the acknowledgement. The next sync
+reads the ticks before rewriting, and records each on its Intent as `acknowledged_at`; a
+rejection with that field is no longer listed. The note is still a rendering - the remote
+holds the acknowledgement, and the note is rebuilt from it - but it now carries one input
+back, and that input is the only edit a rewrite keeps.
+
+We considered a CLI command to acknowledge, which keeps the note pure output but needs a PC
+to clear what was read on a phone; ageing rejections out after a fixed time, which lets one
+nobody saw disappear quietly - the silent wrongness ADR 0003 refuses; and never dropping
+them, which turns the note into a history nobody acts on.
+
+The note also lists Intents left waiting on the Shelf, without a box. Those resolve
+themselves - sync retries them every run - so they need no acknowledgement and leave the
+note once they apply. Their reasons are this run's, not stored on the remote.
+
+The note is rewritten only when its text changes. Obsidian Sync carries every write, and a
+tick made on the phone that has not reached the PC yet is lost to a rewrite in between; it
+then has to be ticked again, which is the cost of keeping the remote authoritative.
+
+Libris replaces the note only when the file carries the marker line it writes. A file of
+the person's own with that name, or one that cannot be read as text to tell, is left alone
+and its ticks ignored. A Shelf that is its Vault's root gets no note at all: beside it is
+outside the Vault, and inside it is where Book Notes are listed. In both cases the push
+still runs and sync exits non-zero, saying why.

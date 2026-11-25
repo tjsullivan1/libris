@@ -3538,6 +3538,105 @@ def test_sync_names_a_rejected_queued_update(monkeypatch, tmp_path):
     assert "Emma: no note on the Shelf holds the Libris ID 01X" in result.output
 
 
+def _rejection_queued_beside(monkeypatch, tmp_path):
+    """A Shelf in a Vault folder, synced to fakes holding one rejected update.
+
+    The Shelf is a folder of its own so the note sync writes beside it lands in
+    this test's directory, not in the one every test's directory shares.
+    """
+    from cosmos_fake import FakeContainer
+
+    from libris.intents import IntentQueue
+
+    intents = FakeContainer()
+    IntentQueue(intents).record_update("01X", {"status": "Read"}, "Emma")
+    books, _, _ = _sync_to_fakes(monkeypatch, tmp_path, intents=intents)
+    shelf = tmp_path / "Books"
+    shelf.mkdir()
+    config.set_book_vault_path(shelf)
+    _shelved(shelf, "dune.md", "title: Dune\nlibris_id: 01D\n")
+    return books
+
+
+def test_sync_lists_a_rejection_in_the_note_beside_the_shelf(monkeypatch, tmp_path):
+    # Given an update queued remotely for a note no longer on the Shelf
+    _rejection_queued_beside(monkeypatch, tmp_path)
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the note beside the Shelf lists it, and the output says where
+    assert result.exit_code == 0, result.output
+    note = (tmp_path / "Libris sync.md").read_text(encoding="utf-8")
+    assert "- [ ] **Emma**:" in note
+    assert "1 rejected change(s) are listed in" in result.output
+
+
+def test_a_note_that_cannot_be_written_still_lets_the_push_run(monkeypatch, tmp_path):
+    # Given a rejection to list, and a note sync cannot write
+    books = _rejection_queued_beside(monkeypatch, tmp_path)
+
+    def _refuse(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("libris.sync_note._write", _refuse)
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the Shelf is still pushed, but the run says so and exits non-zero,
+    # since nobody would otherwise learn of the rejection
+    assert "01D" in books.items
+    assert "The note listing what did not apply was not updated" in result.output
+    assert result.exit_code == 1
+
+
+def test_a_note_left_for_the_next_sync_is_not_reported_as_listing_anything(
+    monkeypatch, tmp_path
+):
+    # Given a rejection to list, and a note that changes while sync writes it
+    from libris import sync_note
+
+    books = _rejection_queued_beside(monkeypatch, tmp_path)
+    real_render = sync_note.render
+
+    def _render_then_edit(*args, **kwargs):
+        text = real_render(*args, **kwargs)
+        (tmp_path / sync_note.NOTE_NAME).write_text(
+            f"{sync_note._MARKER}\nedited meanwhile\n", encoding="utf-8"
+        )
+        return text
+
+    monkeypatch.setattr(sync_note, "render", _render_then_edit)
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the Shelf is pushed, but the run does not claim the rejection is
+    # listed, says when it will be, and exits non-zero
+    assert "01D" in books.items
+    assert "are listed in" not in result.output
+    assert "1 rejected change(s) will be listed there by the next sync" in result.output
+    assert result.exit_code == 1
+
+
+def test_sync_leaves_a_note_of_your_own_alone_and_still_pushes(monkeypatch, tmp_path):
+    # Given a rejection to list, and a note of the person's own with its name
+    books = _rejection_queued_beside(monkeypatch, tmp_path)
+    mine = tmp_path / "Libris sync.md"
+    mine.write_text("My own notes.\n", encoding="utf-8")
+
+    # When the Shelf is synced
+    result = runner.invoke(app, ["sync"])
+
+    # Then the note is untouched, the Shelf is pushed, and the run says why it
+    # left the note and exits non-zero
+    assert mine.read_text(encoding="utf-8") == "My own notes.\n"
+    assert "01D" in books.items
+    assert "was not written by libris" in result.output
+    assert result.exit_code == 1
+
+
 def _shelve_dune_and_emma(vault):
     _shelved(vault, "dune.md", "title: Dune\nlibris_id: 01D\n")
     _shelved(vault, "emma.md", "title: Emma\nlibris_id: 01E\n")
