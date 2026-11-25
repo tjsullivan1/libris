@@ -60,12 +60,16 @@ def test_health_needs_no_token(client):
     assert response.status_code == 200
 
 
-def test_health_reports_version_and_shelf(client, tmp_path):
+def test_health_reports_version_and_shelf(client, token, tmp_path):
     # Given a configured Shelf
     config.set_book_vault_path(tmp_path / "Book List")
 
-    # When health is requested
-    body = TestClient(create_app()).get("/health").json()
+    # When health is requested with the token
+    body = (
+        TestClient(create_app())
+        .get("/health", headers={"Authorization": f"Bearer {token}"})
+        .json()
+    )
 
     # Then the popup can show which Library it is talking to
     assert body["status"] == "ok"
@@ -224,12 +228,43 @@ def test_health_reports_that_no_shelf_is_configured(client):
 
 def test_health_reports_a_configured_shelf(token, configured_shelf):
     # Given a configured Shelf
-    # When the popup checks the connection
-    body = TestClient(create_app()).get("/health").json()
+    # When the popup checks the connection, carrying its token
+    body = (
+        TestClient(create_app())
+        .get("/health", headers={"Authorization": f"Bearer {token}"})
+        .json()
+    )
 
     # Then it is told the daemon is usable, not merely up
     assert body["vault_configured"] is True
     assert body["vault_path"] == str(configured_shelf)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Bearer not-the-token"},
+        {"Authorization": "Basic whatever"},
+    ],
+    ids=["no-token", "wrong-token", "wrong-scheme"],
+)
+def test_health_withholds_the_shelf_path_without_the_token(
+    token, configured_shelf, headers
+):
+    # Given a configured Shelf, and a caller without the token - such as a
+    # page that rebound its hostname to loopback (#233)
+    # When it asks for health
+    response = TestClient(create_app()).get("/health", headers=headers)
+
+    # Then it is answered, not refused, so a wrong token still reads as a
+    # running daemon...
+    assert response.status_code == 200
+    body = response.json()
+    assert body["vault_configured"] is True
+    # ...but it is not told where the Shelf is
+    assert body["vault_path"] is None
+    assert configured_shelf.name not in response.text
 
 
 # --- binding ---

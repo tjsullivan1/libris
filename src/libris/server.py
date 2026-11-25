@@ -40,6 +40,12 @@ class Health(BaseModel):
     `vault_configured` is the difference between running and usable, and
     `vault_path` is null rather than a guess when no Shelf is set (#82): a
     daemon started by a scheduled task must not report a path nobody chose.
+
+    `vault_path` is also null unless the request carries the token (#233).
+    Health answers anyone, including a page that has rebound its own hostname
+    to loopback, and a Shelf's path usually names its owner and how they file
+    things. Whether a Shelf is configured is all the popup needs to tell
+    running from usable, so that much stays open.
     """
 
     status: str
@@ -223,6 +229,24 @@ async def _warm_index(_app: FastAPI):
     yield
 
 
+def _bears_token(request: Request) -> bool:
+    """Say whether a request carries the daemon's bearer token.
+
+    Args:
+        request: The incoming request.
+
+    Returns:
+        True only when a token is configured and the request presents it.
+    """
+    token = config.get_server_token()
+    scheme, _, presented = request.headers.get("authorization", "").partition(" ")
+    return bool(
+        token
+        and scheme.lower() == "bearer"
+        and secrets.compare_digest(presented, token)
+    )
+
+
 def create_app() -> FastAPI:
     """Build the daemon's ASGI app.
 
@@ -245,13 +269,7 @@ def create_app() -> FastAPI:
         if request.url.path in UNAUTHENTICATED_PATHS:
             return await call_next(request)
 
-        token = config.get_server_token()
-        scheme, _, presented = request.headers.get("authorization", "").partition(" ")
-        if (
-            not token
-            or scheme.lower() != "bearer"
-            or not secrets.compare_digest(presented, token)
-        ):
+        if not _bears_token(request):
             return JSONResponse(
                 {"detail": "Missing or invalid bearer token."},
                 status_code=401,
@@ -271,16 +289,19 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/health", response_model=Health)
-    async def health() -> Health:
-        """Report that the daemon is up and which Shelf it is serving."""
+    async def health(request: Request) -> Health:
+        """Report that the daemon is up, and to a token holder which Shelf."""
         # Health is the one endpoint that must answer while unconfigured -
         # it is how the popup tells "not running" from "running but unusable"
         # (ADR 0019) - so it reports the absence instead of raising on it.
+        # It never refuses a wrong token either: it withholds the path instead,
+        # so a bad token still reads as "running" rather than "unreachable".
         configured = config.is_vault_configured()
+        revealed = configured and _bears_token(request)
         return Health(
             status="ok",
             version=libris_version(),
-            vault_path=str(config.get_vault_path()) if configured else None,
+            vault_path=str(config.get_vault_path()) if revealed else None,
             vault_configured=configured,
         )
 

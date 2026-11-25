@@ -5,7 +5,7 @@ vi.mock("./settings.js", () => ({
   hasPermissionFor: async () => true,
 }));
 
-const { createBook, DaemonError, Problem } = await import("./client.js");
+const { createBook, DaemonError, health, Problem } = await import("./client.js");
 
 function answer(status, body) {
   return { status, ok: status >= 200 && status < 300, json: async () => body };
@@ -92,5 +92,29 @@ describe("a failed add", () => {
     await expect(
       createBook({ title: "Dune", authors: ["Frank Herbert"] }),
     ).rejects.toMatchObject({ problem: Problem.UNREACHABLE });
+  });
+});
+
+describe("the health check", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("carries the token, so the daemon will name the Shelf", async () => {
+    // Given a daemon that names its Shelf only to a token holder (#233)
+    fetch.mockResolvedValue(
+      answer(200, { status: "ok", vault_configured: true, vault_path: "/shelf" }),
+    );
+
+    // When the connection is checked
+    const reached = await health();
+
+    // Then the token went with the request, and the path came back
+    const [, init] = fetch.mock.calls[0];
+    expect(init.headers.Authorization).toBe("Bearer t");
+    expect(reached.vault_path).toBe("/shelf");
   });
 });

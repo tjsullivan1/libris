@@ -41,8 +41,9 @@ async function saveAndTest() {
 
   try {
     const reached = await health();
-    // Health needs no token, so it proves the daemon is there and nothing else.
-    // The token is only tested by a call that requires one.
+    // Health never refuses a token, so it proves the daemon is there and
+    // nothing else. The token is only tested by a call that requires one, and
+    // once that passes, health was told the path (#233).
     await fields();
     say(`Connected to Libris ${reached.version}, serving ${reached.vault_path}.`, "good");
   } catch (error) {
