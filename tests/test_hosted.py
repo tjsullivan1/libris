@@ -9,6 +9,7 @@ Google is replaced by a fake that names whichever account a test chooses.
 import hashlib
 import json
 import secrets
+import sys
 import threading
 import time
 from base64 import urlsafe_b64encode
@@ -1910,23 +1911,55 @@ def test_only_the_liveness_probe_is_left_untraced(url: str, traced: bool) -> Non
     assert excluded.url_disabled(url) is not traced
 
 
-def test_tracing_that_cannot_start_leaves_the_server_serving(
+def refuse_connection_string(connection_string: str) -> None:
+    """What Azure Monitor does with a connection string it cannot parse."""
+    raise ValueError("Invalid connection string")
+
+
+def test_a_malformed_connection_string_leaves_the_server_serving(
     google: FakeGoogle, store: MemoryAuthStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Given a connection string Azure Monitor refuses
+    # Given the tracing packages, and a connection string Azure Monitor refuses
+    pytest.importorskip("opentelemetry.instrumentation.asgi")
     app = create_app(settings(), store=store, identity=google)
-
-    def refuse(connection_string: str) -> None:
-        raise ValueError("Invalid connection string")
 
     # When the app is instrumented
     with caplog.at_level("WARNING", logger="uvicorn.error"):
         switched_on = instrument(
-            app, {TELEMETRY_CONNECTION_STRING: "garbage"}, export=refuse
+            app,
+            {TELEMETRY_CONNECTION_STRING: "garbage"},
+            export=refuse_connection_string,
         )
 
     # Then it runs untraced, says why, and still answers
     assert not switched_on
     assert "Invalid connection string" in caplog.text
+    with TestClient(app, base_url=PUBLIC_URL) as client:
+        assert client.get("/healthz").status_code == 200
+
+
+def test_missing_tracing_packages_leave_the_server_serving(
+    google: FakeGoogle,
+    store: MemoryAuthStore,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given an install without the tracing packages, whatever this one has
+    monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.asgi", None)
+    app = create_app(settings(), store=store, identity=google)
+    exported: list[str] = []
+
+    # When the app is told to send traces
+    with caplog.at_level("WARNING", logger="uvicorn.error"):
+        switched_on = instrument(
+            app,
+            {TELEMETRY_CONNECTION_STRING: "InstrumentationKey=x"},
+            export=exported.append,
+        )
+
+    # Then it runs untraced, says why, and still answers
+    assert not switched_on
+    assert exported == []
+    assert "opentelemetry.instrumentation.asgi" in caplog.text
     with TestClient(app, base_url=PUBLIC_URL) as client:
         assert client.get("/healthz").status_code == 200
