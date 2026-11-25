@@ -1,0 +1,166 @@
+name: Security scans
+
+# Static scanners that report and never block. Their findings go to the
+# repository's Security -> Code scanning tab (or, for npm audit, the run's
+# summary), and every job succeeds whatever they find. Deploy waits on CI, not
+# on this, so a new rule in a scanner can never stop a release.
+#
+# Runs after a merge to main, and on a pull request only when it changes this
+# file, so an edit to the scanners can be seen working before it merges.
+#
+# Already covered elsewhere, so not repeated here: bandit's rules (ruff's `S`
+# set, in CI's lint job), pip-audit (CI's security job), and Dependabot's npm
+# and Actions alerts.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/security.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Terraform misconfiguration. Most of what it reports on first run are
+  # enterprise defaults (private endpoints, customer-managed keys) that a
+  # one-person app does not want; triage them in the Security tab.
+  checkov:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      - name: Scan infra
+        run: >-
+          uvx checkov --directory infra --framework terraform
+          --output sarif --output-file-path checkov-results --soft-fail
+
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: checkov-results/results_sarif.sarif
+          category: checkov
+
+  # The workflows themselves: injection from untrusted input, excessive token
+  # permissions, credentials persisted by checkout, risky triggers such as the
+  # workflow_run in deploy.yml.
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Audit workflows
+        # The token lets zizmor's online audits check each action reference
+        # against GitHub, for known-vulnerable versions and impostor commits.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uvx zizmor --format sarif --no-exit-codes .github/workflows > zizmor.sarif
+
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+
+  # Secrets anywhere in history, not only in the files as they are now: a key
+  # deleted in a later commit is still published.
+  gitleaks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location -O "$base/$archive"
+          curl --fail --silent --show-error --location -O "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " $archive\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum --check
+          tar -xzf "$archive" gitleaks
+
+      # --redact keeps any secret it finds out of the report, which is uploaded.
+      - name: Scan history
+        run: >-
+          ./gitleaks git --redact --no-banner
+          --report-format sarif --report-path gitleaks.sarif --exit-code 0
+
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+  # Code patterns beyond bandit's: the Python, the extension's JavaScript and
+  # the Dockerfile. Explicit rulesets rather than `--config auto`, which
+  # requires sending usage metrics to Semgrep.
+  semgrep:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      - name: Scan code
+        run: >-
+          uvx semgrep scan --metrics=off
+          --config p/python --config p/javascript --config p/dockerfile
+          --sarif --output semgrep.sarif
+
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # npm audit has no SARIF output, so it reports to the run's summary. It reads
+  # the lockfile, so nothing is installed.
+  npm-audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Audit extension dependencies
+        run: |
+          {
+            echo '## npm audit (extension)'
+            echo '```'
+            npm audit || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
