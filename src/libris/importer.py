@@ -11,6 +11,7 @@ from .markdown import (
     FrontmatterUnreadable,
     NoteNameTaken,
     NoteWriteFailed,
+    TemplateSyntaxInMetadata,
     create_book_note,
     list_books,
     set_frontmatter_fields,
@@ -316,7 +317,11 @@ def run_import(
                         status=book.status,
                         overrides=overrides,
                     )
-                except (NoteNameTaken, NoteWriteFailed) as exc:
+                except (
+                    NoteNameTaken,
+                    NoteWriteFailed,
+                    TemplateSyntaxInMetadata,
+                ) as exc:
                     # Their messages say what happened and what to do.
                     result.uncreated_books.append((book, str(exc)))
                     continue

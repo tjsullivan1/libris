@@ -18,6 +18,8 @@ from .note_format import (
     DISTINCT_FROM_FIELD,
     MODELLED_FIELDS,
     SUPERSEDED_IDS_FIELD,
+    TemplateSyntaxInMetadata,
+    carries_template_syntax,
     dump_frontmatter_yaml,
     has_description_callout,
     mint_libris_id,
@@ -282,6 +284,28 @@ def standardize_title(raw: Optional[str]) -> Optional[str]:
     return title
 
 
+def refuse_template_syntax(book: BookCandidate) -> None:
+    """Refuse a candidate whose metadata would put template syntax in a note.
+
+    The description is not checked: it goes to the body, where it is escaped
+    instead (`escape_template_syntax`). Every other text field goes to the
+    frontmatter, or the filename and heading, where it cannot be (#231).
+
+    Args:
+        book: The candidate about to be written, or queued to be.
+
+    Raises:
+        TemplateSyntaxInMetadata: If any such field contains `<%`.
+    """
+    for name in _BOOK_TO_FRONTMATTER:
+        if name != "description" and carries_template_syntax(getattr(book, name)):
+            raise TemplateSyntaxInMetadata(
+                f"The book's {name.replace('_', ' ')} contains template syntax "
+                "('<%'), which a note-taking plugin could run as code, so it was "
+                "not added. Choose another edition."
+            )
+
+
 def create_book_note(
     book: BookCandidate,
     vault_path: Path,
@@ -307,7 +331,10 @@ def create_book_note(
 
     Raises:
         NoteNameTaken: If a file already has the note's name. Nothing is written.
+        TemplateSyntaxInMetadata: If the book's metadata carries template
+            syntax. Nothing is written.
     """
+    refuse_template_syntax(book)
     filename = sanitize_filename(f"{book.title} - {', '.join(book.authors[:1])}.md")
     file_path = vault_path / filename
 
@@ -1468,6 +1495,10 @@ def update_frontmatter_from_book(file_path: Path, book: BookCandidate) -> bool:
         if fm_field is None:
             continue
         value = getattr(book, book_field, None)
+        # Skipped rather than refused: enrichment only fills what is empty, and
+        # one bad field must not stop a run over the whole Shelf (#231).
+        if carries_template_syntax(value):
+            continue
         if value is not None and data.get(fm_field) is None:
             data[fm_field] = value
             updated = True

@@ -29,6 +29,7 @@ from .markdown import (
     edit_note,
     list_books,
     note_fingerprint,
+    refuse_template_syntax,
     set_frontmatter_fields,
     split_frontmatter,
     unterminated_frontmatter,
@@ -804,6 +805,9 @@ def queue_add(
             place for.
     """
     fields = _checked_overrides(overrides or {})
+    # Refused now, while someone is there to choose another edition, rather
+    # than rejected by sync later. Sync's write refuses it too (#231).
+    refuse_template_syntax(candidate)
     existing = find_existing(
         store,
         isbn=candidate.isbn,
