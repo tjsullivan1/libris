@@ -28,7 +28,11 @@ provider "azurerm" {
   resource_providers_to_register = [
     "Microsoft.App",
     "Microsoft.ContainerRegistry",
+    # The budget (#179).
+    "Microsoft.Consumption",
     "Microsoft.DocumentDB",
+    # Application Insights (#179).
+    "Microsoft.Insights",
     "Microsoft.KeyVault",
     "Microsoft.ManagedIdentity",
     "Microsoft.OperationalInsights",
